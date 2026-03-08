@@ -1,0 +1,10 @@
+{
+  "name": "kml-kakao-map-deploy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deployment copy of the KML Kakao Map editor",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

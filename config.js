@@ -1,0 +1,3 @@
+window.KAKAO_MAP_CONFIG = {
+  appKey: "9ca4302f678b187547610066c2637732",
+};
