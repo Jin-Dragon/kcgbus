@@ -188,6 +188,16 @@ http
       return;
     }
 
+    if (req.method === "GET" && req.url === "/health") {
+      sendJson(res, 200, {
+        ok: true,
+        port: PORT,
+        openAiConfigured: Boolean(OPENAI_API_KEY),
+        kakaoMobilityConfigured: Boolean(KAKAO_MOBILITY_REST_API_KEY),
+      });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/save-kml") {
       readRequestBody(req)
         .then((rawBody) => {

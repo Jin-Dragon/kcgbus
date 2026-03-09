@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   const CUSTOM_POINTS_KEY = "kml-kakao-map.custom-points";
   const CUSTOM_PATHS_KEY = "kml-kakao-map.custom-paths";
   const OVERRIDES_KEY = "kml-kakao-map.point-overrides";
@@ -12,6 +12,7 @@
   const TEMP_NEW_ROUTE_NAME = "__temp_new_route__";
   const DEFAULT_ROUTE_NAME = "기본 노선";
   const AUTO_SAVE_FILENAME = "autosaved-map.kml";
+  const OPTIMIZATION_FEATURE_ENABLED = false;
 
   const config = window.KAKAO_MAP_CONFIG || {};
   const dropzone = document.getElementById("dropzone");
@@ -23,6 +24,7 @@
   const saveKmlButtonEl = document.getElementById("save-kml-button");
   const saveResetButtonEl = document.getElementById("save-reset-button");
   const analyzeRoutesButtonEl = document.getElementById("analyze-routes-button");
+  const optimizeRoutesButtonEl = document.getElementById("optimize-routes-button");
   const showAllRoutesButtonEl = document.getElementById("show-all-routes-button");
   const hideAllRoutesButtonEl = document.getElementById("hide-all-routes-button");
   const routeListEl = document.getElementById("route-list");
@@ -83,6 +85,7 @@
   let selectedRouteName = null;
   let selectedPointId = null;
   let selectedPathId = null;
+  let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
 
   let markers = [];
@@ -100,6 +103,8 @@
   let analysisInfoWindows = [];
   let designedRouteInfoWindows = [];
   let latestAnalysisReport = null;
+  let latestOptimizationPlan = null;
+  let analysisActive = false;
 
   let uploadedPoints = loadJsonArray(UPLOADED_POINTS_KEY);
   let uploadedPaths = loadJsonArray(UPLOADED_PATHS_KEY);
@@ -117,6 +122,32 @@
   function setStatus(message, isError) {
     statusEl.textContent = message;
     statusEl.classList.toggle("error", Boolean(isError));
+  }
+
+  function syncOptimizationFeatureVisibility() {
+    if (!optimizeRoutesButtonEl) {
+      return;
+    }
+    optimizeRoutesButtonEl.hidden = !OPTIMIZATION_FEATURE_ENABLED;
+    optimizeRoutesButtonEl.setAttribute("aria-hidden", OPTIMIZATION_FEATURE_ENABLED ? "false" : "true");
+    optimizeRoutesButtonEl.disabled = !OPTIMIZATION_FEATURE_ENABLED;
+  }
+
+  function syncStatLabels() {
+    const statLabels = document.querySelectorAll(".stats .stat-label");
+    if (statLabels[0]) {
+      statLabels[0].textContent = "노선수";
+    }
+    if (statLabels[1]) {
+      statLabels[1].textContent = "정류장";
+    }
+  }
+
+  function updateAnalyzeButtonState() {
+    if (!analyzeRoutesButtonEl) {
+      return;
+    }
+    analyzeRoutesButtonEl.textContent = analysisActive ? "분석 종료" : "분석 시작";
   }
 
   function updatePointModeButtons() {
@@ -157,7 +188,7 @@
 
   function setEmptyDetails() {
     pointDetailsEl.classList.add("empty");
-    pointDetailsEl.innerHTML = '<p class="details-empty">노선과 포인트를 선택하세요.</p>';
+    pointDetailsEl.innerHTML = '<p class="details-empty">노선과 정류장을 선택하세요.</p>';
   }
 
   function loadJsonArray(key) {
@@ -423,6 +454,12 @@
     const routes = getRoutes();
     if (!routes.length) {
       selectedRouteName = null;
+      hasClearedSelection = false;
+      return;
+    }
+
+    if (hasClearedSelection) {
+      selectedRouteName = null;
       return;
     }
 
@@ -444,6 +481,7 @@
   }
 
   function updateCounts() {
+    fileCountEl.textContent = String(getRoutes().length);
     pointCountEl.textContent = String(getAllPoints().length);
   }
 
@@ -497,6 +535,19 @@
     return totalDurationSeconds > 0 ? `${formatDurationMinutes(totalDurationSeconds)}분` : "-";
   }
 
+  function getDuplicateGroupVisual(groupSize) {
+    if (groupSize >= 5) {
+      return { stroke: "#dc2626", fill: "#fecaca" };
+    }
+    if (groupSize === 4) {
+      return { stroke: "#2563eb", fill: "#bfdbfe" };
+    }
+    if (groupSize === 3) {
+      return { stroke: "#16a34a", fill: "#bbf7d0" };
+    }
+    return { stroke: "#eab308", fill: "#fef08a" };
+  }
+
   function averagePoint(points) {
     if (!points.length) {
       return { lat: 0, lng: 0 };
@@ -518,6 +569,76 @@
 
   function segmentLengthMeters(start, end) {
     return distanceInMeters(start, end);
+  }
+
+  function projectCoordinateForDistance(coordinate, originLat) {
+    const latFactor = 111320;
+    const lngFactor = Math.cos(toRadians(originLat || coordinate.lat || 0)) * 111320;
+    return {
+      x: Number(coordinate.lng) * lngFactor,
+      y: Number(coordinate.lat) * latFactor,
+    };
+  }
+
+  function pointToSegmentMetrics(point, start, end) {
+    const projectedPoint = projectCoordinateForDistance(point, point.lat);
+    const projectedStart = projectCoordinateForDistance(start, point.lat);
+    const projectedEnd = projectCoordinateForDistance(end, point.lat);
+    const dx = projectedEnd.x - projectedStart.x;
+    const dy = projectedEnd.y - projectedStart.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared === 0
+      ? 0
+      : Math.max(
+          0,
+          Math.min(
+            1,
+            ((projectedPoint.x - projectedStart.x) * dx + (projectedPoint.y - projectedStart.y) * dy) / lengthSquared
+          )
+        );
+    const nearest = {
+      x: projectedStart.x + dx * t,
+      y: projectedStart.y + dy * t,
+    };
+    const offsetX = projectedPoint.x - nearest.x;
+    const offsetY = projectedPoint.y - nearest.y;
+    const cross = dx * (projectedPoint.y - projectedStart.y) - dy * (projectedPoint.x - projectedStart.x);
+    return {
+      distanceMeters: Math.sqrt(offsetX * offsetX + offsetY * offsetY),
+      cross,
+      t,
+    };
+  }
+
+  function inferPointTravelSide(point) {
+    const candidatePaths = getAllPaths().filter(
+      (pathItem) => pathItem.routeName === point.routeName && Array.isArray(pathItem.coordinates) && pathItem.coordinates.length >= 2
+    );
+    let bestMatch = null;
+
+    candidatePaths.forEach((pathItem) => {
+      for (let index = 0; index < pathItem.coordinates.length - 1; index += 1) {
+        const start = pathItem.coordinates[index];
+        const end = pathItem.coordinates[index + 1];
+        const metrics = pointToSegmentMetrics(point, start, end);
+        if (!bestMatch || metrics.distanceMeters < bestMatch.distanceMeters) {
+          bestMatch = {
+            ...metrics,
+            routeName: pathItem.routeName,
+          };
+        }
+      }
+    });
+
+    if (!bestMatch || bestMatch.distanceMeters > 80) {
+      return "unknown";
+    }
+
+    if (Math.abs(bestMatch.cross) < 1) {
+      return "unknown";
+    }
+
+    return bestMatch.cross < 0 ? "right" : "left";
   }
 
   function interpolateCoordinate(start, end, ratio) {
@@ -721,6 +842,1582 @@
       duplicatePoints,
       overlappingSegments,
     };
+  }
+
+  function chooseCanonicalStopName(points) {
+    const counts = new Map();
+    points.forEach((point) => {
+      const name = String(point.name || "Unnamed Stop").trim() || "Unnamed Stop";
+      counts.set(name, (counts.get(name) || 0) + 1);
+    });
+
+    return [...counts.entries()]
+      .sort((a, b) => {
+        if (b[1] !== a[1]) {
+          return b[1] - a[1];
+        }
+        if (a[0].length !== b[0].length) {
+          return a[0].length - b[0].length;
+        }
+        return a[0].localeCompare(b[0], "ko");
+      })[0]?.[0] || "Unnamed Stop";
+  }
+
+  function buildOptimizedStops() {
+    const allPoints = getAllPoints();
+    const duplicateGroups = detectDuplicatePoints(30);
+    const stopMap = new Map();
+    const pointToStopId = new Map();
+
+    duplicateGroups.forEach((group, index) => {
+      const stopId = `optimized-group-${index + 1}`;
+      stopMap.set(stopId, {
+        id: stopId,
+        name: chooseCanonicalStopName(group.points),
+        lat: group.center.lat,
+        lng: group.center.lng,
+        sourceRoutes: [...new Set(group.points.map((point) => point.routeName))].sort((a, b) => a.localeCompare(b, "ko")),
+        memberPoints: group.points.map((point) => ({
+          id: point.id,
+          routeName: point.routeName,
+          name: point.name,
+          lat: point.lat,
+          lng: point.lng,
+        })),
+        duplicate: true,
+      });
+      group.points.forEach((point) => pointToStopId.set(point.id, stopId));
+    });
+
+    allPoints.forEach((point) => {
+      if (pointToStopId.has(point.id)) {
+        return;
+      }
+      const stopId = `optimized-solo-${point.id}`;
+      stopMap.set(stopId, {
+        id: stopId,
+        name: point.name,
+        lat: point.lat,
+        lng: point.lng,
+        sourceRoutes: [point.routeName],
+        memberPoints: [{ id: point.id, routeName: point.routeName, name: point.name, lat: point.lat, lng: point.lng }],
+        duplicate: false,
+      });
+      pointToStopId.set(point.id, stopId);
+    });
+
+    return {
+      duplicateGroups,
+      pointToStopId,
+      stops: [...stopMap.values()],
+    };
+  }
+
+  function hasKeyword(text, keywords) {
+    const normalized = String(text || "").toLowerCase();
+    return keywords.some((keyword) => normalized.includes(keyword));
+  }
+
+  function classifyStopRole(stop) {
+    const name = String(stop.name || "");
+    return {
+      isResidential: hasKeyword(name, ["아파트", "apt", "주공", "힐스", "푸르지오", "자이", "e편한", "주택", "마을", "단지"]),
+      isTransitHub: hasKeyword(name, ["역", "station", "환승", "지하철", "subway"]),
+      isImportantFacility: hasKeyword(name, ["주민센터", "행정복지센터", "구청", "시청", "군청", "도청", "복지관", "보건소", "병원", "학교", "도서관", "공원", "터미널"]),
+    };
+  }
+
+  function estimatePopulationFromAddressText(text) {
+    const normalized = String(text || "").toLowerCase();
+    let households = 0;
+
+    if (hasKeyword(normalized, ["아파트", "주공", "푸르지오", "자이", "래미안", "힐스", "e편한", "단지"])) {
+      households += 180;
+    }
+    if (hasKeyword(normalized, ["오피스텔", "주상복합"])) {
+      households += 90;
+    }
+    if (hasKeyword(normalized, ["빌라", "연립", "다세대", "주택"])) {
+      households += 45;
+    }
+    if (hasKeyword(normalized, ["마을", "주거", "타운"])) {
+      households += 30;
+    }
+    if (hasKeyword(normalized, ["학교", "병원", "복지관", "주민센터", "구청", "시청"])) {
+      households += 25;
+    }
+
+    if (!households && normalized.trim()) {
+      households = 18;
+    }
+
+    return households;
+  }
+
+  function estimatePointPopulation(point, radiusMeters = 100) {
+    const nearbyPoints = getAllPoints().filter(
+      (candidate) => candidate.id !== point.id && distanceInMeters(point, candidate) <= radiusMeters
+    );
+    const addressScore = estimatePopulationFromAddressText(`${point.address} ${point.name}`);
+    const nearbyHouseholds = nearbyPoints.reduce(
+      (sum, candidate) => sum + estimatePopulationFromAddressText(`${candidate.address} ${candidate.name}`),
+      0
+    );
+    const residentialNearbyCount = nearbyPoints.filter((candidate) =>
+      hasKeyword(`${candidate.address} ${candidate.name}`, ["아파트", "주공", "푸르지오", "자이", "래미안", "힐스", "e편한", "주택", "빌라", "연립", "다세대", "단지", "마을"])
+    ).length;
+
+    const estimatedHouseholds = Math.max(10, Math.round(addressScore + nearbyHouseholds * 0.6 + nearbyPoints.length * 8));
+    const estimatedPopulation = Math.round(estimatedHouseholds * 2.2);
+
+    return {
+      radiusMeters,
+      nearbyStopCount: nearbyPoints.length,
+      residentialNearbyCount,
+      estimatedHouseholds,
+      estimatedPopulation,
+      basisText: `반경 ${radiusMeters}m 내 주변 정류장 ${nearbyPoints.length}개와 주소 키워드를 기준으로 추정`,
+    };
+  }
+
+  function buildRouteSequencesFromStops(routes, pointToStopId) {
+    return routes
+      .map((routeName) => ({
+        routeName,
+        stopIds: getAllPoints()
+          .filter((point) => point.routeName === routeName)
+          .sort(comparePointsByOrder)
+          .map((point) => pointToStopId.get(point.id))
+          .filter(Boolean)
+          .filter((stopId, index, list) => stopId !== list[index - 1]),
+      }))
+      .filter((sequence) => sequence.stopIds.length);
+  }
+
+  function enrichOptimizedStops(stops, routeSequences) {
+    const routeOrderByStopId = new Map();
+    routeSequences.forEach((sequence) => {
+      sequence.stopIds.forEach((stopId, index) => {
+        if (!routeOrderByStopId.has(stopId)) {
+          routeOrderByStopId.set(stopId, []);
+        }
+        routeOrderByStopId.get(stopId).push({ routeName: sequence.routeName, order: index });
+      });
+    });
+
+    return stops.map((stop) => {
+      const role = classifyStopRole(stop);
+      const sideCounts = stop.memberPoints.reduce(
+        (acc, point) => {
+          const side = inferPointTravelSide(point);
+          if (side === "right") {
+            acc.right += 1;
+          } else if (side === "left") {
+            acc.left += 1;
+          } else {
+            acc.unknown += 1;
+          }
+          return acc;
+        },
+        { right: 0, left: 0, unknown: 0 }
+      );
+      const preferredTravelSide =
+        sideCounts.right > sideCounts.left ? "right" : sideCounts.left > sideCounts.right ? "left" : "unknown";
+      return {
+        ...stop,
+        ...role,
+        routeOrders: routeOrderByStopId.get(stop.id) || [],
+        sideCounts,
+        preferredTravelSide,
+        importanceScore:
+          Number(role.isTransitHub) * 10 +
+          Number(role.isImportantFacility) * 7 +
+          Number(role.isResidential) * 5 +
+          stop.memberPoints.length * 2 +
+          stop.sourceRoutes.length,
+      };
+    });
+  }
+
+  function estimateLoopDistanceMeters(stops) {
+    if (!Array.isArray(stops) || stops.length < 2) {
+      return 0;
+    }
+    let total = 0;
+    for (let index = 0; index < stops.length - 1; index += 1) {
+      total += distanceInMeters(stops[index], stops[index + 1]);
+    }
+    total += distanceInMeters(stops[stops.length - 1], stops[0]);
+    return total;
+  }
+
+  function estimateLoopDurationSeconds(distanceMeters, stopCount) {
+    const averageBusSpeedMetersPerSecond = 18000 / 3600;
+    return Math.round(distanceMeters / averageBusSpeedMetersPerSecond + stopCount * 25);
+  }
+
+  function getRouteUniqueStops(route) {
+    if (!route || !Array.isArray(route.stops)) {
+      return [];
+    }
+    if (route.stops.length > 1 && route.stops[0].id === route.stops[route.stops.length - 1].id) {
+      return route.stops.slice(0, -1);
+    }
+    return route.stops.slice();
+  }
+
+  function angleFromHub(hubStop, stop) {
+    return Math.atan2(stop.lat - hubStop.lat, stop.lng - hubStop.lng);
+  }
+
+  function sortStopsForSimpleLoop(hubStop, stops, direction = "clockwise") {
+    const sorted = stops
+      .filter((stop) => stop.id !== hubStop.id)
+      .slice()
+      .sort((a, b) => {
+        const angleDiff = angleFromHub(hubStop, a) - angleFromHub(hubStop, b);
+        if (angleDiff !== 0) {
+          return angleDiff;
+        }
+        return distanceInMeters(hubStop, a) - distanceInMeters(hubStop, b);
+      });
+    return direction === "counterclockwise" ? sorted.reverse() : sorted;
+  }
+
+  function normalizeLoopStopSequence(stops) {
+    const deduped = [];
+    stops.forEach((stop) => {
+      const last = deduped[deduped.length - 1];
+      if (!last || last.id !== stop.id) {
+        deduped.push(stop);
+      }
+    });
+    if (deduped.length > 1 && deduped[0].id !== deduped[deduped.length - 1].id) {
+      deduped.push(deduped[0]);
+    }
+    return deduped;
+  }
+
+  function orderRouteStopsForLoop(hubStop, candidateStops, direction = "clockwise") {
+    const uniqueById = new Map();
+    candidateStops.forEach((stop) => {
+      if (stop.id !== hubStop.id && !uniqueById.has(stop.id)) {
+        uniqueById.set(stop.id, stop);
+      }
+    });
+    return normalizeLoopStopSequence([hubStop, ...sortStopsForSimpleLoop(hubStop, [...uniqueById.values()], direction)]);
+  }
+
+  function choosePrimaryTransferHubs(stops, desiredHubCount = 3) {
+    const candidates = stops
+      .filter((stop) => stop.isTransitHub || stop.isImportantFacility)
+      .sort((a, b) => {
+        const transitDiff = Number(b.isTransitHub) - Number(a.isTransitHub);
+        if (transitDiff !== 0) {
+          return transitDiff;
+        }
+        const routeDiff = b.sourceRoutes.length - a.sourceRoutes.length;
+        if (routeDiff !== 0) {
+          return routeDiff;
+        }
+        return b.importanceScore - a.importanceScore;
+      });
+
+    const picked = [];
+    const minHubDistanceMeters = 1200;
+    candidates.forEach((candidate) => {
+      if (picked.length >= desiredHubCount) {
+        return;
+      }
+      const tooClose = picked.some((pickedHub) => distanceInMeters(candidate, pickedHub) < minHubDistanceMeters);
+      if (!tooClose) {
+        picked.push(candidate);
+      }
+    });
+
+    if (picked.length >= 2) {
+      return picked;
+    }
+
+    const fallback = stops
+      .slice()
+      .sort((a, b) => b.importanceScore - a.importanceScore)
+      .filter((candidate) => !picked.some((pickedHub) => pickedHub.id === candidate.id));
+
+    fallback.forEach((candidate) => {
+      if (picked.length >= Math.max(2, Math.min(desiredHubCount, 4))) {
+        return;
+      }
+      const tooClose = picked.some((pickedHub) => distanceInMeters(candidate, pickedHub) < 900);
+      if (!tooClose) {
+        picked.push(candidate);
+      }
+    });
+
+    return picked.length ? picked : stops.slice().sort((a, b) => b.importanceScore - a.importanceScore).slice(0, 1);
+  }
+
+  function assignStopsToTransferHubs(stops, hubs) {
+    const assignments = new Map(hubs.map((hub) => [hub.id, []]));
+    stops.forEach((stop) => {
+      let selectedHub = hubs[0];
+      let bestScore = Number.POSITIVE_INFINITY;
+      hubs.forEach((hub) => {
+        const distance = distanceInMeters(stop, hub);
+        const routePenalty = stop.sourceRoutes.some((routeName) => hub.sourceRoutes.includes(routeName)) ? -500 : 0;
+        const score = distance + routePenalty;
+        if (score < bestScore) {
+          bestScore = score;
+          selectedHub = hub;
+        }
+      });
+      assignments.get(selectedHub.id).push(stop);
+    });
+    return assignments;
+  }
+
+  function canRouteMeetConstraints(stops, constraints = {}) {
+    const {
+      maxDistanceMeters = 9800,
+      maxDurationSeconds = 3000,
+      minUniqueStops = 3,
+      maxUniqueStops = 9,
+    } = constraints;
+    const normalizedStops = normalizeLoopStopSequence(stops);
+    const uniqueStops = normalizedStops.slice(0, -1);
+    if (uniqueStops.length < minUniqueStops || uniqueStops.length > maxUniqueStops) {
+      return false;
+    }
+    const distanceMeters = estimateLoopDistanceMeters(normalizedStops);
+    const durationSeconds = estimateLoopDurationSeconds(distanceMeters, uniqueStops.length);
+    return (
+      distanceMeters <= maxDistanceMeters &&
+      durationSeconds <= maxDurationSeconds &&
+      hasValidStopSpacing(normalizedStops)
+    );
+  }
+
+  function getConsecutiveStopDistances(stops) {
+    if (!Array.isArray(stops) || stops.length < 2) {
+      return [];
+    }
+
+    const distances = [];
+    for (let index = 0; index < stops.length - 1; index += 1) {
+      distances.push(distanceInMeters(stops[index], stops[index + 1]));
+    }
+    return distances;
+  }
+
+  function hasValidStopSpacing(stops, minMeters = 100, maxMeters = 300) {
+    const distances = getConsecutiveStopDistances(stops);
+    if (!distances.length) {
+      return false;
+    }
+    return distances.every((distance) => distance >= minMeters && distance <= maxMeters);
+  }
+
+  function createOptimizedRouteRecord(routeNamePrefix, routeIndex, hubStop, stops, direction = "clockwise", serviceSide = "right") {
+    const normalizedStops = normalizeLoopStopSequence(stops);
+    return {
+      id: `optimized-route-${routeIndex}`,
+      routeName: `${routeNamePrefix}${routeIndex}`,
+      hubStopId: hubStop.id,
+      hubStopName: hubStop.name,
+      transferStopIds: [hubStop.id],
+      circulationDirection: direction,
+      serviceSide,
+      stops: normalizedStops,
+      stopIds: normalizedStops.map((stop) => stop.id),
+    };
+  }
+
+  function splitStopsByTravelSide(hubStop, assignedStops) {
+    const buckets = {
+      right: [],
+      left: [],
+      unknown: [],
+    };
+    assignedStops.forEach((stop) => {
+      if (stop.id === hubStop.id) {
+        return;
+      }
+      const side = stop.preferredTravelSide || "unknown";
+      if (side === "left") {
+        buckets.left.push(stop);
+      } else if (side === "right") {
+        buckets.right.push(stop);
+      } else {
+        buckets.unknown.push(stop);
+      }
+    });
+
+    const targetBucket = buckets.right.length >= buckets.left.length ? "right" : "left";
+    if (buckets.unknown.length) {
+      buckets[targetBucket].push(...buckets.unknown);
+    }
+
+    return [
+      { serviceSide: "right", direction: "clockwise", stops: buckets.right },
+      { serviceSide: "left", direction: "counterclockwise", stops: buckets.left },
+    ].filter((item) => item.stops.length);
+  }
+
+  function rebalanceSmallRouteGroups(groups, minGroupSize) {
+    if (groups.length <= 1) {
+      return groups;
+    }
+
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      if (groups[index].length >= minGroupSize) {
+        continue;
+      }
+
+      if (index > 0) {
+        groups[index - 1].push(...groups[index]);
+      } else if (groups[index + 1]) {
+        groups[index + 1] = [...groups[index], ...groups[index + 1]];
+      }
+      groups.splice(index, 1);
+    }
+
+    return groups;
+  }
+
+  function buildLoopRoutesForHub(hubStop, assignedStops, routeNamePrefix, startingIndex) {
+    const routeConstraints = {
+      maxDistanceMeters: 9800,
+      maxDurationSeconds: 3000,
+      minUniqueStops: 3,
+      maxUniqueStops: 9,
+    };
+    const routes = [];
+    let routeIndex = startingIndex;
+    const sideGroups = splitStopsByTravelSide(hubStop, assignedStops);
+
+    sideGroups.forEach(({ serviceSide, direction, stops }) => {
+      const pool = sortStopsForSimpleLoop(hubStop, stops, direction);
+      if (pool.length <= routeConstraints.minUniqueStops - 1) {
+        routes.push(createOptimizedRouteRecord(routeNamePrefix, routeIndex, hubStop, [hubStop, ...pool], direction, serviceSide));
+        routeIndex += 1;
+        return;
+      }
+
+      const groups = [];
+      let currentGroup = [];
+      pool.forEach((candidate) => {
+        if (currentGroup.length) {
+          const previousStop = currentGroup[currentGroup.length - 1];
+          const spacing = distanceInMeters(previousStop, candidate);
+          if (spacing < 100) {
+            return;
+          }
+          if (spacing > 300 && currentGroup.length >= routeConstraints.minUniqueStops - 1) {
+            groups.push(currentGroup);
+            currentGroup = [candidate];
+            return;
+          }
+        }
+
+        const proposedGroup = [...currentGroup, candidate];
+        const proposedStops = orderRouteStopsForLoop(hubStop, proposedGroup, direction);
+        if (canRouteMeetConstraints(proposedStops, routeConstraints)) {
+          currentGroup = proposedGroup;
+          return;
+        }
+
+        if (currentGroup.length) {
+          groups.push(currentGroup);
+          currentGroup = [candidate];
+        } else {
+          groups.push([candidate]);
+        }
+      });
+      if (currentGroup.length) {
+        groups.push(currentGroup);
+      }
+
+      rebalanceSmallRouteGroups(groups, routeConstraints.minUniqueStops - 1);
+
+      groups.forEach((group) => {
+        if (!group.length) {
+          return;
+        }
+        routes.push(createOptimizedRouteRecord(routeNamePrefix, routeIndex, hubStop, [hubStop, ...group], direction, serviceSide));
+        routeIndex += 1;
+      });
+    });
+
+    return {
+      routes,
+      nextRouteIndex: routeIndex,
+    };
+  }
+
+  function absorbUncoveredStopsIntoRoutes(routes, uncoveredStops, hubStop) {
+    uncoveredStops.forEach((stop) => {
+      let bestRoute = null;
+      let bestScore = Number.POSITIVE_INFINITY;
+      routes.forEach((route) => {
+        if (
+          stop.preferredTravelSide &&
+          stop.preferredTravelSide !== "unknown" &&
+          route.serviceSide &&
+          route.serviceSide !== stop.preferredTravelSide
+        ) {
+          return;
+        }
+        const candidateUniqueStops = [...getRouteUniqueStops(route), stop];
+        const candidateStops = orderRouteStopsForLoop(hubStop, candidateUniqueStops, route.circulationDirection);
+        const distanceMeters = estimateLoopDistanceMeters(candidateStops);
+        const durationSeconds = estimateLoopDurationSeconds(distanceMeters, candidateUniqueStops.length);
+        if (distanceMeters > 9800 || durationSeconds > 3000 || candidateUniqueStops.length > 9) {
+          return;
+        }
+        const score = distanceMeters + durationSeconds / 4;
+        if (score < bestScore) {
+          bestScore = score;
+          bestRoute = route;
+        }
+      });
+
+      if (bestRoute) {
+        const nextStops = orderRouteStopsForLoop(
+          hubStop,
+          [...getRouteUniqueStops(bestRoute), stop],
+          bestRoute.circulationDirection
+        );
+        bestRoute.stops = nextStops;
+        bestRoute.stopIds = nextStops.map((item) => item.id);
+      }
+    });
+  }
+
+  function splitRouteIntoSimpleLoops(route, maxSegments = 2) {
+    const uniqueStops = getRouteUniqueStops(route);
+    if (uniqueStops.length <= 4) {
+      return [route];
+    }
+
+    const [hubStop, ...others] = uniqueStops;
+    const sorted = sortStopsForSimpleLoop(hubStop, others, route.circulationDirection);
+    const chunkSize = Math.max(2, Math.ceil(sorted.length / Math.max(2, maxSegments)));
+    const chunks = [];
+    for (let index = 0; index < sorted.length; index += chunkSize) {
+      chunks.push(sorted.slice(index, index + chunkSize));
+    }
+    rebalanceSmallRouteGroups(chunks, 2);
+
+    return chunks
+      .filter((chunk) => chunk.length)
+      .map((chunk) => ({
+        ...route,
+        stops: orderRouteStopsForLoop(hubStop, [hubStop, ...chunk], route.circulationDirection),
+        stopIds: orderRouteStopsForLoop(hubStop, [hubStop, ...chunk], route.circulationDirection).map((stop) => stop.id),
+      }));
+  }
+
+  function mergeRoutePair(leftRoute, rightRoute) {
+    const leftUniqueStops = getRouteUniqueStops(leftRoute);
+    const rightUniqueStops = getRouteUniqueStops(rightRoute);
+    const hubStop = leftUniqueStops[0] || rightUniqueStops[0];
+    if (!hubStop) {
+      return leftRoute;
+    }
+
+    const mergedStops = orderRouteStopsForLoop(hubStop, [...leftUniqueStops, ...rightUniqueStops]);
+    return {
+      ...leftRoute,
+      hubStopId: hubStop.id,
+      hubStopName: hubStop.name,
+      transferStopIds: [...new Set([...(leftRoute.transferStopIds || []), ...(rightRoute.transferStopIds || []), hubStop.id])],
+      stops: mergedStops,
+      stopIds: mergedStops.map((stop) => stop.id),
+    };
+  }
+
+  function balanceOptimizedRouteCount(routes, minRoutes = 5, maxRoutes = 15) {
+    let workingRoutes = routes.slice();
+
+    while (workingRoutes.length < minRoutes) {
+      let splitIndex = -1;
+      let splitSize = 0;
+      workingRoutes.forEach((route, index) => {
+        const uniqueCount = getRouteUniqueStops(route).length;
+        if (uniqueCount > splitSize && uniqueCount >= 6) {
+          splitIndex = index;
+          splitSize = uniqueCount;
+        }
+      });
+
+      if (splitIndex === -1) {
+        break;
+      }
+
+      const routeToSplit = workingRoutes[splitIndex];
+      const currentUniqueCount = getRouteUniqueStops(routeToSplit).length;
+      const shortage = minRoutes - workingRoutes.length;
+      const targetSegments = Math.min(
+        Math.max(2, shortage + 1),
+        Math.max(2, Math.floor(currentUniqueCount / 2))
+      );
+      const splitRoutes = splitRouteIntoSimpleLoops(routeToSplit, targetSegments);
+      if (splitRoutes.length <= 1) {
+        break;
+      }
+      workingRoutes.splice(splitIndex, 1, ...splitRoutes);
+    }
+
+    while (workingRoutes.length > maxRoutes) {
+      let mergeIndex = -1;
+      let mergeScore = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < workingRoutes.length - 1; index += 1) {
+        const currentCount = getRouteUniqueStops(workingRoutes[index]).length;
+        const nextCount = getRouteUniqueStops(workingRoutes[index + 1]).length;
+        const score = currentCount + nextCount;
+        if (score < mergeScore) {
+          mergeScore = score;
+          mergeIndex = index;
+        }
+      }
+
+      if (mergeIndex === -1) {
+        break;
+      }
+
+      const merged = mergeRoutePair(workingRoutes[mergeIndex], workingRoutes[mergeIndex + 1]);
+      workingRoutes.splice(mergeIndex, 2, merged);
+    }
+
+    return workingRoutes;
+  }
+
+  function ensureSharedTransferStops(routes) {
+    const stopUsage = new Map();
+    routes.forEach((route) => {
+      (route.transferStopIds || []).forEach((stopId) => {
+        stopUsage.set(stopId, (stopUsage.get(stopId) || 0) + 1);
+      });
+    });
+
+    return routes.map((route) => {
+      const uniqueStops = getRouteUniqueStops(route);
+      const transferStops = uniqueStops.filter((stop) => stop.isTransitHub || stop.isImportantFacility);
+      let transferStopIds = transferStops
+        .map((stop) => stop.id)
+        .filter((stopId) => (stopUsage.get(stopId) || 0) > 1);
+
+      if (!transferStopIds.length) {
+        const fallbackStop = uniqueStops.find((stop) => stop.id === route.hubStopId) || uniqueStops[0];
+        transferStopIds = fallbackStop ? [fallbackStop.id] : [];
+      }
+
+      return {
+        ...route,
+        transferStopIds,
+      };
+    });
+  }
+
+  function hasSharedTransferStop(route, routes) {
+    return (route.transferStopIds || []).some((stopId) =>
+      routes.some((otherRoute) => otherRoute.id !== route.id && (otherRoute.transferStopIds || []).includes(stopId))
+    );
+  }
+
+  function buildReachabilityGraph(routes) {
+    const graph = new Map(routes.map((route) => [route.id, new Set()]));
+    for (let index = 0; index < routes.length; index += 1) {
+      for (let otherIndex = index + 1; otherIndex < routes.length; otherIndex += 1) {
+        const current = routes[index];
+        const other = routes[otherIndex];
+        const sharesTransfer = current.transferStopIds.some((stopId) => other.transferStopIds.includes(stopId));
+        if (sharesTransfer) {
+          graph.get(current.id).add(other.id);
+          graph.get(other.id).add(current.id);
+        }
+      }
+    }
+    return graph;
+  }
+
+  function calculateMaxTransfers(routes) {
+    if (routes.length <= 1) {
+      return 0;
+    }
+    const graph = buildReachabilityGraph(routes);
+    let maxTransfers = 0;
+    routes.forEach((route) => {
+      const queue = [{ routeId: route.id, depth: 0 }];
+      const visited = new Set([route.id]);
+      while (queue.length) {
+        const current = queue.shift();
+        maxTransfers = Math.max(maxTransfers, current.depth);
+        (graph.get(current.routeId) || []).forEach((neighborId) => {
+          if (!visited.has(neighborId)) {
+            visited.add(neighborId);
+            queue.push({ routeId: neighborId, depth: current.depth + 1 });
+          }
+        });
+      }
+    });
+    return maxTransfers;
+  }
+
+  function buildOptimizationPlan() {
+    const sourceRoutes = getRoutes();
+    const allPoints = getAllPoints();
+    if (allPoints.length < 2) {
+      throw new Error("최적화를 하려면 정류장이 2개 이상 필요합니다.");
+    }
+
+    const optimized = buildOptimizedStops();
+    const routeSequences = buildRouteSequencesFromStops(sourceRoutes, optimized.pointToStopId);
+    const enrichedStops = enrichOptimizedStops(optimized.stops, routeSequences);
+    const desiredHubCount = Math.max(2, Math.min(4, Math.round(enrichedStops.length / 18)));
+    const transferHubs = choosePrimaryTransferHubs(enrichedStops, desiredHubCount);
+    const hubAssignments = assignStopsToTransferHubs(enrichedStops, transferHubs);
+
+    const routes = [];
+    let routeIndex = 1;
+    transferHubs.forEach((hubStop) => {
+      const assignedStops = hubAssignments.get(hubStop.id) || [hubStop];
+      const built = buildLoopRoutesForHub(hubStop, assignedStops, "신규", routeIndex);
+      routes.push(...built.routes);
+      routeIndex = built.nextRouteIndex;
+    });
+
+    const balancedRoutes = balanceOptimizedRouteCount(routes, 5, 15);
+
+    const coveredStopIds = new Set(balancedRoutes.flatMap((route) => route.stopIds));
+    absorbUncoveredStopsIntoRoutes(
+      balancedRoutes,
+      enrichedStops.filter((stop) => !coveredStopIds.has(stop.id)),
+      transferHubs[0]
+    );
+    const transferReadyRoutes = ensureSharedTransferStops(balancedRoutes);
+
+    const summarizedRoutes = transferReadyRoutes.map((route) => {
+      const uniqueStops = getRouteUniqueStops(route);
+      const estimatedDistanceMeters = Number(estimateLoopDistanceMeters(route.stops).toFixed(1));
+      const estimatedDurationSeconds = estimateLoopDurationSeconds(estimatedDistanceMeters, uniqueStops.length);
+      return {
+        ...route,
+        uniqueStops,
+        estimatedDistanceMeters,
+        estimatedDurationSeconds,
+      };
+    });
+
+    return {
+      generatedAt: new Date().toISOString(),
+      sourceRoutes,
+      sourceRouteCount: sourceRoutes.length,
+      originalPointCount: allPoints.length,
+      optimizedStopCount: enrichedStops.length,
+      removedStopCount: Math.max(0, allPoints.length - enrichedStops.length),
+      duplicateGroupCount: optimized.duplicateGroups.length,
+      duplicateGroups: optimized.duplicateGroups,
+      transferHubs: transferHubs.map((hub) => ({
+        id: hub.id,
+        name: hub.name,
+        lat: hub.lat,
+        lng: hub.lng,
+        sourceRoutes: hub.sourceRoutes,
+      })),
+      routes: summarizedRoutes,
+      maxTransfers: calculateMaxTransfers(summarizedRoutes),
+      constraints: {
+        maxDistanceMeters: 12000,
+        maxDurationSeconds: 3600,
+        maxTransfers: 2,
+        minRoutes: 5,
+        maxRoutes: 15,
+        loopRequired: true,
+      },
+    };
+  }
+
+  function appendUniqueCoordinates(target, coordinates) {
+    coordinates.forEach((coordinate) => {
+      const normalized = {
+        lat: Number(coordinate.lat),
+        lng: Number(coordinate.lng),
+        altitude: null,
+      };
+      if (!Number.isFinite(normalized.lat) || !Number.isFinite(normalized.lng)) {
+        return;
+      }
+      const last = target[target.length - 1];
+      if (!last || last.lat !== normalized.lat || last.lng !== normalized.lng) {
+        target.push(normalized);
+      }
+    });
+  }
+
+  async function requestDesignedRouteInBatches(routeName, points, maxPointsPerRequest = 10) {
+    const allCoordinates = [];
+    let usedFallback = false;
+    let totalDistanceMeters = 0;
+    let totalDurationSeconds = 0;
+
+    if (points.length < 2) {
+      return {
+        coordinates: buildPointSequenceCoordinates(points),
+        usedFallback: true,
+        totalDistanceMeters,
+        totalDurationSeconds,
+      };
+    }
+
+    for (let startIndex = 0; startIndex < points.length - 1; ) {
+      const endIndex = Math.min(startIndex + maxPointsPerRequest - 1, points.length - 1);
+      const batchPoints = points.slice(startIndex, endIndex + 1);
+
+      try {
+        const result = await requestDesignedRoute(`${routeName}-${startIndex + 1}`, batchPoints);
+        const coordinates = extractDesignedRouteCoordinates(result);
+        const summary = extractDesignedRouteSummary(result);
+        if (coordinates.length < 2) {
+          throw new Error("Designed route did not return enough coordinates.");
+        }
+        appendUniqueCoordinates(allCoordinates, coordinates);
+        totalDistanceMeters += summary.totalDistanceMeters;
+        totalDurationSeconds += summary.totalDurationSeconds;
+      } catch (error) {
+        usedFallback = true;
+        appendUniqueCoordinates(allCoordinates, buildPointSequenceCoordinates(batchPoints));
+        totalDistanceMeters += batchPoints.slice(0, -1).reduce((sum, point, index) => sum + distanceInMeters(point, batchPoints[index + 1]), 0);
+      }
+
+      if (endIndex === points.length - 1) {
+        break;
+      }
+      startIndex = endIndex;
+    }
+
+    return {
+      coordinates: allCoordinates,
+      usedFallback,
+      totalDistanceMeters: Number(totalDistanceMeters.toFixed(1)),
+      totalDurationSeconds: Math.round(totalDurationSeconds),
+    };
+  }
+
+  function finalizeRouteMetrics(route) {
+    const uniqueStops = getRouteUniqueStops(route);
+    const estimatedDistanceMeters = Number(estimateLoopDistanceMeters(route.stops).toFixed(1));
+    const estimatedDurationSeconds = estimateLoopDurationSeconds(estimatedDistanceMeters, uniqueStops.length);
+    return {
+      ...route,
+      uniqueStops,
+      estimatedDistanceMeters,
+      estimatedDurationSeconds,
+    };
+  }
+
+  function coordinateKey(coordinate, precision = 4) {
+    return `${Number(coordinate.lat).toFixed(precision)},${Number(coordinate.lng).toFixed(precision)}`;
+  }
+
+  function routeStopOverlapRatio(leftRoute, rightRoute) {
+    const leftIds = new Set(getRouteUniqueStops(leftRoute).map((stop) => stop.id));
+    const rightIds = new Set(getRouteUniqueStops(rightRoute).map((stop) => stop.id));
+    if (!leftIds.size || !rightIds.size) {
+      return 0;
+    }
+    let sharedCount = 0;
+    leftIds.forEach((stopId) => {
+      if (rightIds.has(stopId)) {
+        sharedCount += 1;
+      }
+    });
+    return sharedCount / Math.min(leftIds.size, rightIds.size);
+  }
+
+  function routePathOverlapRatio(leftRoute, rightRoute) {
+    const leftCoordinates = Array.isArray(leftRoute.coordinates) ? leftRoute.coordinates : [];
+    const rightCoordinates = Array.isArray(rightRoute.coordinates) ? rightRoute.coordinates : [];
+    if (!leftCoordinates.length || !rightCoordinates.length) {
+      return 0;
+    }
+    const leftKeys = new Set(leftCoordinates.map((coordinate) => coordinateKey(coordinate)));
+    const rightKeys = new Set(rightCoordinates.map((coordinate) => coordinateKey(coordinate)));
+    let sharedCount = 0;
+    leftKeys.forEach((key) => {
+      if (rightKeys.has(key)) {
+        sharedCount += 1;
+      }
+    });
+    return sharedCount / Math.min(leftKeys.size, rightKeys.size);
+  }
+
+  function routeOverlapRatio(leftRoute, rightRoute) {
+    const stopOverlap = routeStopOverlapRatio(leftRoute, rightRoute);
+    const pathOverlap = routePathOverlapRatio(leftRoute, rightRoute);
+    return Math.max(stopOverlap, pathOverlap, (stopOverlap + pathOverlap) / 2);
+  }
+
+  function mergeHighlyOverlappingRoutes(routes, threshold = 0.3) {
+    const workingRoutes = routes.slice();
+    let mergedAny = true;
+
+    while (mergedAny) {
+      mergedAny = false;
+      outer: for (let index = 0; index < workingRoutes.length; index += 1) {
+        for (let otherIndex = index + 1; otherIndex < workingRoutes.length; otherIndex += 1) {
+          const current = workingRoutes[index];
+          const other = workingRoutes[otherIndex];
+          if (current.serviceSide !== other.serviceSide) {
+            continue;
+          }
+          const overlapRatio = routeOverlapRatio(current, other);
+          if (overlapRatio < threshold) {
+            continue;
+          }
+
+          const merged = finalizeRouteMetrics(mergeRoutePair(current, other));
+          workingRoutes.splice(otherIndex, 1);
+          workingRoutes.splice(index, 1, merged);
+          mergedAny = true;
+          break outer;
+        }
+      }
+    }
+
+    return workingRoutes;
+  }
+
+  function violatesFinalConstraints(route) {
+    const distanceMeters = Number(route.totalDistanceMeters || route.estimatedDistanceMeters || 0);
+    const durationSeconds = Number(route.totalDurationSeconds || route.estimatedDurationSeconds || 0);
+    const uniqueStopCount = getRouteUniqueStops(route).length;
+    return (
+      uniqueStopCount < 3 ||
+      distanceMeters > 12000 ||
+      durationSeconds > 3600 ||
+      !hasValidStopSpacing(route.stops) ||
+      !(route.transferStopIds || []).length ||
+      route.stops.length < 4 ||
+      route.stops[0]?.id !== route.stops[route.stops.length - 1]?.id
+    );
+  }
+
+  function evaluateRouteIssues(route, routes = []) {
+    const distanceMeters = Number(route.totalDistanceMeters || route.estimatedDistanceMeters || 0);
+    const durationSeconds = Number(route.totalDurationSeconds || route.estimatedDurationSeconds || 0);
+    const uniqueStopCount = getRouteUniqueStops(route).length;
+    const issues = [];
+
+    if (uniqueStopCount < 3) {
+      issues.push("정류장 수 부족");
+    }
+    if (distanceMeters > 12000) {
+      issues.push("총거리 12km 초과");
+    }
+    if (durationSeconds > 3600) {
+      issues.push("운행시간 60분 초과");
+    }
+    if (!hasValidStopSpacing(route.stops)) {
+      issues.push("정류장 간격 100~300m 위반");
+    }
+    if (!(route.transferStopIds || []).length) {
+      issues.push("환승 정류장 없음");
+    }
+    if (routes.length && !hasSharedTransferStop(route, routes)) {
+      issues.push("공유 환승 정류장 없음");
+    }
+    if (route.stops.length < 4) {
+      issues.push("순환 정류장 수 부족");
+    }
+    if (route.stops[0]?.id !== route.stops[route.stops.length - 1]?.id) {
+      issues.push("시작/종료 정류장 불일치");
+    }
+
+    return issues;
+  }
+
+  function renameOptimizedRoutes(routes, prefix = "신규") {
+    return routes.map((route, index) => ({
+      ...route,
+      id: `optimized-route-${index + 1}`,
+      routeName: `${prefix}${index + 1}`,
+    }));
+  }
+
+  async function materializeOptimizedRoutes(routes) {
+    const finalized = [];
+
+    for (const route of routes) {
+      const designedRoute = await requestDesignedRouteInBatches(route.routeName, route.stops);
+      let candidate = finalizeRouteMetrics({
+        ...route,
+        coordinates: designedRoute.coordinates,
+        usedFallback: designedRoute.usedFallback,
+        totalDistanceMeters: designedRoute.totalDistanceMeters,
+        totalDurationSeconds: designedRoute.totalDurationSeconds,
+      });
+
+      if (violatesFinalConstraints(candidate)) {
+        const splitRoutes = splitRouteIntoSimpleLoops(candidate, 2);
+        if (splitRoutes.length > 1) {
+          for (const splitRoute of splitRoutes) {
+            const splitDesignedRoute = await requestDesignedRouteInBatches(splitRoute.routeName, splitRoute.stops);
+            finalized.push(
+              finalizeRouteMetrics({
+                ...splitRoute,
+                coordinates: splitDesignedRoute.coordinates,
+                usedFallback: splitDesignedRoute.usedFallback,
+                totalDistanceMeters: splitDesignedRoute.totalDistanceMeters,
+                totalDurationSeconds: splitDesignedRoute.totalDurationSeconds,
+              })
+            );
+          }
+          continue;
+        }
+      }
+
+      finalized.push(candidate);
+    }
+
+    const finalizedRoutes = mergeHighlyOverlappingRoutes(finalized.map((route) => finalizeRouteMetrics(route)), 0.3);
+    const strictRoutes = ensureSharedTransferStops(
+      renameOptimizedRoutes(finalizedRoutes.filter((route) => !violatesFinalConstraints(route)))
+    ).filter((route, _index, allRoutes) => hasSharedTransferStop(route, allRoutes));
+
+    if (strictRoutes.length) {
+      return strictRoutes;
+    }
+
+    return ensureSharedTransferStops(
+      renameOptimizedRoutes(
+        finalizedRoutes
+          .map((route) => ({
+            ...route,
+            optimizationIssues: evaluateRouteIssues(route),
+          }))
+          .sort((a, b) => a.optimizationIssues.length - b.optimizationIssues.length)
+      )
+    );
+  }
+
+  function buildOptimizationPreviewHtml(plan, appKey) {
+    const payload = JSON.stringify({
+      sourceRoutes: plan.sourceRoutes,
+      originalPointCount: plan.originalPointCount,
+      optimizedStopCount: plan.optimizedStopCount,
+      removedStopCount: plan.removedStopCount,
+      maxTransfers: plan.maxTransfers,
+      transferHubs: plan.transferHubs,
+      routes: plan.routes.map((route) => ({
+        id: route.id,
+        routeName: route.routeName,
+        hubStopName: route.hubStopName,
+        estimatedDistanceMeters: route.estimatedDistanceMeters,
+        estimatedDurationSeconds: route.estimatedDurationSeconds,
+        totalDistanceMeters: route.totalDistanceMeters,
+        totalDurationSeconds: route.totalDurationSeconds,
+        usedFallback: route.usedFallback,
+        serviceSide: route.serviceSide || "right",
+        circulationDirection: route.circulationDirection || "clockwise",
+        stops: route.stops,
+        uniqueStops: route.uniqueStops,
+        optimizationIssues: route.optimizationIssues || [],
+        coordinates: route.coordinates || [],
+      })),
+    }).replace(/</g, "\\u003c");
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>최적화 노선 결과</title>
+  <style>
+    :root {
+      --bg: #f6f1e8;
+      --card: rgba(255,255,255,0.94);
+      --line: #d8d1c5;
+      --text: #1f1a14;
+      --muted: #6f675d;
+      --accent: #bf5b2c;
+      --shadow: 0 18px 44px rgba(58, 42, 20, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", "Noto Sans KR", sans-serif; color: var(--text); background: radial-gradient(circle at top left, #fdf7eb, var(--bg) 58%); }
+    .layout { display: grid; grid-template-columns: 420px 1fr; min-height: 100vh; }
+    .sidebar { padding: 20px; border-right: 1px solid var(--line); background: var(--card); overflow: auto; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+    .stat, .card { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); }
+    .stat strong { display: block; margin-top: 4px; font-size: 22px; }
+    .card { margin-top: 14px; }
+    .card h2 { margin: 0 0 10px; font-size: 15px; }
+    .card ul { margin: 0; padding-left: 18px; }
+    .card li + li { margin-top: 6px; }
+    .toolbar { display: flex; gap: 10px; margin-top: 14px; }
+    .button { appearance: none; border: 0; border-radius: 12px; padding: 11px 14px; cursor: pointer; font: inherit; font-weight: 700; }
+    .button.primary { background: var(--accent); color: #fff; }
+    .button.secondary { background: #efe2cf; color: #4d3722; }
+    .tag { display: inline-flex; margin: 4px 6px 0 0; padding: 5px 8px; border-radius: 999px; background: #fff1dc; color: #c2410c; font-size: 12px; font-weight: 700; }
+    .route-panel { border: 1px solid var(--line); border-radius: 14px; background: #fffcf7; padding: 12px; }
+    .route-panel + .route-panel { margin-top: 12px; }
+    .route-head { display: flex; gap: 10px; align-items: flex-start; }
+    .route-head input { margin-top: 3px; }
+    .route-title { flex: 1; min-width: 0; }
+    .route-title strong { display: block; font-size: 16px; }
+    .route-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .stop-list { margin: 10px 0 0; padding-left: 22px; }
+    .stop-list li + li { margin-top: 4px; }
+    .map-wrap { position: relative; min-height: 100vh; }
+    #map { height: 100vh; width: 100%; }
+    .legend { position: absolute; top: 18px; right: 18px; z-index: 3; width: min(320px, calc(100% - 36px)); padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.94); box-shadow: var(--shadow); }
+    .legend h2 { margin: 0 0 8px; font-size: 14px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .legend-item + .legend-item { margin-top: 6px; }
+    .swatch { width: 12px; height: 12px; border-radius: 999px; display: inline-block; flex: none; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } #map { height: 60vh; } }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>최적화 결과</h1>
+      <p class="muted">지하철역 환승 허브를 중심으로 순환형 노선을 재구성한 결과입니다.</p>
+      <div class="stats">
+        <div class="stat"><span>원본 정류장</span><strong id="original-count"></strong></div>
+        <div class="stat"><span>최적화 정류장</span><strong id="optimized-count"></strong></div>
+        <div class="stat"><span>통합된 정류장</span><strong id="removed-count"></strong></div>
+        <div class="stat"><span>최대 환승</span><strong id="transfer-count"></strong></div>
+      </div>
+      <div class="card">
+        <h2>대상 노선</h2>
+        <div id="route-tags"></div>
+      </div>
+      <div class="card">
+        <h2>환승 허브</h2>
+        <ul id="hub-list"></ul>
+      </div>
+      <div class="card">
+        <h2>생성된 노선</h2>
+        <div id="route-list"></div>
+      </div>
+      <div class="toolbar">
+        <button id="toggle-all-routes" class="button secondary" type="button">전체 해제</button>
+        <button id="save-optimized-kml" class="button primary" type="button">KML 저장</button>
+      </div>
+    </aside>
+    <main class="map-wrap">
+      <div id="map"></div>
+      <div class="legend">
+        <h2>지도 사용법</h2>
+        <div class="legend-item"><span class="swatch" style="background:#bf5b2c;"></span><span>노선 체크박스를 끄면 지도에서 숨겨집니다.</span></div>
+        <div class="legend-item"><span class="swatch" style="background:#1d4ed8;"></span><span>노선을 클릭하면 거리와 운행시간을 확인할 수 있습니다.</span></div>
+        <div class="legend-item"><span class="swatch" style="background:#0f766e;"></span><span>정류장을 클릭하면 순번과 원본 노선을 확인할 수 있습니다.</span></div>
+      </div>
+    </main>
+  </div>
+  <script>
+    const APP_KEY = ${JSON.stringify(String(appKey || ""))};
+    const DATA = ${payload};
+    const ROUTE_COLORS = ["#bf5b2c", "#0f766e", "#2563eb", "#9333ea", "#dc2626", "#d97706", "#0f6cbd", "#15803d"];
+    const byId = (id) => document.getElementById(id);
+    byId("original-count").textContent = String(DATA.originalPointCount);
+    byId("optimized-count").textContent = String(DATA.optimizedStopCount);
+    byId("removed-count").textContent = String(DATA.removedStopCount);
+    byId("transfer-count").textContent = String(DATA.maxTransfers);
+    byId("route-tags").innerHTML = DATA.sourceRoutes.map((route) => '<span class="tag">' + route + '</span>').join("");
+    byId("hub-list").innerHTML = DATA.transferHubs.map((hub) => '<li><strong>' + hub.name + '</strong><br>' + hub.sourceRoutes.join(', ') + '</li>').join("");
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function escapeXml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&apos;");
+    }
+
+    function formatDistance(meters) {
+      return ((Number(meters || 0) / 1000).toFixed(1)) + "km";
+    }
+
+    function formatDuration(seconds) {
+      return Math.max(1, Math.round(Number(seconds || 0) / 60)) + "분";
+    }
+
+    function toKmlColor(hexColor, alpha) {
+      const normalized = String(hexColor || "").replace("#", "").toLowerCase();
+      if (!/^[0-9a-f]{6}$/.test(normalized)) {
+        return (alpha || "ff") + "bd6c0f";
+      }
+      return (alpha || "ff") + normalized.slice(4, 6) + normalized.slice(2, 4) + normalized.slice(0, 2);
+    }
+
+    DATA.routes = DATA.routes.map((route, index) => ({
+      ...route,
+      color: ROUTE_COLORS[index % ROUTE_COLORS.length],
+      visible: true,
+    }));
+
+    function buildPreviewKml() {
+      const styles = DATA.routes.map((route) => {
+        const styleId = "route-" + route.id;
+        return [
+          '<Style id="' + escapeXml(styleId) + '">',
+          '<IconStyle><color>' + toKmlColor(route.color, "ff") + '</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon></IconStyle>',
+          '<LineStyle><color>' + toKmlColor(route.color, "ff") + '</color><width>4</width></LineStyle>',
+          '</Style>'
+        ].join("");
+      }).join("");
+
+      const folders = DATA.routes.map((route) => {
+        const styleId = "route-" + route.id;
+        const stops = route.stops.map((stop, index) => {
+          return [
+            '<Placemark>',
+            '<name>' + escapeXml((index + 1) + '. ' + stop.name) + '</name>',
+            '<styleUrl>#' + escapeXml(styleId) + '</styleUrl>',
+            '<description>' + escapeXml(route.routeName + ' / ' + stop.sourceRoutes.join(", ")) + '</description>',
+            '<Point><coordinates>' + stop.lng + ',' + stop.lat + '</coordinates></Point>',
+            '</Placemark>'
+          ].join("");
+        }).join("");
+
+        const coordinates = (route.coordinates || [])
+          .map((coordinate) => coordinate.lng + ',' + coordinate.lat)
+          .join(' ');
+        const path = coordinates ? [
+          '<Placemark>',
+          '<name>' + escapeXml(route.routeName + ' 경로') + '</name>',
+          '<styleUrl>#' + escapeXml(styleId) + '</styleUrl>',
+          '<description>' + escapeXml(formatDistance(route.totalDistanceMeters || route.estimatedDistanceMeters) + ' / ' + formatDuration(route.totalDurationSeconds || route.estimatedDurationSeconds)) + '</description>',
+          '<LineString><tessellate>1</tessellate><coordinates>' + coordinates + '</coordinates></LineString>',
+          '</Placemark>'
+        ].join("") : "";
+
+        return '<Folder><name>' + escapeXml(route.routeName) + '</name>' + stops + path + '</Folder>';
+      }).join("");
+
+      return '<?xml version="1.0" encoding="UTF-8"?>' +
+        '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>optimized-routes.kml</name>' +
+        styles + folders + '</Document></kml>';
+    }
+
+    async function saveOptimizedKml() {
+      const kmlContent = buildPreviewKml();
+      const fileName = 'optimized-routes.kml';
+      if (window.showSaveFilePicker) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: fileName,
+          types: [{ description: 'KML file', accept: { 'application/vnd.google-earth.kml+xml': ['.kml'] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(kmlContent);
+        await writable.close();
+        return;
+      }
+      const blob = new Blob([kmlContent], { type: 'application/vnd.google-earth.kml+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function renderRoutePanels() {
+      byId("route-list").innerHTML = DATA.routes.map((route, index) => {
+        return [
+          '<section class="route-panel">',
+          '<label class="route-head">',
+          '<input type="checkbox" data-route-toggle="' + escapeHtml(route.id) + '" checked>',
+          '<div class="route-title">',
+          '<strong style="color:' + route.color + ';">' + escapeHtml(route.routeName) + '</strong>',
+          '<div class="route-meta">거리 ' + formatDistance(route.totalDistanceMeters || route.estimatedDistanceMeters) + ' / 시간 ' + formatDuration(route.totalDurationSeconds || route.estimatedDurationSeconds) + '</div>',
+          '<div class="route-meta">환승 허브: ' + escapeHtml(route.hubStopName) + '</div>',
+          '<div class="route-meta">정류장 방향: ' + escapeHtml(route.serviceSide === "left" ? "좌측 정류장군 역순환" : "우측 정류장군 순환") + '</div>',
+          (route.optimizationIssues || []).length ? '<div class="route-meta" style="color:#b45309;">제약 미충족: ' + escapeHtml(route.optimizationIssues.join(', ')) + '</div>' : '',
+          '</div>',
+          '</label>',
+          '<ol class="stop-list">' +
+            route.stops.map((stop, stopIndex) => '<li>' + escapeHtml((stopIndex + 1) + '. ' + stop.name) + '</li>').join("") +
+          '</ol>',
+          '</section>'
+        ].join("");
+      }).join("");
+    }
+
+    function loadSdk() {
+      return new Promise((resolve, reject) => {
+        if (!APP_KEY) {
+          reject(new Error("config.js의 카카오 JavaScript 키가 필요합니다."));
+          return;
+        }
+        const script = document.createElement("script");
+        script.src = "https://dapi.kakao.com/v2/maps/sdk.js?appkey=" + encodeURIComponent(APP_KEY) + "&autoload=false";
+        script.onload = () => window.kakao.maps.load(resolve);
+        script.onerror = () => reject(new Error("카카오맵 SDK를 불러오지 못했습니다."));
+        document.head.appendChild(script);
+      });
+    }
+
+    function renderMap() {
+      const firstRoute = DATA.routes[0] || { stops: [] };
+      const center = firstRoute.stops[0] || DATA.transferHubs[0] || { lat: 37.5665, lng: 126.9780 };
+      const map = new window.kakao.maps.Map(document.getElementById("map"), {
+        center: new window.kakao.maps.LatLng(center.lat, center.lng),
+        level: 7,
+      });
+      const bounds = new window.kakao.maps.LatLngBounds();
+      const infoWindow = new window.kakao.maps.InfoWindow();
+      const layers = new Map();
+
+      DATA.routes.forEach((route) => {
+        const color = route.color;
+        const path = (route.coordinates || []).map((coordinate) => {
+          const latLng = new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng);
+          bounds.extend(latLng);
+          return latLng;
+        });
+        const markers = [];
+        let polyline = null;
+        if (path.length) {
+          polyline = new window.kakao.maps.Polyline({
+            map,
+            path,
+            strokeWeight: 6,
+            strokeColor: color,
+            strokeOpacity: 0.9,
+            strokeStyle: "solid",
+          });
+          window.kakao.maps.event.addListener(polyline, "click", (mouseEvent) => {
+            const distanceText = formatDistance(route.totalDistanceMeters || route.estimatedDistanceMeters);
+            const durationText = formatDuration(route.totalDurationSeconds || route.estimatedDurationSeconds);
+            infoWindow.setContent('<div style="padding:8px 10px;font-size:12px;line-height:1.55;white-space:nowrap;"><strong>' + escapeHtml(route.routeName) + '</strong><br>거리 ' + distanceText + '<br>운행시간 ' + durationText + '</div>');
+            infoWindow.setPosition(mouseEvent.latLng);
+            infoWindow.open(map);
+          });
+        }
+        (route.uniqueStops || route.stops).forEach((stop, stopIndex) => {
+          const markerPosition = new window.kakao.maps.LatLng(stop.lat, stop.lng);
+          bounds.extend(markerPosition);
+          const marker = new window.kakao.maps.Marker({
+            map,
+            position: markerPosition,
+            title: stop.name,
+          });
+          window.kakao.maps.event.addListener(marker, "click", () => {
+            infoWindow.setContent('<div style="padding:8px 10px;font-size:12px;line-height:1.5;"><strong>' + escapeHtml(route.routeName) + '</strong><br>' + (stopIndex + 1) + '. ' + escapeHtml(stop.name) + '<br>' + escapeHtml(stop.sourceRoutes.join(', ')) + '</div>');
+            infoWindow.open(map, marker);
+          });
+          markers.push(marker);
+        });
+        layers.set(route.id, { route, polyline, markers });
+      });
+      if (!bounds.isEmpty()) {
+        map.setBounds(bounds);
+      }
+
+      function setRouteVisible(routeId, visible) {
+        const layer = layers.get(routeId);
+        if (!layer) {
+          return;
+        }
+        layer.route.visible = visible;
+        if (layer.polyline) {
+          layer.polyline.setMap(visible ? map : null);
+        }
+        layer.markers.forEach((marker) => marker.setMap(visible ? map : null));
+      }
+
+      renderRoutePanels();
+      document.querySelectorAll("[data-route-toggle]").forEach((input) => {
+        input.addEventListener("change", (event) => {
+          setRouteVisible(event.target.getAttribute("data-route-toggle"), event.target.checked);
+        });
+      });
+
+      const toggleAllButton = byId("toggle-all-routes");
+      let allVisible = true;
+      toggleAllButton.addEventListener("click", () => {
+        allVisible = !allVisible;
+        DATA.routes.forEach((route) => setRouteVisible(route.id, allVisible));
+        document.querySelectorAll("[data-route-toggle]").forEach((input) => {
+          input.checked = allVisible;
+        });
+        toggleAllButton.textContent = allVisible ? "전체 해제" : "전체 선택";
+      });
+
+      byId("save-optimized-kml").addEventListener("click", async () => {
+        try {
+          await saveOptimizedKml();
+        } catch (error) {
+          window.alert(error && error.name === "AbortError" ? "KML 저장을 취소했습니다." : (error.message || "KML 저장 중 오류가 발생했습니다."));
+        }
+      });
+    }
+
+    loadSdk().then(renderMap).catch((error) => {
+      document.body.innerHTML = '<div style="padding:24px;font-family:Segoe UI,Noto Sans KR,sans-serif;">' + error.message + '</div>';
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  function renderOptimizationPreviewWindow(previewWindow, plan) {
+    if (!previewWindow || previewWindow.closed) {
+      return;
+    }
+
+    previewWindow.document.open();
+    previewWindow.document.write(buildOptimizationPreviewHtml(plan, config.appKey));
+    previewWindow.document.close();
+  }
+
+  function renderOptimizationModal(plan) {
+    const duplicateItems = plan.duplicateGroups
+      .slice(0, 12)
+      .map((group) => `<li>${escapeHtml(group.points.map((point) => `${point.routeName} / ${point.name}`).join(", "))} (${escapeHtml(String(group.distanceMeters))}m)</li>`)
+      .join("");
+    const routeItems = plan.routes
+      .slice(0, 20)
+      .map((route) => `<li><strong>${escapeHtml(route.routeName)}</strong> <span class="analysis-inline-meta">${escapeHtml(`${formatDistanceKm(route.estimatedDistanceMeters)}km / ${formatDurationMinutes(route.estimatedDurationSeconds)}분`)}</span>${route.optimizationIssues?.length ? ` <span class="analysis-inline-meta">${escapeHtml(`제약 미충족: ${route.optimizationIssues.join(", ")}`)}</span>` : ""}<br>${escapeHtml(route.stops.map((stop) => stop.name).join(" -> "))}</li>`)
+      .join("");
+    const hubItems = plan.transferHubs
+      .map((hub) => `<li>${escapeHtml(hub.name)} <span class="analysis-inline-meta">${escapeHtml(hub.sourceRoutes.join(", "))}</span></li>`)
+      .join("");
+
+    analysisModalBodyEl.innerHTML = `
+      <div class="analysis-grid">
+        <div class="analysis-stat">
+          <span>원본 정류장</span>
+          <strong>${escapeHtml(String(plan.originalPointCount))}</strong>
+        </div>
+        <div class="analysis-stat">
+          <span>최적화 정류장</span>
+          <strong>${escapeHtml(String(plan.optimizedStopCount))}</strong>
+        </div>
+        <div class="analysis-stat">
+          <span>통합된 정류장</span>
+          <strong>${escapeHtml(String(plan.removedStopCount))}</strong>
+        </div>
+        <div class="analysis-stat">
+          <span>최대 환승</span>
+          <strong>${escapeHtml(String(plan.maxTransfers))}</strong>
+        </div>
+      </div>
+      <div class="analysis-list-card">
+        <h3>최적화 결과</h3>
+        <p>${escapeHtml(`${plan.sourceRouteCount}개 기존 노선을 기반으로 ${plan.routes.length}개 순환 노선을 다시 구성했습니다. 각 노선은 12km/60분 제한 안에서 시작과 끝이 같은 구조를 유지합니다.`)}</p>
+        <div class="modal-actions">
+          <button id="open-optimization-preview-button" class="primary-button" type="button">새 창에서 보기</button>
+        </div>
+      </div>
+      <div class="analysis-list-card">
+        <h3>환승 허브</h3>
+        <ul>${hubItems || "<li>환승 허브가 없습니다.</li>"}</ul>
+      </div>
+      <div class="analysis-list-card">
+        <h3>중복 정류장 그룹</h3>
+        <ul>${duplicateItems || "<li>중복 그룹이 없습니다.</li>"}</ul>
+      </div>
+      <div class="analysis-list-card">
+        <h3>최적화 노선</h3>
+        <ul>${routeItems || "<li>노선이 없습니다.</li>"}</ul>
+      </div>
+      <div class="analysis-list-card">
+        <h3>설계 원칙</h3>
+        <ul>
+          <li>기존 정류장을 최대한 커버</li>
+          <li>중복 정류장은 대표 정류장으로 통합</li>
+          <li>지하철역을 환승 허브로 우선 사용</li>
+          <li>공공시설, 복지시설, 주민센터, 구청, 시청 같은 중요 목적지 우선 포함</li>
+          <li>각 노선은 순환형이며 12km/60분 제한 적용</li>
+          <li>모든 노선은 최대 2회 환승 이내 연결을 목표로 설계</li>
+        </ul>
+      </div>
+    `;
+
+    const previewButton = document.getElementById("open-optimization-preview-button");
+    if (previewButton) {
+      previewButton.addEventListener("click", () => {
+        const previewWindow = window.open("", "_blank", "width=1400,height=900");
+        if (!previewWindow) {
+          setStatus("새 창이 차단되었습니다. 팝업 차단을 해제하고 다시 시도하세요.", true);
+          return;
+        }
+        renderOptimizationPreviewWindow(previewWindow, latestOptimizationPlan);
+      });
+    }
+
+    analysisModalEl.classList.remove("is-hidden");
+    analysisModalEl.setAttribute("aria-hidden", "false");
+  }
+
+  async function handleOptimizeRoutes() {
+    if (!OPTIMIZATION_FEATURE_ENABLED) {
+      setStatus("최적화 기능은 현재 보류 상태입니다.", true);
+      return;
+    }
+
+    const pointCount = getAllPoints().length;
+    if (pointCount < 2) {
+      setStatus("최적화를 하려면 정류장이 2개 이상 필요합니다.", true);
+      return;
+    }
+
+    const previewWindow = window.open("", "_blank", "width=1400,height=900");
+    if (previewWindow) {
+      previewWindow.document.write("<!DOCTYPE html><html lang='ko'><body style='font-family:Segoe UI,Noto Sans KR,sans-serif;padding:24px;'>최적화 경로를 계산하는 중입니다...</body></html>");
+      previewWindow.document.close();
+    }
+
+    optimizeRoutesButtonEl.disabled = true;
+    setStatus("중복 정류장을 통합하고 다중 순환 노선을 계산하는 중입니다.", false);
+
+    try {
+      const plan = buildOptimizationPlan();
+      plan.routes = await materializeOptimizedRoutes(plan.routes);
+      if (!plan.routes.length) {
+        throw new Error("조건을 만족하는 최적화 노선을 생성하지 못했습니다. 정류장 분포를 다시 확인하세요.");
+      }
+      plan.maxTransfers = calculateMaxTransfers(plan.routes);
+      latestOptimizationPlan = plan;
+
+      renderOptimizationModal(plan);
+      renderOptimizationPreviewWindow(previewWindow, plan);
+      const issueRoutes = plan.routes.filter((route) => (route.optimizationIssues || []).length);
+      if (issueRoutes.length) {
+        setStatus(`최적화 결과를 생성했습니다. 다만 ${issueRoutes.length}개 노선은 일부 제약을 완전히 만족하지 못했습니다. 상세 내용은 결과 화면에서 확인하세요.`, true);
+      } else if (plan.routes.length < 5 || plan.routes.length > 15) {
+        setStatus(`최적화 결과 노선 수가 조건 범위(5~15개)를 만족하지 못했습니다. 현재 ${plan.routes.length}개입니다. 결과 화면은 표시했습니다.`, true);
+      } else if (plan.routes.some((route) => !hasSharedTransferStop(route, plan.routes))) {
+        setStatus("일부 노선이 공유 환승 정류장 조건을 완전히 만족하지 못했습니다. 결과 화면은 표시했습니다.", true);
+      } else {
+        setStatus(`${plan.routes.length}개 최적화 노선을 생성했습니다.`, false);
+      }
+    } catch (error) {
+      if (previewWindow && !previewWindow.closed) {
+        previewWindow.document.body.innerHTML = `<div style="font-family:Segoe UI,Noto Sans KR,sans-serif;padding:24px;">${escapeHtml(error.message || "최적화 중 오류가 발생했습니다.")}</div>`;
+      }
+      setStatus(error.message || "노선 최적화 중 오류가 발생했습니다.", true);
+    } finally {
+      optimizeRoutesButtonEl.disabled = false;
+    }
   }
 
   function directChildrenByTag(parent, tagName) {
@@ -992,8 +2689,11 @@
     selectedPointId = null;
     selectedPathId = null;
     selectedPathVertexIndex = null;
+    hasClearedSelection = false;
     shouldFitMapToData = true;
     latestAnalysisReport = null;
+    latestOptimizationPlan = null;
+    analysisActive = false;
 
     fileInput.value = "";
     fileCountEl.textContent = "0";
@@ -1003,6 +2703,7 @@
     setEmptyPathDetails();
     clearForm();
     fillPathForm(null);
+    updateAnalyzeButtonState();
     refreshUI();
   }
 
@@ -1011,14 +2712,14 @@
       const savedFileName = await saveKmlWithPicker();
       clearPersistedWorkspace();
       resetWorkspaceState();
-      setStatus(`${savedFileName} ??ν썑 ?깃났?곸쑝濡?珥덇린?뷀뻽?듬땲??`, false);
+      setStatus(`${savedFileName} 저장 후 작업 공간을 초기화했습니다.`, false);
     } catch (error) {
       if (error?.name === "AbortError") {
-        setStatus("KML ??μ쓣 痍⑥냼?덉뒿?덈떎.", false);
+        setStatus("KML 저장 후 초기화를 취소했습니다.", false);
         return;
       }
 
-      setStatus(error.message || "KML ??μ쓣 ?섑뻾?섏? 紐삵뻽?듬땲??", true);
+      setStatus(error.message || "KML 저장 후 초기화 중 오류가 발생했습니다.", true);
     }
   }
 
@@ -1033,6 +2734,15 @@
     analysisInfoWindows = [];
   }
 
+  function stopAnalysisView() {
+    latestAnalysisReport = null;
+    analysisActive = false;
+    clearAnalysisOverlays();
+    closeAnalysisModal();
+    updateAnalyzeButtonState();
+    refreshUI();
+  }
+
   function renderAnalysisOverlays(report) {
     clearAnalysisOverlays();
     if (!mapReady || !report) {
@@ -1040,27 +2750,16 @@
     }
 
     report.duplicatePoints.forEach((item) => {
+      const visual = getDuplicateGroupVisual(item.points.length);
       const marker = new window.kakao.maps.Marker({
         map,
         position: new window.kakao.maps.LatLng(item.center.lat, item.center.lng),
-        title: `중복 포인트 후보 ${item.distanceMeters}m`,
-        image: createMarkerImage("#dc2626", true),
+        title: `중복 정류장 ${item.distanceMeters}m`,
+        image: createMarkerImage(visual.stroke, true),
       });
       analysisMarkers.push(marker);
     });
 
-    report.overlappingSegments.forEach((item) => {
-      const polyline = new window.kakao.maps.Polyline({
-        map,
-        path: item.coordinates.map((coordinate) => new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng)),
-        strokeWeight: 8,
-        strokeColor: "#dc2626",
-        strokeOpacity: 0.8,
-        strokeStyle: "shortdash",
-        endArrow: true,
-      });
-      analysisPolylines.push(polyline);
-    });
   }
 
   function renderAnalysisRangeOverlays(report) {
@@ -1070,6 +2769,7 @@
     }
 
     report.duplicatePoints.forEach((item) => {
+      const visual = getDuplicateGroupVisual(item.points.length);
       const center = new window.kakao.maps.LatLng(item.center.lat, item.center.lng);
       const groupLines = item.points
         .map((point) => `${escapeHtml(point.routeName)} / ${escapeHtml(point.name)}`)
@@ -1079,22 +2779,22 @@
         center,
         radius: 30,
         strokeWeight: 2,
-        strokeColor: "#dc2626",
+        strokeColor: visual.stroke,
         strokeOpacity: 0.9,
         strokeStyle: "solid",
-        fillColor: "#fecaca",
+        fillColor: visual.fill,
         fillOpacity: 0.28,
       });
       const marker = new window.kakao.maps.Marker({
         map,
         position: center,
-        title: `중복 포인트 범위 ${item.distanceMeters}m`,
-        image: createMarkerImage("#dc2626", true),
+        title: `중복 정류장 범위 ${item.distanceMeters}m`,
+        image: createMarkerImage(visual.stroke, true),
       });
       const infoWindow = new window.kakao.maps.InfoWindow({
         content: `
           <div style="display:inline-block;padding:8px 10px;font-size:12px;line-height:1.5;white-space:nowrap;">
-            <strong>중복 포인트 후보</strong><br>
+            <strong>중복 정류장 후보</strong><br>
             ${escapeHtml(item.points[0].routeName)} / ${escapeHtml(item.points[0].name)}<br>
             ${escapeHtml(item.points[1].routeName)} / ${escapeHtml(item.points[1].name)}<br>
             거리: ${escapeHtml(String(item.distanceMeters))}m
@@ -1103,10 +2803,10 @@
       });
       infoWindow.setContent(`
         <div style="display:inline-block;padding:8px 10px;font-size:12px;line-height:1.5;white-space:nowrap;">
-          <strong>중복 포인트 그룹</strong><br>
+          <strong>중복 정류장 그룹</strong><br>
           ${groupLines}<br>
           거리: ${escapeHtml(String(item.distanceMeters))}m<br>
-          포인트 수: ${escapeHtml(String(item.points.length))}개
+          정류장 수: ${escapeHtml(String(item.points.length))}개
         </div>
       `);
       const openAnalysisInfo = () => {
@@ -1120,31 +2820,19 @@
       analysisInfoWindows.push(infoWindow);
     });
 
-    report.overlappingSegments.forEach((item) => {
-      const polyline = new window.kakao.maps.Polyline({
-        map,
-        path: item.coordinates.map((coordinate) => new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng)),
-        strokeWeight: 8,
-        strokeColor: "#dc2626",
-        strokeOpacity: 0.8,
-        strokeStyle: "shortdash",
-        endArrow: true,
-      });
-      analysisPolylines.push(polyline);
-    });
   }
 
   function buildLocalOptimizationActions(localReport) {
     const actions = [];
 
     if (localReport.duplicatePointCount > 0) {
-      actions.push(`반경 30m 내 중복 포인트 ${localReport.duplicatePointCount}건을 우선 검토하세요.`);
+      actions.push(`반경 30m 내 중복 정류장 ${localReport.duplicatePointCount}건을 우선 검토하세요.`);
     }
     if (localReport.overlappingSegmentCount > 0) {
       actions.push(`노선 간 겹치는 경로 구간 ${localReport.overlappingSegmentCount}건을 통합 가능 구간으로 검토하세요.`);
     }
     if (!actions.length) {
-      actions.push("현재 기준에서는 뚜렷한 중복 포인트나 중복 구간이 없습니다.");
+      actions.push("현재 기준에서는 중복 정류장이나 중복 경로 구간이 뚜렷하지 않습니다.");
     }
 
     return actions;
@@ -1154,13 +2842,13 @@
     const risks = [];
 
     if (localReport.duplicatePointCount > 0) {
-      risks.push("근접 포인트는 실제 같은 정류장일 수도 있고, 상하행 분리 정류장일 수도 있습니다.");
+      risks.push("가까운 정류장은 실제로 같은 정류장일 수도 있고, 상하행 분리 정류장일 수도 있습니다.");
     }
     if (localReport.overlappingSegmentCount > 0) {
-      risks.push("중복 경로 구간은 공용 도로 구간일 수 있으므로 운영 의미를 함께 검토해야 합니다.");
+      risks.push("중복 경로 구간은 공용 회차나 필수 통행 구간일 수 있으므로 운영 목적을 함께 검토해야 합니다.");
     }
     if (!risks.length) {
-      risks.push("현재 분석 기준에서는 추가 위험 신호가 확인되지 않았습니다.");
+      risks.push("현재 분석 기준에서는 추가 위험 신호가 두드러지지 않습니다.");
     }
 
     return risks;
@@ -1263,7 +2951,7 @@
     analysisModalBodyEl.innerHTML = `
       <div class="analysis-grid">
         <div class="analysis-stat">
-          <span>중복 포인트</span>
+          <span>중복 정류장</span>
           <strong>${escapeHtml(String(report.local.duplicatePointCount))}건</strong>
         </div>
         <div class="analysis-stat">
@@ -1273,14 +2961,14 @@
       </div>
       <div class="analysis-list-card">
         <h3>GPT 요약</h3>
-        <p>${escapeHtml(gpt.summary || report.message || "로컬 분석 결과만 생성되었습니다.")}</p>
+        <p>${escapeHtml(gpt.summary || report.message || "로컬 분석 결과만 생성했습니다.")}</p>
       </div>
       <div class="analysis-list-card">
-        <h3>중복 포인트 리스트</h3>
-        <ul>${duplicateItems || "<li>중복 포인트가 없습니다.</li>"}</ul>
+        <h3>중복 정류장 목록</h3>
+        <ul>${duplicateItems || "<li>중복 정류장이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
-        <h3>중복 경로 구간 리스트</h3>
+        <h3>중복 경로 구간 목록</h3>
         <ul>${overlapItems || "<li>중복 경로 구간이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
@@ -1341,31 +3029,16 @@
       .slice(0, 10)
       .map(
         (item) =>
-          `<li>${escapeHtml(item.points[0].name)} / ${escapeHtml(item.points[1].name)} 가 ${escapeHtml(
+          `<li>${escapeHtml(item.points[0].name)} / ${escapeHtml(item.points[1].name)} 이 ${escapeHtml(
             String(item.distanceMeters)
-          )}m 이내에 있습니다.</li>`
-      )
-      .join("");
-    const duplicateItemsGrouped = report.local.duplicatePoints
-      .slice(0, 20)
-      .map(
-        (item) =>
-          `<li>${escapeHtml(duplicateGroupLabel(item))} (${escapeHtml(String(item.distanceMeters))}m, ${escapeHtml(
-            String(item.points.length)
-          )}개 포인트)</li>`
-      )
-      .join("");
-    const duplicateInsightsGrouped = report.local.duplicatePoints
-      .slice(0, 10)
-      .map(
-        (item) => `<li>${escapeHtml(duplicateGroupLabel(item))} 가 ${escapeHtml(String(item.distanceMeters))}m 이내 중복 그룹입니다.</li>`
+          )}m 이내에서 중복됩니다.</li>`
       )
       .join("");
     const overlapInsights = report.local.overlappingSegments
       .slice(0, 10)
       .map(
         (item) =>
-          `<li>${escapeHtml(item.routeNames[0])} 와 ${escapeHtml(item.routeNames[1])} 사이에 약 ${escapeHtml(
+          `<li>${escapeHtml(item.routeNames[0])} 와 ${escapeHtml(item.routeNames[1])} 사이에 ${escapeHtml(
             String(item.averageLengthMeters)
           )}m 중복 구간 후보가 있습니다.</li>`
       )
@@ -1376,7 +3049,7 @@
     analysisModalBodyEl.innerHTML = `
       <div class="analysis-grid">
         <div class="analysis-stat">
-          <span>중복 포인트</span>
+          <span>중복 정류장</span>
           <strong>${escapeHtml(String(report.local.duplicatePointCount))}건</strong>
         </div>
         <div class="analysis-stat">
@@ -1389,11 +3062,11 @@
         <p>${escapeHtml(report.message || "로컬 분석 결과를 생성했습니다.")}</p>
       </div>
       <div class="analysis-list-card">
-        <h3>중복 포인트 리스트</h3>
-        <ul>${duplicateItems || "<li>중복 포인트가 없습니다.</li>"}</ul>
+        <h3>중복 정류장 목록</h3>
+        <ul>${duplicateItems || "<li>중복 정류장이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
-        <h3>중복 경로 구간 리스트</h3>
+        <h3>중복 경로 구간 목록</h3>
         <ul>${overlapItems || "<li>중복 경로 구간이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
@@ -1428,7 +3101,7 @@
     });
 
     if (!response.ok) {
-      throw new Error("analysis-report.json 저장에 실패했습니다.");
+      throw new Error("analysis-report.json ??μ뿉 ?ㅽ뙣?덉뒿?덈떎.");
     }
 
     return response.json();
@@ -1453,7 +3126,7 @@
 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || "노선 설계 요청에 실패했습니다.");
+      throw new Error(payload.error || "노선 설계 요청이 실패했습니다.");
     }
 
     return response.json();
@@ -1747,6 +3420,12 @@
   }
 
   async function handleAnalyzeRoutesLocal() {
+    if (analysisActive) {
+      stopAnalysisView();
+      setStatus("분석을 종료하고 이전 화면으로 돌아갔습니다.", false);
+      return;
+    }
+
     const pointCount = getAllPoints().length;
     const pathCount = getAllPaths().length;
 
@@ -1769,14 +3448,16 @@
           pathCount,
         },
         local: localReport,
-        message: `노선 ${dataset.routes.length}개, 포인트 ${pointCount}개, 경로 ${pathCount}개를 기준으로 로컬 분석을 완료했습니다.`,
+        message: `노선 ${dataset.routes.length}개, 정류장 ${pointCount}개, 경로 ${pathCount}개를 기준으로 로컬 분석을 완료했습니다.`,
       };
 
       latestAnalysisReport = report;
+      analysisActive = true;
       renderAnalysisRangeOverlays(localReport);
       renderLocalAnalysisModal(report);
       await saveAnalysisReport(report);
-      setStatus("노선 로컬 분석을 완료했고 analysis-report.json으로 저장했습니다.", false);
+      updateAnalyzeButtonState();
+      setStatus("노선 로컬 분석이 완료되었고 analysis-report.json으로 저장했습니다.", false);
     } catch (error) {
       setStatus(error.message || "노선 로컬 분석 중 오류가 발생했습니다.", true);
     } finally {
@@ -1794,7 +3475,7 @@
       try {
         const result = await saveKmlToServer();
         if (result?.savedPath) {
-          setStatus(`수정 내용이 ${result.savedPath} 에 자동 저장되었습니다.`, false);
+          setStatus(`수정 내용이 ${result.savedPath}에 자동 저장되었습니다.`, false);
         }
       } catch (error) {
         setStatus(error.message, true);
@@ -1840,7 +3521,7 @@
       script.onerror = () =>
         reject(
           new Error(
-            `카카오맵 SDK를 불러오지 못했습니다. 현재 접속 주소 ${window.location.origin} 이 카카오 Developers의 JavaScript SDK 도메인에 등록되어 있고, 카카오맵 사용 설정이 ON인지 확인하세요.`
+            `카카오맵 SDK를 불러오지 못했습니다. 현재 접속 주소 ${window.location.origin} 이 카카오 Developers JavaScript 키 허용 도메인에 등록되어 있는지 확인하세요.`
           )
         );
       document.head.appendChild(script);
@@ -2022,7 +3703,7 @@
   function parseKml(text, filename) {
     const xml = new DOMParser().parseFromString(text, "application/xml");
     if (xml.getElementsByTagName("parsererror")[0]) {
-      throw new Error(`${filename}: KML 파싱 실패`);
+      throw new Error(`${filename}: KML ?뚯떛 ?ㅽ뙣`);
     }
 
     let pointIndex = 0;
@@ -2086,7 +3767,7 @@
     fileListEl.innerHTML = "";
     filesSummary.forEach((item) => {
       const li = document.createElement("li");
-      li.innerHTML = `${escapeHtml(item.name)}<small>${item.pointCount}개 포인트 / ${item.pathCount}개 경로</small>`;
+      li.innerHTML = `${escapeHtml(item.name)}<small>${item.pointCount}개 정류장 / ${item.pathCount}개 경로</small>`;
       fileListEl.appendChild(li);
     });
   }
@@ -2123,7 +3804,7 @@
           ${escapeHtml(routeName)}
           ${hasDesignedRoute ? '<span class="route-badge">설계</span>' : ""}
         </strong>
-        <span>${pointCount}개 포인트 / ${pathCount}개 경로</span>
+        <span>${pointCount}개 정류장 / ${pathCount}개 경로</span>
       `;
       button.addEventListener("click", () => {
         stopPathModes();
@@ -2194,7 +3875,7 @@
   function setAllRoutesVisible(visible) {
     const routes = getRoutes();
     if (!routes.length) {
-      setStatus("표시를 바꿀 노선이 없습니다.", true);
+      setStatus("표시를 변경할 노선이 없습니다.", true);
       return;
     }
 
@@ -2220,7 +3901,7 @@
     }
 
     if (!points.length) {
-      routePointListEl.innerHTML = '<div class="details-card empty"><p class="details-empty">이 노선에는 포인트가 없습니다.</p></div>';
+      routePointListEl.innerHTML = '<div class="details-card empty"><p class="details-empty">선택한 노선에는 정류장이 없습니다.</p></div>';
       return;
     }
 
@@ -2249,6 +3930,7 @@
     selectedRouteName = typeof savedUiState.selectedRouteName === "string" ? savedUiState.selectedRouteName : null;
     selectedPointId = typeof savedUiState.selectedPointId === "string" ? savedUiState.selectedPointId : null;
     selectedPathId = typeof savedUiState.selectedPathId === "string" ? savedUiState.selectedPathId : null;
+    hasClearedSelection = !selectedRouteName && !selectedPointId && !selectedPathId;
     shouldFitMapToData = false;
   }
 
@@ -2259,7 +3941,7 @@
     if (!selectedPointId || routes.length < 2) {
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = routes.length < 2 ? "이동 가능한 노선 없음" : "포인트를 선택하세요";
+      option.textContent = routes.length < 2 ? "이동 가능한 노선 없음" : "정류장을 선택하세요";
       moveRouteSelectEl.appendChild(option);
       moveRouteSelectEl.disabled = true;
       movePointButtonEl.disabled = true;
@@ -2303,7 +3985,7 @@
 
     const newOption = document.createElement("option");
     newOption.value = NEW_ROUTE_VALUE;
-    newOption.textContent = "신규 노선 추가";
+    newOption.textContent = "새 노선 추가";
     formRouteSelectEl.appendChild(newOption);
 
     if (selectedValue && routes.includes(selectedValue)) {
@@ -2360,7 +4042,7 @@
 
     const newOption = document.createElement("option");
     newOption.value = NEW_ROUTE_VALUE;
-    newOption.textContent = "신규 노선 추가";
+    newOption.textContent = "새 노선 추가";
     pathRouteSelectEl.appendChild(newOption);
 
     if (selectedValue && routes.includes(selectedValue)) {
@@ -2596,7 +4278,7 @@
         pathExtendMode = false;
         syncPathPreview();
         updatePathEditorUi();
-        setStatus("점이 선택되었습니다. 지도에서 새 위치를 클릭하면 선이 함께 이동합니다.", false);
+        setStatus("점을 선택했습니다. 지도에서 새 위치를 클릭하면 점이 이동합니다.", false);
       });
 
       window.kakao.maps.event.addListener(marker, "rightclick", () => {
@@ -2609,18 +4291,18 @@
           () => {
             pathExtendMode = true;
             updatePathEditorUi();
-            setStatus("선 연장 모드입니다. 지도에서 새 끝점을 클릭하세요.", false);
+            setStatus("경로 연장 모드입니다. 지도에서 새 지점을 클릭하세요.", false);
           },
           () => {
             if (workingPathCoordinates.length <= 2) {
-              setStatus("경로는 최소 2개 좌표가 필요합니다.", true);
+              setStatus("경로에는 최소 2개 좌표가 필요합니다.", true);
               return;
             }
             workingPathCoordinates = workingPathCoordinates.slice(0, -1);
             pathExtendMode = false;
             syncPathPreview();
             updatePathEditorUi();
-            setStatus("마지막 선 구간을 삭제했습니다.", false);
+            setStatus("마지막 구간을 삭제했습니다.", false);
           }
         );
       });
@@ -2663,11 +4345,11 @@
     });
 
     if (drawing) {
-      pathEditorHelpEl.textContent = "지도 클릭으로 꼭짓점을 추가합니다. 저장을 누르면 현재 노선에 새 경로가 생성됩니다.";
+      pathEditorHelpEl.textContent = "지도를 클릭해 경로 점을 추가합니다. 저장 버튼을 누르면 현재 노선에 경로가 생성됩니다.";
     } else if (editing) {
-      pathEditorHelpEl.textContent = "중간 점은 드래그로 이동합니다. 시작점은 초록색, 끝점은 빨간색입니다. 마지막 점 우클릭 후 extend 또는 delete 를 선택하세요.";
+      pathEditorHelpEl.textContent = "중간 점은 드래그로 이동합니다. 시작점은 초록, 끝점은 빨강입니다. 마지막 점 우클릭으로 연장 또는 삭제를 선택하세요.";
     } else {
-      pathEditorHelpEl.textContent = "노선을 선택한 뒤 새 경로를 그리고, 기존 경로는 편집 모드에서 꼭짓점을 드래그해 수정합니다.";
+      pathEditorHelpEl.textContent = "노선을 선택한 뒤 새 경로를 그리거나 기존 경로의 점을 드래그해 수정합니다.";
     }
   }
 
@@ -2694,7 +4376,7 @@
     fillPathForm(null);
     updatePathEditorUi();
     syncPathPreview();
-    setStatus(`새 경로 그리기 모드입니다. 현재 노선은 ${selectedRouteName} 입니다. 지도에서 점을 클릭하세요.`, false);
+    setStatus(`새 경로 그리기 모드입니다. 현재 노선은 ${selectedRouteName}입니다. 지도에서 점을 클릭하세요.`, false);
   }
 
   function startPathEditMode() {
@@ -2714,7 +4396,7 @@
     fillPathForm(selectedPath);
     updatePathEditorUi();
     syncPathPreview();
-    setStatus("경로 편집 모드입니다. 꼭짓점을 드래그해 수정하세요.", false);
+    setStatus("경로 편집 모드입니다. 점을 드래그해 수정하세요.", false);
   }
 
   function renderPointDetails(point) {
@@ -2723,6 +4405,7 @@
       return;
     }
 
+    const populationEstimate = estimatePointPopulation(point, 100);
     openPointDetailsSection();
     pointDetailsEl.classList.remove("empty");
     const rows = [
@@ -2738,6 +4421,9 @@
       { label: "주소", value: point.address },
       { label: "전화번호", value: point.phoneNumber },
       { label: "스타일", value: point.styleUrl },
+      { label: "100m 예상 가구수", value: `${populationEstimate.estimatedHouseholds}가구` },
+      { label: "100m 예상 인구수", value: `${populationEstimate.estimatedPopulation}명` },
+      { label: "추정 근거", value: populationEstimate.basisText },
     ].filter((row) => row.value);
 
     const extendedRows = (point.extendedData || [])
@@ -2898,7 +4584,7 @@
 
     window.kakao.maps.event.addListener(map, "mousemove", mapMouseMoveHandler);
     ensureDraftMarker(point.lat, point.lng);
-    setStatus("포인트 수정 모드입니다. 수정할 위치를 클릭하세요. 취소는 Esc 입니다.", false);
+    setStatus("정류장 수정 모드입니다. 수정할 위치를 클릭하세요. 취소는 Esc입니다.", false);
   }
   function setAddPointMode(enabled) {
     addPointMode = enabled;
@@ -2915,8 +4601,8 @@
     if (enabled) {
       setStatus(
         selectedRouteName
-          ? `포인트 추가 모드입니다. 현재 노선은 ${selectedRouteName === TEMP_NEW_ROUTE_NAME ? "신규 노선" : selectedRouteName} 입니다. 지도에서 위치를 클릭하세요.`
-          : "포인트 추가 모드입니다. 먼저 노선을 입력한 뒤 지도에서 위치를 클릭하세요.",
+          ? `정류장 추가 모드입니다. 현재 노선은 ${selectedRouteName === TEMP_NEW_ROUTE_NAME ? "새 노선" : selectedRouteName}입니다. 지도에서 위치를 클릭하세요.`
+          : "정류장 추가 모드입니다. 먼저 노선을 입력한 뒤 지도에서 위치를 클릭하세요.",
         false
       );
     } else if (!selectedPointId) {
@@ -2947,13 +4633,13 @@
 
   function handleStartPointEditMode() {
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 포인트 수정 모드를 사용할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 정류장 수정 모드를 사용할 수 없습니다.", true);
       return;
     }
 
     const point = getPointById(selectedPointId);
     if (!point) {
-      setStatus("수정할 포인트를 먼저 선택하세요.", true);
+      setStatus("수정할 정류장을 먼저 선택하세요.", true);
       return;
     }
 
@@ -3017,13 +4703,13 @@
         workingPathCoordinates = expandMovedVertexWithMidpoints(workingPathCoordinates, movedIndex);
         persistWorkingPath({
           closeModes: false,
-          successMessage: () => "선택한 점 위치를 이동했고, 연결 선 중간에 새 편집점을 추가한 뒤 자동 저장했습니다.",
+          successMessage: () => "선택한 지점을 이동하고 연결선 사이에 보정 좌표를 추가해 경로를 자동 저장했습니다.",
         });
         return;
       }
 
       if (editPathMode && !pathExtendMode) {
-        setStatus("경로 편집 중에는 점을 먼저 선택한 뒤 지도에서 새 위치를 클릭하세요. 선 연장은 마지막 점 우클릭 후 경로 연장을 선택하면 됩니다.", true);
+        setStatus("경로 편집 중입니다. 먼저 이동할 꼭짓점을 선택한 뒤 지도에서 새 위치를 클릭하세요. 경로를 연장하려면 마지막 꼭짓점의 메뉴를 사용하세요.", true);
         return;
       }
 
@@ -3039,8 +4725,8 @@
       updatePathEditorUi();
       setStatus(
         drawPathMode
-          ? `경로 점 ${workingPathCoordinates.length}개를 추가했습니다. 저장하려면 경로 저장을 누르세요.`
-          : `경로 끝점이 추가되었습니다. 계속 연장할 수 있으며, 마지막 빨간 점을 다시 클릭하면 저장합니다.`,
+          ? `경로 좌표 ${workingPathCoordinates.length}개를 추가했습니다. 완료하려면 경로 저장을 누르세요.`
+          : `경로 연장 지점을 추가했습니다. 계속 이어서 그리려면 마지막 꼭짓점을 다시 클릭해 연장 모드를 유지하세요.`,
         false
       );
       return;
@@ -3052,6 +4738,16 @@
     }
 
     if (!addPointMode) {
+      if (selectedRouteName || selectedPointId || selectedPathId) {
+        hasClearedSelection = true;
+        selectedRouteName = null;
+        selectedPointId = null;
+        selectedPathId = null;
+        setEmptyDetails();
+        setEmptyPathDetails();
+        refreshUI();
+        setStatus("선택을 초기화했습니다.", false);
+      }
       return;
     }
 
@@ -3059,17 +4755,18 @@
     renderFormRouteOptions(selectedRouteName);
     ensureDraftMarker(lat, lng);
     formEls.name.focus();
-    setStatus(`새 포인트 위치를 선택했습니다. 노선은 ${selectedRouteName} 입니다.`, false);
+    setStatus(`정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`, false);
   }
 
   function selectPoint(point, marker, infoWindow) {
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 포인트를 수정할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 정류장을 선택할 수 없습니다.", true);
       return;
     }
 
     stopPathModes();
     stopRelocateMode();
+    hasClearedSelection = false;
     selectedRouteName = point.routeName;
     selectedPointId = point.id;
     selectedPathId = null;
@@ -3083,7 +4780,7 @@
       infoWindow.open(map, marker);
       map.panTo(marker.getPosition());
     }
-    setStatus(`포인트 "${point.name}" 를 선택했습니다. 필요하면 포인트 수정 모드를 누르세요.`, false);
+    setStatus(`정류장 "${point.name}" 을 선택했습니다. 필요하면 정류장 수정 모드를 사용하세요.`, false);
   }
 
   function selectPointById(pointId) {
@@ -3099,6 +4796,7 @@
   function selectPath(pathItem) {
     stopPathModes();
     stopRelocateMode();
+    hasClearedSelection = false;
     selectedRouteName = pathItem.routeName;
     selectedPointId = null;
     selectedPathId = pathItem.id;
@@ -3269,17 +4967,17 @@
 
   function handleDeletePoint() {
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 포인트를 삭제할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 정류장을 삭제할 수 없습니다.", true);
       return;
     }
 
     const point = getPointById(selectedPointId);
     if (!point) {
-      setStatus("삭제할 포인트를 먼저 선택하세요.", true);
+      setStatus("삭제할 정류장을 먼저 선택하세요.", true);
       return;
     }
 
-    const confirmed = window.confirm(`포인트 "${point.name}" 을(를) 삭제하시겠습니까?`);
+    const confirmed = window.confirm(`정류장 "${point.name}" 을 삭제하시겠습니까?`);
     if (!confirmed) {
       return;
     }
@@ -3298,7 +4996,7 @@
     stopRelocateMode();
     selectedPointId = null;
     refreshUI();
-    setStatus(`포인트 "${point.name}" 을(를) 삭제했습니다.`, false);
+    setStatus(`정류장 "${point.name}" 을 삭제했습니다.`, false);
   }
 
   function handleDeleteRoute(routeName) {
@@ -3306,7 +5004,7 @@
     const routePointCount = getAllPoints().filter((point) => point.routeName === normalizedRouteName).length;
     const routePathCount = getAllPaths().filter((path) => path.routeName === normalizedRouteName).length;
     const confirmed = window.confirm(
-      `노선 "${normalizedRouteName}" 과 하위 포인트 ${routePointCount}개, 경로 ${routePathCount}개를 삭제하시겠습니까?`
+      `노선 "${normalizedRouteName}" 과 하위 정류장 ${routePointCount}개, 경로 ${routePathCount}개를 삭제하시겠습니까?`
     );
 
     if (!confirmed) {
@@ -3356,7 +5054,7 @@
 
     stopRelocateMode();
     refreshUI();
-    setStatus(`노선 "${normalizedRouteName}" 을(를) 삭제했습니다.`, false);
+    setStatus(`노선 "${normalizedRouteName}" 을 삭제했습니다.`, false);
   }
 
   function movePointToRoute(pointId, targetRouteName) {
@@ -3394,7 +5092,7 @@
 
   function handleMovePoint() {
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 포인트를 이동할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 정류장을 이동할 수 없습니다.", true);
       return;
     }
 
@@ -3402,7 +5100,7 @@
     const targetRouteName = normalizeRouteName(moveRouteSelectEl.value);
 
     if (!point) {
-      setStatus("이동할 포인트를 먼저 선택하세요.", true);
+      setStatus("이동할 정류장을 먼저 선택하세요.", true);
       return;
     }
 
@@ -3416,14 +5114,14 @@
     selectedPointId = point.id;
     stopRelocateMode();
     refreshUI();
-    setStatus(`포인트를 ${targetRouteName} 노선으로 이동했습니다.`, false);
+    setStatus(`정류장을 ${targetRouteName} 노선으로 이동했습니다.`, false);
   }
 
   function persistWorkingPath(options = {}) {
     const { closeModes = false, successMessage } = options;
 
     if (workingPathCoordinates.length < 2) {
-      throw new Error("경로는 최소 2개 좌표가 필요합니다.");
+      throw new Error("경로에는 최소 2개 좌표가 필요합니다.");
     }
 
     const routeName = getSelectedPathRouteName();
@@ -3510,7 +5208,7 @@
     try {
       const updatedPath = persistWorkingPath({
         closeModes: true,
-        successMessage: (pathItem) => `경로 "${pathItem.name}" 을(를) 저장했습니다.`,
+        successMessage: (pathItem) => `경로 "${pathItem.name}" 을 저장했습니다.`,
       });
       return updatedPath;
     } catch (error) {
@@ -3525,7 +5223,7 @@
       return;
     }
 
-    const confirmed = window.confirm(`경로 "${selectedPath.name}" 을(를) 삭제하시겠습니까?`);
+    const confirmed = window.confirm(`경로 "${selectedPath.name}" 을 삭제하시겠습니까?`);
     if (!confirmed) {
       return;
     }
@@ -3544,7 +5242,7 @@
     stopPathModes();
     updatePathEditorUi();
     refreshUI();
-    setStatus(`경로 "${selectedPath.name}" 을(를) 삭제했습니다.`, false);
+    setStatus(`경로 "${selectedPath.name}" 을 삭제했습니다.`, false);
   }
 
   function buildPointFromForm(basePoint) {
@@ -3580,7 +5278,7 @@
     event.preventDefault();
 
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 포인트를 저장할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 정류장을 저장할 수 없습니다.", true);
       return;
     }
 
@@ -3612,7 +5310,7 @@
         selectedRouteName = updatedPoint.routeName;
       } else {
         if (!selectedRouteName) {
-          throw new Error("새 포인트를 만들기 전에 노선을 먼저 선택하세요.");
+          throw new Error("정류장을 만들기 전에 노선을 먼저 선택하세요.");
         }
 
         const lat = Number(formEls.lat.value);
@@ -3627,7 +5325,7 @@
       stopRelocateMode();
       setAddPointMode(false);
       refreshUI();
-      setStatus("포인트를 저장했습니다.", false);
+      setStatus("정류장을 저장했습니다.", false);
     } catch (error) {
       setStatus(error.message, true);
     }
@@ -3669,7 +5367,7 @@
     selectedPointId = null;
     selectedPathId = null;
     refreshUI();
-    setStatus("포인트와 경로를 지도에 표시했습니다.", false);
+    setStatus("정류장과 경로를 지도에 표시했습니다.", false);
   }
 
   function handleKeydown(event) {
@@ -3692,14 +5390,14 @@
     if (relocatePointId) {
       stopRelocateMode();
       refreshUI();
-      setStatus("포인트 수정 모드를 취소했습니다.", false);
+      setStatus("정류장 수정 모드를 취소했습니다.", false);
       return;
     }
 
     if (addPointMode) {
       setAddPointMode(false);
       clearDraftMarker();
-      setStatus("포인트 추가 모드를 취소했습니다.", false);
+      setStatus("정류장 추가 모드를 취소했습니다.", false);
     }
   }
 
@@ -3736,6 +5434,9 @@
   }
 
   function bindFormEvents() {
+    syncStatLabels();
+    syncOptimizationFeatureVisibility();
+    updateAnalyzeButtonState();
     pointDetailsToggleEl.addEventListener("click", () => {
       toggleCollapsibleSection(pointDetailsSectionEl, pointDetailsToggleEl);
     });
@@ -3762,7 +5463,7 @@
     );
     addPointButtonEl.addEventListener("click", () => {
       if (drawPathMode || editPathMode) {
-        setStatus("경로 편집 중에는 포인트 추가 모드를 사용할 수 없습니다.", true);
+        setStatus("경로 편집 중에는 정류장 추가 모드를 사용할 수 없습니다.", true);
         return;
       }
 
@@ -3783,7 +5484,7 @@
       if (relocatePointId) {
         stopRelocateMode();
         refreshUI();
-        setStatus("포인트 수정 모드를 종료했습니다.", false);
+        setStatus("정류장 수정 모드를 종료했습니다.", false);
         return;
       }
       handleStartPointEditMode();
@@ -3791,12 +5492,12 @@
 
     resetPointButtonEl.addEventListener("click", () => {
       if (drawPathMode || editPathMode) {
-        setStatus("경로 편집 중에는 새 포인트를 만들 수 없습니다.", true);
+        setStatus("경로 편집 중에는 새 정류장을 만들 수 없습니다.", true);
         return;
       }
 
       if (!selectedRouteName) {
-        setStatus("새 포인트를 만들기 전에 노선을 먼저 선택하세요.", true);
+        setStatus("정류장을 만들기 전에 노선을 먼저 선택하세요.", true);
         return;
       }
 
@@ -3806,7 +5507,7 @@
       renderFormRouteOptions(selectedRouteName);
       setAddPointMode(true);
       openPointFormSection();
-      setStatus(`새 포인트를 입력하세요. 현재 노선은 ${selectedRouteName} 입니다.`, false);
+      setStatus(`새 정류장 정보를 입력하세요. 현재 노선은 ${selectedRouteName} 입니다.`, false);
     });
 
     formRouteSelectEl.addEventListener("change", () => {
@@ -3834,6 +5535,9 @@
     saveKmlButtonEl.addEventListener("click", handleSaveKml);
     saveResetButtonEl.addEventListener("click", handleSaveAndReset);
     analyzeRoutesButtonEl.addEventListener("click", handleAnalyzeRoutesLocal);
+    if (OPTIMIZATION_FEATURE_ENABLED && optimizeRoutesButtonEl) {
+      optimizeRoutesButtonEl.addEventListener("click", handleOptimizeRoutes);
+    }
     analysisModalCloseEl.addEventListener("click", closeAnalysisModal);
     analysisModalEl.addEventListener("click", (event) => {
       if (event.target === analysisModalEl) {
@@ -3885,7 +5589,7 @@
       if (uploadedPoints.length || uploadedPaths.length || customPoints.length || customPaths.length) {
         setStatus("이전 작업 상태를 복원했습니다.", false);
       }
-      setStatus("준비되었습니다. 노선을 선택하고 포인트와 경로를 관리하세요.", false);
+      setStatus("준비되었습니다. 노선을 선택하고 정류장과 경로를 관리하세요.", false);
     } catch (error) {
       setStatus(error.message, true);
     }
@@ -3893,3 +5597,5 @@
 
   bootstrap();
 })();
+
+

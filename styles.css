@@ -395,6 +395,18 @@ h1 {
   margin-top: 6px;
 }
 
+.analysis-inline-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .details-card {
   margin-top: 10px;
   padding: 14px;
