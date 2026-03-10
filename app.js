@@ -29,6 +29,12 @@
   const hideAllRoutesButtonEl = document.getElementById("hide-all-routes-button");
   const routeListEl = document.getElementById("route-list");
   const routePointListEl = document.getElementById("route-point-list");
+  const routeMergePanelEl = document.getElementById("route-merge-panel");
+  const routeMergeSummaryEl = document.getElementById("route-merge-summary");
+  const mergeRouteASelectEl = document.getElementById("merge-route-a-select");
+  const mergeRouteBSelectEl = document.getElementById("merge-route-b-select");
+  const mergeRoutesButtonEl = document.getElementById("merge-routes-button");
+  const viewMergedRouteButtonEl = document.getElementById("view-merged-route-button");
   const pointDetailsSectionEl = document.getElementById("point-details-section");
   const pointDetailsToggleEl = document.getElementById("point-details-toggle");
   const pointFormSectionEl = document.getElementById("point-form-section");
@@ -52,6 +58,12 @@
   const startPathEditButtonEl = document.getElementById("start-path-edit-button");
   const designRouteButtonEl = document.getElementById("design-route-button");
   const resetDesignedRouteButtonEl = document.getElementById("reset-designed-route-button");
+  const villageBusDesignPanelEl = document.getElementById("village-bus-design-panel");
+  const villageBusRouteCaptionEl = document.getElementById("village-bus-route-caption");
+  const villageBusDesignSummaryEl = document.getElementById("village-bus-design-summary");
+  const designVillageBusRouteButtonEl = document.getElementById("design-village-bus-route-button");
+  const resetVillageBusRouteButtonEl = document.getElementById("reset-village-bus-route-button");
+  const villagePrioritySelectEl = document.getElementById("village-priority-select");
   const editPointButtonEl = document.getElementById("edit-point-button");
   const finishPathButtonEl = document.getElementById("finish-path-button");
   const cancelPathButtonEl = document.getElementById("cancel-path-button");
@@ -83,8 +95,12 @@
   let selectedPathVertexIndex = null;
   let relocatePointId = null;
   let selectedRouteName = null;
+  let mergeRouteAName = null;
+  let mergeRouteBName = null;
+  let latestMergedRouteName = null;
   let selectedPointId = null;
   let selectedPathId = null;
+  let draggedRoutePointId = null;
   let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
 
@@ -283,6 +299,43 @@
     return palette[hash % palette.length];
   }
 
+  function getDefaultVillageBusDesignSettings() {
+    return {
+      priority: "RECOMMEND",
+      avoid: [],
+      roadevent: 1,
+      alternatives: false,
+      roadDetails: false,
+      carType: 3,
+      carFuel: "",
+      carHipass: false,
+    };
+  }
+
+  function normalizeVillageBusDesignSettings(value) {
+    const defaults = getDefaultVillageBusDesignSettings();
+    const current = value && typeof value === "object" ? value : {};
+    const allowedAvoids = ["motorway", "toll", "uturn", "schoolzone", "ferries"];
+    const avoid = Array.isArray(current.avoid)
+      ? current.avoid.filter((item, index, array) => allowedAvoids.includes(item) && array.indexOf(item) === index)
+      : defaults.avoid;
+    const priority = ["RECOMMEND", "TIME", "DISTANCE"].includes(current.priority) ? current.priority : defaults.priority;
+    const roadevent = [0, 1, 2].includes(Number(current.roadevent)) ? Number(current.roadevent) : defaults.roadevent;
+    const carType = 3;
+    const carFuel = "";
+
+    return {
+      priority,
+      avoid: [],
+      roadevent,
+      alternatives: false,
+      roadDetails: false,
+      carType,
+      carFuel,
+      carHipass: false,
+    };
+  }
+
   function getRouteSetting(routeName) {
     const normalizedRouteName = normalizeRouteName(routeName);
     const current = routeSettings[normalizedRouteName] || {};
@@ -290,6 +343,7 @@
       color: current.color || colorFromRouteName(normalizedRouteName),
       visible: current.visible !== false,
       deleted: current.deleted === true,
+      villageBusDesign: normalizeVillageBusDesignSettings(current.villageBusDesign),
     };
   }
 
@@ -346,6 +400,7 @@
       ...point,
       ...override,
       source: "uploaded",
+      createdOrder: Number.isFinite(Number(override.createdOrder)) ? Number(override.createdOrder) : null,
       routeName: normalizeRouteName(override.routeName || point.routeName || point.fileName),
       extendedData: normalizeExtendedData(override.extendedData || point.extendedData),
     };
@@ -409,10 +464,11 @@
   }
 
   function getPointOrderValue(point) {
+    if (Number.isFinite(Number(point.createdOrder))) {
+      return Number(point.createdOrder);
+    }
+
     if (point.source === "custom") {
-      if (Number.isFinite(Number(point.createdOrder))) {
-        return Number(point.createdOrder);
-      }
       const customMatch = String(point.id).match(/^custom-(\d+)/);
       if (customMatch) {
         return Number(customMatch[1]);
@@ -444,6 +500,14 @@
     return getAllPoints().filter((point) => point.routeName === selectedRouteName).sort(comparePointsByOrder);
   }
 
+  function getPointsInRoute(routeName) {
+    if (!routeName) {
+      return [];
+    }
+
+    return getAllPoints().filter((point) => point.routeName === routeName).sort(comparePointsByOrder);
+  }
+
   function ensureSelectedPath() {
     if (selectedPathId && !getPathById(selectedPathId)) {
       selectedPathId = null;
@@ -465,6 +529,23 @@
 
     if (!selectedRouteName || !routes.includes(selectedRouteName)) {
       selectedRouteName = routes[0];
+    }
+  }
+
+  function ensureMergeRoutes() {
+    const routes = getRoutes();
+    if (routes.length < 2) {
+      mergeRouteAName = null;
+      mergeRouteBName = null;
+      return;
+    }
+
+    if (!mergeRouteAName || !routes.includes(mergeRouteAName)) {
+      mergeRouteAName = selectedRouteName && routes.includes(selectedRouteName) ? selectedRouteName : routes[0];
+    }
+
+    if (!mergeRouteBName || !routes.includes(mergeRouteBName) || mergeRouteBName === mergeRouteAName) {
+      mergeRouteBName = routes.find((routeName) => routeName !== mergeRouteAName) || null;
     }
   }
 
@@ -507,6 +588,42 @@
       lat: (a.lat + b.lat) / 2,
       lng: (a.lng + b.lng) / 2,
     };
+  }
+
+  function directionVector(points, index) {
+    const current = points[index];
+    const prev = points[index - 1] || null;
+    const next = points[index + 1] || null;
+
+    if (!current) {
+      return null;
+    }
+
+    const start = prev || current;
+    const end = next || current;
+    const dx = Number(end.lng) - Number(start.lng);
+    const dy = Number(end.lat) - Number(start.lat);
+    const length = Math.hypot(dx, dy);
+
+    if (!Number.isFinite(length) || length === 0) {
+      return null;
+    }
+
+    return {
+      dx: dx / length,
+      dy: dy / length,
+    };
+  }
+
+  function directionSimilarity(pointsA, indexA, pointsB, indexB) {
+    const vectorA = directionVector(pointsA, indexA);
+    const vectorB = directionVector(pointsB, indexB);
+
+    if (!vectorA || !vectorB) {
+      return 0;
+    }
+
+    return vectorA.dx * vectorB.dx + vectorA.dy * vectorB.dy;
   }
 
   function formatDistanceKm(distanceMeters) {
@@ -1655,53 +1772,178 @@
     });
   }
 
-  async function requestDesignedRouteInBatches(routeName, points, maxPointsPerRequest = 10) {
-    const allCoordinates = [];
-    let usedFallback = false;
-    let totalDistanceMeters = 0;
-    let totalDurationSeconds = 0;
-
-    if (points.length < 2) {
-      return {
-        coordinates: buildPointSequenceCoordinates(points),
-        usedFallback: true,
-        totalDistanceMeters,
-        totalDurationSeconds,
-      };
+  function measureCoordinatePathDistance(coordinates) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return 0;
     }
 
-    for (let startIndex = 0; startIndex < points.length - 1; ) {
-      const endIndex = Math.min(startIndex + maxPointsPerRequest - 1, points.length - 1);
-      const batchPoints = points.slice(startIndex, endIndex + 1);
-
-      try {
-        const result = await requestDesignedRoute(`${routeName}-${startIndex + 1}`, batchPoints);
-        const coordinates = extractDesignedRouteCoordinates(result);
-        const summary = extractDesignedRouteSummary(result);
-        if (coordinates.length < 2) {
-          throw new Error("Designed route did not return enough coordinates.");
-        }
-        appendUniqueCoordinates(allCoordinates, coordinates);
-        totalDistanceMeters += summary.totalDistanceMeters;
-        totalDurationSeconds += summary.totalDurationSeconds;
-      } catch (error) {
-        usedFallback = true;
-        appendUniqueCoordinates(allCoordinates, buildPointSequenceCoordinates(batchPoints));
-        totalDistanceMeters += batchPoints.slice(0, -1).reduce((sum, point, index) => sum + distanceInMeters(point, batchPoints[index + 1]), 0);
-      }
-
-      if (endIndex === points.length - 1) {
-        break;
-      }
-      startIndex = endIndex;
+    let distance = 0;
+    for (let index = 1; index < coordinates.length; index += 1) {
+      distance += segmentLengthMeters(coordinates[index - 1], coordinates[index]);
     }
+    return Number(distance.toFixed(1));
+  }
+
+  function findNearestCoordinateIndex(coordinates, point) {
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    coordinates.forEach((coordinate, index) => {
+      const distance = distanceInMeters(coordinate, point);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
 
     return {
-      coordinates: allCoordinates,
-      usedFallback,
-      totalDistanceMeters: Number(totalDistanceMeters.toFixed(1)),
-      totalDurationSeconds: Math.round(totalDurationSeconds),
+      index: bestIndex,
+      distanceMeters: bestDistance,
     };
+  }
+
+  function sliceCoordinatesBetweenPoints(coordinates, startPoint, endPoint, toleranceMeters = 250) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return [];
+    }
+
+    const start = findNearestCoordinateIndex(coordinates, startPoint);
+    const end = findNearestCoordinateIndex(coordinates, endPoint);
+
+    if (start.index < 0 || end.index < 0) {
+      return [];
+    }
+    if (start.distanceMeters > toleranceMeters || end.distanceMeters > toleranceMeters) {
+      return [];
+    }
+    if (end.index <= start.index) {
+      return [];
+    }
+
+    return coordinates.slice(start.index, end.index + 1);
+  }
+
+  async function requestDesignedRouteSegment(routeName, points, designOptions = {}) {
+    if (points.length < 2) {
+      throw new Error("Designed route segment requires at least two points.");
+    }
+
+    const result = await requestDesignedRoute(routeName, points, designOptions);
+    const selected = chooseBestDesignedRoute(result.routes, designOptions);
+    if (!selected) {
+      throw new Error("Designed route did not return a usable route.");
+    }
+    const coordinates = extractDesignedRouteCoordinates(result, selected.index);
+    const summary = extractDesignedRouteSummary(result, selected.index);
+    if (coordinates.length < 2) {
+      throw new Error("Designed route did not return enough coordinates.");
+    }
+    return {
+      coordinates,
+      usedFallback: false,
+      totalDistanceMeters: summary.totalDistanceMeters,
+      totalDurationSeconds: summary.totalDurationSeconds,
+    };
+  }
+
+  async function requestDesignedRoutePairWithContext(routeName, allPoints, startIndex, designOptions = {}) {
+    const startPoint = allPoints[startIndex];
+    const endPoint = allPoints[startIndex + 1];
+    const attempts = [];
+
+    if (startIndex > 0 && startIndex + 1 < allPoints.length - 1) {
+      attempts.push({
+        label: "context-both",
+        points: [allPoints[startIndex - 1], startPoint, endPoint, allPoints[startIndex + 2]],
+      });
+    }
+    if (startIndex > 0) {
+      attempts.push({
+        label: "context-prev",
+        points: [allPoints[startIndex - 1], startPoint, endPoint],
+      });
+    }
+    if (startIndex + 1 < allPoints.length - 1) {
+      attempts.push({
+        label: "context-next",
+        points: [startPoint, endPoint, allPoints[startIndex + 2]],
+      });
+    }
+
+    for (const attempt of attempts) {
+      try {
+        const result = await requestDesignedRouteSegment(`${routeName}-${attempt.label}-${startIndex + 1}`, attempt.points, designOptions);
+        const slicedCoordinates = sliceCoordinatesBetweenPoints(result.coordinates, startPoint, endPoint);
+        if (slicedCoordinates.length >= 2) {
+          const slicedDistance = measureCoordinatePathDistance(slicedCoordinates);
+          const distanceRatio = result.totalDistanceMeters > 0 ? Math.min(1, slicedDistance / result.totalDistanceMeters) : 0;
+          return {
+            coordinates: slicedCoordinates,
+            usedFallback: false,
+            totalDistanceMeters: slicedDistance,
+            totalDurationSeconds: Math.round((result.totalDurationSeconds || 0) * distanceRatio),
+          };
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+
+    throw new Error(`"${startPoint?.name || `${startIndex + 1}번 정류장`}" -> "${endPoint?.name || `${startIndex + 2}번 정류장`}" 구간의 도로 경로를 생성하지 못했습니다.`);
+  }
+
+  async function requestDesignedRouteRange(routeName, allPoints, startIndex, endIndex, designOptions = {}, depth = 0) {
+    const rangePoints = allPoints.slice(startIndex, endIndex + 1);
+    if (rangePoints.length < 2) {
+      throw new Error("노선 생성에는 정류장 2개 이상이 필요합니다.");
+    }
+
+    const maxPointsPerRequest = 10;
+    const canTryDirectRequest = rangePoints.length <= maxPointsPerRequest;
+
+    if (canTryDirectRequest) {
+      try {
+        return await requestDesignedRouteSegment(`${routeName}-${startIndex + 1}-${endIndex + 1}`, rangePoints, designOptions);
+      } catch (error) {
+        if (rangePoints.length === 2) {
+          return requestDesignedRoutePairWithContext(routeName, allPoints, startIndex, designOptions);
+        }
+      }
+    }
+
+    if (rangePoints.length === 2) {
+      return requestDesignedRoutePairWithContext(routeName, allPoints, startIndex, designOptions);
+    }
+
+    const splitIndex = Math.floor((startIndex + endIndex) / 2);
+    if (splitIndex <= startIndex || splitIndex >= endIndex) {
+      return requestDesignedRoutePairWithContext(routeName, allPoints, startIndex, designOptions);
+    }
+
+    const leftSegment = await requestDesignedRouteRange(routeName, allPoints, startIndex, splitIndex, designOptions, depth + 1);
+    const rightSegment = await requestDesignedRouteRange(routeName, allPoints, splitIndex, endIndex, designOptions, depth + 1);
+    const coordinates = [];
+    appendUniqueCoordinates(coordinates, leftSegment.coordinates);
+    appendUniqueCoordinates(coordinates, rightSegment.coordinates);
+
+    return {
+      coordinates,
+      usedFallback: false,
+      totalDistanceMeters: Number(((leftSegment.totalDistanceMeters || 0) + (rightSegment.totalDistanceMeters || 0)).toFixed(1)),
+      totalDurationSeconds: Math.round((leftSegment.totalDurationSeconds || 0) + (rightSegment.totalDurationSeconds || 0)),
+    };
+  }
+
+  async function requestDesignedRouteInBatches(routeName, points, designOptions = {}) {
+    if (points.length < 2) {
+      throw new Error("노선 생성에는 정류장 2개 이상이 필요합니다.");
+    }
+
+    try {
+      return await requestDesignedRouteRange(routeName, points, 0, points.length - 1, designOptions);
+    } catch (error) {
+      throw new Error(error.message || "도로 경로를 생성하지 못했습니다.");
+    }
   }
 
   function finalizeRouteMetrics(route) {
@@ -3107,7 +3349,7 @@
     return response.json();
   }
 
-  async function requestDesignedRoute(routeName, points) {
+  async function requestDesignedRoute(routeName, points, options = {}) {
     const response = await window.fetch("/api/design-route", {
       method: "POST",
       headers: {
@@ -3115,6 +3357,7 @@
       },
       body: JSON.stringify({
         routeName,
+        options,
         points: points.map((point) => ({
           id: point.id,
           name: point.name,
@@ -3130,6 +3373,27 @@
     }
 
     return response.json();
+  }
+
+  function chooseBestDesignedRoute(routes, designOptions) {
+    if (!Array.isArray(routes) || !routes.length) {
+      return null;
+    }
+
+    const priority = designOptions.priority || "RECOMMEND";
+    if (priority === "RECOMMEND") {
+      return { route: routes[0], index: 0, score: 0 };
+    }
+    const scored = routes.map((route, index) => {
+      const summary = route?.summary || {};
+      const distance = Number(summary.distance) || Number.MAX_SAFE_INTEGER;
+      const duration = Number(summary.duration) || Number.MAX_SAFE_INTEGER;
+      const score = priority === "TIME" ? duration * 1000 + distance : distance * 1000 + duration;
+      return { route, index, score };
+    });
+
+    scored.sort((a, b) => a.score - b.score);
+    return scored[0] || null;
   }
 
   function convertVertexesToCoordinates(vertexes) {
@@ -3148,13 +3412,12 @@
     return coordinates;
   }
 
-  function extractDesignedRouteCoordinates(payload) {
+  function extractDesignedRouteCoordinates(payload, routeIndex = 0) {
     const coordinates = [];
-    (payload.routes || []).forEach((route) => {
-      (route.sections || []).forEach((section) => {
-        (section.roads || []).forEach((road) => {
-          coordinates.push(...convertVertexesToCoordinates(road.vertexes || []));
-        });
+    const route = (payload.routes || [])[routeIndex];
+    (route?.sections || []).forEach((section) => {
+      (section.roads || []).forEach((road) => {
+        coordinates.push(...convertVertexesToCoordinates(road.vertexes || []));
       });
     });
 
@@ -3178,8 +3441,8 @@
       .filter((coordinate) => Number.isFinite(coordinate.lat) && Number.isFinite(coordinate.lng));
   }
 
-  function extractDesignedRouteSummary(payload) {
-    const summary = payload?.routes?.[0]?.summary || {};
+  function extractDesignedRouteSummary(payload, routeIndex = 0) {
+    const summary = payload?.routes?.[routeIndex]?.summary || {};
     return {
       totalDistanceMeters: Number(summary.distance) || 0,
       totalDurationSeconds: Number(summary.duration) || 0,
@@ -3257,26 +3520,84 @@
       false
     );
   }
-  async function handleDesignRoute() {
-    if (!selectedRouteName) {
-      setStatus("\uB178\uC120\uC744 \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694.", true);
-      return;
-    }
 
-    const routePoints = getPointsInSelectedRoute();
-    if (routePoints.length < 2) {
-      setStatus("\uB178\uC120 \uC124\uACC4\uB97C \uD558\uB824\uBA74 \uAC19\uC740 \uB178\uC120\uC5D0 \uD3EC\uC778\uD2B8\uAC00 2\uAC1C \uC774\uC0C1 \uC788\uC5B4\uC57C \uD569\uB2C8\uB2E4.", true);
-      return;
-    }
+  function buildVillageBusDesignAttempts(baseSetting) {
+    const normalized = normalizeVillageBusDesignSettings(baseSetting);
+    const selected = {
+      priority: normalized.priority,
+      avoid: normalized.avoid,
+    };
+    const recommended = {
+      priority: "RECOMMEND",
+    };
+    const relaxedTime = {
+      priority: "TIME",
+    };
+    const relaxedDistance = {
+      priority: "DISTANCE",
+    };
 
-    designRouteButtonEl.disabled = true;
-    setStatus(`"${selectedRouteName}" \uB178\uC120 \uC124\uACC4\uB97C \uC2DC\uC791\uD569\uB2C8\uB2E4. \uCCAB \uD3EC\uC778\uD2B8\uBD80\uD130 \uB9C8\uC9C0\uB9C9 \uD3EC\uC778\uD2B8 \uC21C\uC11C\uB85C \uACBD\uB85C\uB97C \uACC4\uC0B0\uD569\uB2C8\uB2E4.`, false);
+    return [
+      {
+        label: "선택 옵션",
+        options: selected,
+      },
+      {
+        label: "추천 경로 재시도",
+        options: recommended,
+      },
+      {
+        label: "시간 우선 재시도",
+        options: relaxedTime,
+      },
+      {
+        label: "거리 우선 재시도",
+        options: relaxedDistance,
+      },
+    ].filter((attempt, index, attempts) => {
+      const key = JSON.stringify(attempt.options);
+      return attempts.findIndex((item) => JSON.stringify(item.options) === key) === index;
+    });
+  }
+
+  function buildDesignedPathDescription(modeLabel, usedFallback, selectedOption) {
+    if (usedFallback) {
+      return `${modeLabel}: 카카오 응답이 불완전해 정류장 순서를 기준으로 직선 연결한 경로`;
+    }
+    const avoid = Array.isArray(selectedOption.avoid) && selectedOption.avoid.length
+      ? ` / 회피: ${selectedOption.avoid.join(", ")}`
+      : "";
+    return `${modeLabel}: 카카오모빌리티 경로 결과 반영 / 우선순위 ${selectedOption.priority}${avoid}`;
+  }
+
+  async function designRouteWithOptions(routeName, routePoints, baseDesignOptions, modeLabel, triggerButtonEl) {
+    triggerButtonEl.disabled = true;
+    setStatus(`"${routeName}" ${modeLabel}을 시작합니다. 정류장 순서는 유지한 채 경로를 계산합니다.`, false);
 
     try {
-      const result = await requestDesignedRoute(selectedRouteName, routePoints);
-      let coordinates = extractDesignedRouteCoordinates(result);
-      let usedFallback = false;
-      const summary = extractDesignedRouteSummary(result);
+      const attempts = buildVillageBusDesignAttempts(baseDesignOptions);
+      let selectedOptions = normalizeVillageBusDesignSettings(baseDesignOptions);
+      let designedRoute = null;
+
+      for (const attempt of attempts) {
+        const candidateDesignedRoute = await requestDesignedRouteInBatches(routeName, routePoints, attempt.options);
+        if (candidateDesignedRoute.coordinates.length >= 2) {
+          designedRoute = candidateDesignedRoute;
+          selectedOptions = attempt.options;
+          break;
+        }
+      }
+
+      if (!designedRoute) {
+        throw new Error("카카오 경로 응답에서 사용할 수 있는 경로를 찾지 못했습니다.");
+      }
+
+      let coordinates = designedRoute.coordinates;
+      let usedFallback = designedRoute.usedFallback === true;
+      const summary = {
+        totalDistanceMeters: designedRoute.totalDistanceMeters,
+        totalDurationSeconds: designedRoute.totalDurationSeconds,
+      };
 
       if (coordinates.length < 2) {
         coordinates = buildPointSequenceCoordinates(routePoints);
@@ -3284,22 +3605,20 @@
       }
 
       if (coordinates.length < 2) {
-        throw new Error("\uC124\uACC4 \uACB0\uACFC\uC5D0\uC11C \uACBD\uB85C \uC88C\uD45C\uB97C \uCDA9\uBD84\uD788 \uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+        throw new Error("설계 결과에서 경로 좌표를 충분히 받지 못했습니다.");
       }
 
       customPaths = customPaths.filter(
-        (pathItem) => !(pathItem.routeName === selectedRouteName && pathItem.designedRoute === true)
+        (pathItem) => !(pathItem.routeName === routeName && pathItem.designedRoute === true)
       );
 
       const designedPath = {
-        id: `designed-route-${selectedRouteName}-${Date.now()}` ,
+        id: `designed-route-${routeName}-${Date.now()}`,
         source: "custom-path",
-        routeName: selectedRouteName,
-        fileName: "\uB178\uC120 \uC124\uACC4",
-        name: `${selectedRouteName} \uC124\uACC4 \uB178\uC120`,
-        description: usedFallback
-          ? "\uD3EC\uC778\uD2B8 \uC21C\uC11C\uB97C \uAE30\uC900\uC73C\uB85C \uC9C1\uC120 \uC5F0\uACB0\uD55C \uC124\uACC4 \uB178\uC120"
-          : "\uCE74\uCE74\uC624\uBAA8\uBE4C\uB9AC\uD2F0 \uC124\uACC4 \uACB0\uACFC\uB97C \uBC18\uC601\uD55C \uB178\uC120",
+        routeName,
+        fileName: "노선 설계",
+        name: `${routeName} 설계 노선`,
+        description: buildDesignedPathDescription(modeLabel, usedFallback, selectedOptions),
         coordinates,
         rawCoordinates: coordinates.map((item) => `${item.lng},${item.lat}`).join(" "),
         totalDistanceMeters: summary.totalDistanceMeters,
@@ -3315,17 +3634,67 @@
       selectedPathId = designedPath.id;
       refreshUI();
 
-      setStatus(
-        usedFallback
-          ? `"${selectedRouteName}" \uC124\uACC4 \uB178\uC120\uC744 \uD3EC\uC778\uD2B8 \uC21C\uC11C\uB300\uB85C \uADF8\uB838\uC2B5\uB2C8\uB2E4.`
-          : `"${selectedRouteName}" \uC124\uACC4 \uB178\uC120\uC744 \uADF8\uB838\uC2B5\uB2C8\uB2E4.` ,
-        false
-      );
+      const warnings = [];
+      if (summary.totalDistanceMeters > 25000) {
+        warnings.push(`총거리 ${formatDistanceKm(summary.totalDistanceMeters)}km`);
+      }
+      if (summary.totalDurationSeconds > 5400) {
+        warnings.push(`총시간 ${formatDurationMinutes(summary.totalDurationSeconds)}분`);
+      }
+
+      const warningText = warnings.length ? ` 다만 ${warnings.join(", ")}로 길게 계산되었습니다.` : "";
+      setStatus(`"${routeName}" ${modeLabel}을 완료했습니다.${warningText}`, warnings.length > 0);
     } catch (error) {
-      setStatus(error.message || "\uB178\uC120 \uC124\uACC4 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4.", true);
+      setStatus(error.message || "노선 설계 중 오류가 발생했습니다.", true);
     } finally {
-      designRouteButtonEl.disabled = false;
+      triggerButtonEl.disabled = false;
     }
+  }
+
+  async function handleDesignRoute() {
+    if (!selectedRouteName) {
+      setStatus("\uB178\uC120\uC744 \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694.", true);
+      return;
+    }
+
+    const routePoints = getPointsInSelectedRoute();
+    if (routePoints.length < 2) {
+      setStatus("\uB178\uC120 \uC124\uACC4\uB97C \uD558\uB824\uBA74 \uAC19\uC740 \uB178\uC120\uC5D0 \uD3EC\uC778\uD2B8\uAC00 2\uAC1C \uC774\uC0C1 \uC788\uC5B4\uC57C \uD569\uB2C8\uB2E4.", true);
+      return;
+    }
+
+    await designRouteWithOptions(
+      selectedRouteName,
+      routePoints,
+      {
+        priority: "RECOMMEND",
+        avoid: [],
+        roadevent: 1,
+        alternatives: false,
+        roadDetails: true,
+        carType: 1,
+        carFuel: "GASOLINE",
+        carHipass: false,
+      },
+      "기본 노선 설계",
+      designRouteButtonEl
+    );
+  }
+
+  async function handleVillageBusDesignRoute(triggerButtonEl = designVillageBusRouteButtonEl) {
+    if (!selectedRouteName) {
+      setStatus("노선을 먼저 선택하세요.", true);
+      return;
+    }
+
+    const routePoints = getPointsInSelectedRoute();
+    if (routePoints.length < 2) {
+      setStatus("마을버스 설계를 하려면 같은 노선에 포인트가 2개 이상 있어야 합니다.", true);
+      return;
+    }
+
+    const current = getRouteSetting(selectedRouteName).villageBusDesign;
+    await designRouteWithOptions(selectedRouteName, routePoints, current, "마을버스 설계", triggerButtonEl);
   }
 
   function handleResetDesignedRoute() {
@@ -3891,6 +4260,556 @@
     setStatus(visible ? "모든 노선을 표시합니다." : "모든 노선을 숨겼습니다.", false);
   }
 
+  function updateVillageBusRouteSetting(partialVillageBusDesign) {
+    if (!selectedRouteName) {
+      return;
+    }
+
+    const current = getRouteSetting(selectedRouteName);
+    routeSettings[selectedRouteName] = {
+      ...current,
+      villageBusDesign: normalizeVillageBusDesignSettings({
+        ...current.villageBusDesign,
+        ...partialVillageBusDesign,
+      }),
+    };
+    saveRouteSettings();
+    renderVillageBusDesignPanel();
+  }
+
+  function getVillageBusDesignSummaryText(setting) {
+    return `우선순위 ${setting.priority}, 차종 대형, 도로 이벤트 기본 반영으로 설계합니다.`;
+  }
+
+  function buildMergedPointName(pointA, pointB) {
+    const nameA = String(pointA?.name || "").trim();
+    const nameB = String(pointB?.name || "").trim();
+    if (!nameA) {
+      return nameB || "병합 정류장";
+    }
+    if (!nameB || nameA === nameB) {
+      return nameA;
+    }
+    return `${nameA} · ${nameB}`;
+  }
+
+  function buildMergedExtendedData(sourcePoints) {
+    const rows = [{ name: "병합 유형", value: "두 노선 병합 정류장" }];
+    sourcePoints.forEach((point, index) => {
+      rows.push({
+        name: `원본 ${index + 1}`,
+        value: `${point.routeName} / ${point.name}`,
+      });
+    });
+    return rows;
+  }
+
+  function normalizeStopNameForMerge(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/[()\-.,]/g, "")
+      .replace(/정류장|정거장|버스정류소|버스정류장/g, "");
+  }
+
+  function stopNameSimilarity(pointA, pointB) {
+    const nameA = normalizeStopNameForMerge(pointA?.name);
+    const nameB = normalizeStopNameForMerge(pointB?.name);
+
+    if (!nameA || !nameB) {
+      return 0;
+    }
+    if (nameA === nameB) {
+      return 1;
+    }
+    if (nameA.includes(nameB) || nameB.includes(nameA)) {
+      return 0.8;
+    }
+
+    const tokensA = new Set(nameA.split(/[0-9]/).filter(Boolean));
+    const tokensB = new Set(nameB.split(/[0-9]/).filter(Boolean));
+    let overlap = 0;
+    tokensA.forEach((token) => {
+      if (tokensB.has(token)) {
+        overlap += 1;
+      }
+    });
+    return overlap > 0 ? overlap / Math.max(tokensA.size, tokensB.size, 1) : 0;
+  }
+
+  function buildStopMatchCandidates(pointsA, pointsB, maxDistanceMeters = 65) {
+    const candidates = [];
+
+    pointsA.forEach((pointA, indexA) => {
+      pointsB.forEach((pointB, indexB) => {
+        const distanceMeters = distanceInMeters(pointA, pointB);
+        if (distanceMeters > maxDistanceMeters) {
+          return;
+        }
+
+        const similarity = directionSimilarity(pointsA, indexA, pointsB, indexB);
+        if (similarity < -0.2) {
+          return;
+        }
+
+        const nameSimilarity = stopNameSimilarity(pointA, pointB);
+        if (similarity < 0.15 && distanceMeters > 35 && nameSimilarity < 0.7) {
+          return;
+        }
+
+        const distanceScore = Math.max(0, 1 - distanceMeters / maxDistanceMeters);
+        const directionScore = Math.max(0, (similarity + 0.2) / 1.2);
+        const score = distanceScore * 1.2 + directionScore * 1.35 + nameSimilarity * 0.8;
+
+        if (score < 1.1) {
+          return;
+        }
+
+        candidates.push({
+          aIndex: indexA,
+          bIndex: indexB,
+          distanceMeters,
+          similarity,
+          nameSimilarity,
+          score,
+        });
+      });
+    });
+
+    return candidates.sort((a, b) => a.aIndex - b.aIndex || a.bIndex - b.bIndex || b.score - a.score);
+  }
+
+  function findBestMonotonicMatchSequence(candidates) {
+    if (!candidates.length) {
+      return [];
+    }
+
+    const dp = candidates.map((candidate) => candidate.score);
+    const prev = new Array(candidates.length).fill(-1);
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      for (let previousIndex = 0; previousIndex < index; previousIndex += 1) {
+        const previous = candidates[previousIndex];
+        const current = candidates[index];
+        if (previous.aIndex >= current.aIndex || previous.bIndex >= current.bIndex) {
+          continue;
+        }
+
+        const deltaA = current.aIndex - previous.aIndex;
+        const deltaB = current.bIndex - previous.bIndex;
+        if (deltaA > 4 || deltaB > 4) {
+          continue;
+        }
+
+        const continuityBonus = deltaA <= 2 && deltaB <= 2 ? 0.35 : 0.1;
+        const nextScore = dp[previousIndex] + current.score + continuityBonus;
+        if (nextScore > dp[index]) {
+          dp[index] = nextScore;
+          prev[index] = previousIndex;
+        }
+      }
+    }
+
+    let bestIndex = 0;
+    for (let index = 1; index < dp.length; index += 1) {
+      if (dp[index] > dp[bestIndex]) {
+        bestIndex = index;
+      }
+    }
+
+    const sequence = [];
+    for (let index = bestIndex; index >= 0; index = prev[index]) {
+      sequence.push(candidates[index]);
+      if (prev[index] === -1) {
+        break;
+      }
+    }
+    return sequence.reverse();
+  }
+
+  function extractSharedCorridorGroups(sequence) {
+    const groups = [];
+    let currentGroup = [];
+
+    sequence.forEach((match, index) => {
+      const previous = sequence[index - 1];
+      const isContinuous =
+        previous &&
+        match.aIndex > previous.aIndex &&
+        match.bIndex > previous.bIndex &&
+        match.aIndex - previous.aIndex <= 2 &&
+        match.bIndex - previous.bIndex <= 2;
+
+      if (!previous || isContinuous) {
+        currentGroup.push(match);
+      } else {
+        groups.push(currentGroup);
+        currentGroup = [match];
+      }
+    });
+
+    if (currentGroup.length) {
+      groups.push(currentGroup);
+    }
+
+    return groups.filter((group) => group.length >= 2);
+  }
+
+  function scoreCorridorGroup(group) {
+    if (!group.length) {
+      return 0;
+    }
+
+    const totalScore = group.reduce((sum, match) => sum + match.score, 0);
+    return totalScore + group.length * 2;
+  }
+
+  function chooseBestCorridorGroup(groups) {
+    if (!groups.length) {
+      return [];
+    }
+
+    return groups.reduce((bestGroup, group) => (
+      scoreCorridorGroup(group) > scoreCorridorGroup(bestGroup) ? group : bestGroup
+    ), groups[0]);
+  }
+
+  function estimateTailCoverage(points) {
+    if (!points.length) {
+      return 0;
+    }
+
+    let coverage = points.length * 120;
+    for (let index = 1; index < points.length; index += 1) {
+      coverage += Math.min(500, distanceInMeters(points[index - 1], points[index]));
+    }
+    return coverage;
+  }
+
+  function buildSingleSourceEntries(points) {
+    return points.map((point) => ({
+      point,
+      sourcePoints: [point],
+    }));
+  }
+
+  function buildMergedCorridorEntries(backbonePoints, otherPoints, matches, useRouteAAsBackbone) {
+    const matchByBackboneIndex = new Map(
+      matches.map((match) => [useRouteAAsBackbone ? match.aIndex : match.bIndex, match])
+    );
+    const corridorStartIndex = useRouteAAsBackbone ? matches[0].aIndex : matches[0].bIndex;
+    const corridorEndIndex = useRouteAAsBackbone ? matches[matches.length - 1].aIndex : matches[matches.length - 1].bIndex;
+    const entries = [];
+
+    for (let index = corridorStartIndex; index <= corridorEndIndex; index += 1) {
+      const match = matchByBackboneIndex.get(index);
+      if (match) {
+        entries.push({
+          point: backbonePoints[index],
+          sourcePoints: useRouteAAsBackbone
+            ? [backbonePoints[index], otherPoints[match.bIndex]]
+            : [backbonePoints[index], otherPoints[match.aIndex]],
+        });
+      } else {
+        entries.push({
+          point: backbonePoints[index],
+          sourcePoints: [backbonePoints[index]],
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  function dedupeSequentialEntries(entries) {
+    const deduped = [];
+
+    entries.forEach((entry) => {
+      const previous = deduped[deduped.length - 1];
+      if (!previous) {
+        deduped.push({
+          point: entry.point,
+          sourcePoints: [...entry.sourcePoints],
+        });
+        return;
+      }
+
+      const previousIds = previous.sourcePoints.map((point) => point.id).sort().join("|");
+      const currentIds = entry.sourcePoints.map((point) => point.id).sort().join("|");
+      if (previousIds === currentIds) {
+        return;
+      }
+
+      deduped.push({
+        point: entry.point,
+        sourcePoints: [...entry.sourcePoints],
+      });
+    });
+
+    return deduped;
+  }
+
+  function buildMergedPointEntries(routeNameA, routeNameB, pointsA, pointsB, matches) {
+    if (!matches.length) {
+      return [];
+    }
+
+    const useRouteAAsBackbone = pointsA.length >= pointsB.length;
+    const backbonePoints = useRouteAAsBackbone ? pointsA : pointsB;
+    const otherPoints = useRouteAAsBackbone ? pointsB : pointsA;
+    const corridorStartBackbone = useRouteAAsBackbone ? matches[0].aIndex : matches[0].bIndex;
+    const corridorEndBackbone = useRouteAAsBackbone ? matches[matches.length - 1].aIndex : matches[matches.length - 1].bIndex;
+    const corridorStartOther = useRouteAAsBackbone ? matches[0].bIndex : matches[0].aIndex;
+    const corridorEndOther = useRouteAAsBackbone ? matches[matches.length - 1].bIndex : matches[matches.length - 1].aIndex;
+
+    const backbonePrefix = backbonePoints.slice(0, corridorStartBackbone);
+    const backboneSuffix = backbonePoints.slice(corridorEndBackbone + 1);
+    const otherPrefix = otherPoints.slice(0, corridorStartOther);
+    const otherSuffix = otherPoints.slice(corridorEndOther + 1);
+
+    const startTail = estimateTailCoverage(otherPrefix) > estimateTailCoverage(backbonePrefix) ? otherPrefix : backbonePrefix;
+    const endTail = estimateTailCoverage(otherSuffix) > estimateTailCoverage(backboneSuffix) ? otherSuffix : backboneSuffix;
+    const corridorEntries = buildMergedCorridorEntries(backbonePoints, otherPoints, matches, useRouteAAsBackbone);
+
+    return dedupeSequentialEntries([
+      ...buildSingleSourceEntries(startTail),
+      ...corridorEntries,
+      ...buildSingleSourceEntries(endTail),
+    ]);
+  }
+
+  function compressMergedPointEntries(entries) {
+    if (entries.length < 2) {
+      return entries;
+    }
+
+    const compressed = [];
+
+    entries.forEach((entry) => {
+      const last = compressed[compressed.length - 1];
+      if (!last) {
+        compressed.push({
+          point: entry.point,
+          sourcePoints: [...entry.sourcePoints],
+        });
+        return;
+      }
+
+      const lastCenter = averagePoint(last.sourcePoints);
+      const currentCenter = averagePoint(entry.sourcePoints);
+      const shouldMerge =
+        distanceInMeters(lastCenter, currentCenter) <= 85 &&
+        (last.sourcePoints.length > 1 || entry.sourcePoints.length > 1 || stopNameSimilarity(last.point, entry.point) >= 0.6);
+
+      if (shouldMerge) {
+        const mergedSourcePoints = [...last.sourcePoints, ...entry.sourcePoints].filter(
+          (point, index, array) => array.findIndex((item) => item.id === point.id) === index
+        );
+        last.sourcePoints = mergedSourcePoints;
+        last.point = mergedSourcePoints[0];
+        return;
+      }
+
+      compressed.push({
+        point: entry.point,
+        sourcePoints: [...entry.sourcePoints],
+      });
+    });
+
+    return compressed;
+  }
+
+  function convertMergedEntriesToPoints(routeName, entries) {
+    let createdOrderSeed = Date.now();
+    return entries.map((entry) => {
+      const representative = averagePoint(entry.sourcePoints);
+      const primaryPoint = entry.sourcePoints[0] || entry.point;
+      const pointName = entry.sourcePoints.length > 1
+        ? entry.sourcePoints.slice(0, 2).reduce((name, point, index) => (
+          index === 0 ? point.name : buildMergedPointName({ name }, point)
+        ), "")
+        : primaryPoint.name;
+
+      const mergedPoint = {
+        id: `custom-${createdOrderSeed}`,
+        source: "custom",
+        createdOrder: createdOrderSeed,
+        routeName,
+        fileName: "노선 병합",
+        name: pointName || "병합 정류장",
+        description: entry.sourcePoints.length > 1 ? "공통 구간 정류장을 통합한 병합 정류장" : `원본 노선 ${primaryPoint.routeName} 정류장`,
+        address: primaryPoint.address || "",
+        phoneNumber: primaryPoint.phoneNumber || "",
+        styleUrl: primaryPoint.styleUrl || "",
+        rawCoordinates: `${representative.lng},${representative.lat}`,
+        lat: representative.lat,
+        lng: representative.lng,
+        altitude: null,
+        extendedData: buildMergedExtendedData(entry.sourcePoints),
+      };
+      createdOrderSeed += 1;
+      return mergedPoint;
+    });
+  }
+
+  function buildSharedCorridorMatches(pointsA, pointsB) {
+    const candidates = buildStopMatchCandidates(pointsA, pointsB);
+    const sequence = findBestMonotonicMatchSequence(candidates);
+    const groups = extractSharedCorridorGroups(sequence);
+    return chooseBestCorridorGroup(groups);
+  }
+
+  function mergeOrderedRoutePoints(routeNameA, routeNameB, pointsA, pointsB, matches) {
+    const entries = buildMergedPointEntries(routeNameA, routeNameB, pointsA, pointsB, matches);
+    const compressedEntries = compressMergedPointEntries(entries);
+    return convertMergedEntriesToPoints(`${routeNameA} + ${routeNameB} 병합`, compressedEntries);
+  }
+
+  function renderRouteMergePanel() {
+    if (!routeMergePanelEl) {
+      return;
+    }
+
+    const routes = getRoutes();
+    ensureMergeRoutes();
+    const canMerge = routes.length >= 2;
+    routeMergePanelEl.classList.toggle("is-disabled", !canMerge);
+    mergeRouteASelectEl.disabled = !canMerge;
+    mergeRouteBSelectEl.disabled = !canMerge;
+    mergeRoutesButtonEl.disabled = !canMerge || !mergeRouteAName || !mergeRouteBName || mergeRouteAName === mergeRouteBName;
+    viewMergedRouteButtonEl.disabled = !latestMergedRouteName || !getRoutes().includes(latestMergedRouteName);
+
+    mergeRouteASelectEl.innerHTML = "";
+    mergeRouteBSelectEl.innerHTML = "";
+
+    routes.forEach((routeName) => {
+      const optionA = document.createElement("option");
+      optionA.value = routeName;
+      optionA.textContent = routeName;
+      mergeRouteASelectEl.appendChild(optionA);
+
+      const optionB = document.createElement("option");
+      optionB.value = routeName;
+      optionB.textContent = routeName;
+      mergeRouteBSelectEl.appendChild(optionB);
+    });
+
+    if (mergeRouteAName) {
+      mergeRouteASelectEl.value = mergeRouteAName;
+    }
+    if (mergeRouteBName) {
+      mergeRouteBSelectEl.value = mergeRouteBName;
+    }
+
+    if (!canMerge) {
+      routeMergeSummaryEl.textContent = "병합하려면 노선이 두 개 이상 필요합니다.";
+      return;
+    }
+
+    routeMergeSummaryEl.textContent = latestMergedRouteName
+      ? `최근 병합 결과는 "${latestMergedRouteName}" 이며, 선택 후 아래 노선 생성 메뉴를 바로 사용할 수 있습니다.`
+      : "공통 주행 구간을 먼저 찾고, 연속된 중복 정류장만 대표 정류장으로 병합합니다.";
+  }
+
+  function handleMergeRoutes() {
+    const routeNameA = normalizeRouteName(mergeRouteASelectEl.value);
+    const routeNameB = normalizeRouteName(mergeRouteBSelectEl.value);
+
+    if (!routeNameA || !routeNameB || routeNameA === routeNameB) {
+      setStatus("병합할 서로 다른 두 노선을 선택하세요.", true);
+      return;
+    }
+
+    const pointsA = getPointsInRoute(routeNameA);
+    const pointsB = getPointsInRoute(routeNameB);
+
+    if (pointsA.length < 2 || pointsB.length < 2) {
+      setStatus("두 노선 모두 정류장이 2개 이상이어야 병합할 수 있습니다.", true);
+      return;
+    }
+
+    const matches = buildSharedCorridorMatches(pointsA, pointsB);
+    const mergedRouteName = `${routeNameA} + ${routeNameB} 병합`;
+    const mergedPoints = mergeOrderedRoutePoints(routeNameA, routeNameB, pointsA, pointsB, matches);
+
+    if (matches.length < 2) {
+      setStatus("공통 주행 구간이 충분히 확인되지 않아 병합을 진행하지 않았습니다.", true);
+      return;
+    }
+
+    customPoints = customPoints.filter((point) => point.routeName !== mergedRouteName).concat(mergedPoints);
+    customPaths = customPaths.filter((pathItem) => pathItem.routeName !== mergedRouteName);
+    routeSettings[mergedRouteName] = {
+      ...getRouteSetting(mergedRouteName),
+      deleted: false,
+      visible: true,
+    };
+    saveCustomPoints();
+    saveCustomPaths();
+    saveRouteSettings();
+
+    selectedRouteName = mergedRouteName;
+    latestMergedRouteName = mergedRouteName;
+    selectedPointId = mergedPoints[0]?.id || null;
+    selectedPathId = null;
+    mergeRouteAName = routeNameA;
+    mergeRouteBName = routeNameB;
+    refreshUI();
+    setStatus(`"${routeNameA}" 과 "${routeNameB}" 를 병합해 공통 구간 ${matches.length}개 정류장을 통합하고 전체 정류장을 ${mergedPoints.length}개로 단순화했습니다.`, false);
+  }
+
+  function handleViewMergedRoute() {
+    if (!latestMergedRouteName || !getRoutes().includes(latestMergedRouteName)) {
+      setStatus("먼저 병합 결과를 생성하세요.", true);
+      return;
+    }
+
+    selectedRouteName = latestMergedRouteName;
+    selectedPointId = getPointsInRoute(latestMergedRouteName)[0]?.id || null;
+    selectedPathId = null;
+    refreshUI();
+    setStatus(`"${latestMergedRouteName}" 병합 결과를 불러왔습니다. 아래 노선 생성 메뉴를 사용할 수 있습니다.`, false);
+  }
+
+  function renderVillageBusDesignPanel() {
+    if (!villageBusRouteCaptionEl) {
+      return;
+    }
+
+    const controlElements = [
+      designVillageBusRouteButtonEl,
+      resetVillageBusRouteButtonEl,
+      villagePrioritySelectEl,
+    ];
+
+    if (!selectedRouteName) {
+      if (villageBusDesignPanelEl) {
+        villageBusDesignPanelEl.classList.add("is-disabled");
+      }
+      controlElements.forEach((element) => {
+        if (element) {
+          element.disabled = true;
+        }
+      });
+      villageBusRouteCaptionEl.textContent = "노선을 선택하면 전용 설계 옵션을 조정할 수 있습니다.";
+      villageBusDesignSummaryEl.textContent = "기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.";
+      return;
+    }
+
+    if (villageBusDesignPanelEl) {
+      villageBusDesignPanelEl.classList.remove("is-disabled");
+    }
+    controlElements.forEach((element) => {
+      if (element) {
+        element.disabled = false;
+      }
+    });
+    const setting = getRouteSetting(selectedRouteName).villageBusDesign;
+    villageBusRouteCaptionEl.textContent = `${selectedRouteName} 노선에 적용할 마을버스 설계 정책입니다. 정류장 순서는 유지됩니다.`;
+    villagePrioritySelectEl.value = setting.priority;
+    villageBusDesignSummaryEl.textContent = getVillageBusDesignSummaryText(setting);
+  }
+
   function renderRoutePointList() {
     routePointListEl.innerHTML = "";
     const points = getPointsInSelectedRoute();
@@ -3907,17 +4826,106 @@
 
     points.forEach((point, index) => {
       const setting = getRouteSetting(point.routeName);
+      const row = document.createElement("div");
+      row.className = "point-row";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "point-item";
+      button.draggable = true;
+      button.dataset.pointId = point.id;
       button.style.borderLeft = `6px solid ${setting.color}`;
       if (point.id === selectedPointId) {
         button.classList.add("is-selected");
       }
       button.innerHTML = `<strong>${index + 1}. ${escapeHtml(point.name)}</strong><span>${point.lat}, ${point.lng}</span>`;
       button.addEventListener("click", () => selectPointById(point.id));
-      routePointListEl.appendChild(button);
+      button.addEventListener("dragstart", (event) => {
+        draggedRoutePointId = point.id;
+        button.classList.add("is-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", point.id);
+        }
+      });
+      button.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        if (draggedRoutePointId && draggedRoutePointId !== point.id) {
+          button.classList.add("is-drop-target");
+        }
+      });
+      button.addEventListener("dragleave", () => {
+        button.classList.remove("is-drop-target");
+      });
+      button.addEventListener("dragend", () => {
+        draggedRoutePointId = null;
+        routePointListEl.querySelectorAll(".point-item").forEach((item) => {
+          item.classList.remove("is-dragging", "is-drop-target");
+        });
+      });
+      button.addEventListener("drop", (event) => {
+        event.preventDefault();
+        button.classList.remove("is-drop-target");
+        const sourcePointId = draggedRoutePointId || event.dataTransfer?.getData("text/plain");
+        if (!sourcePointId || sourcePointId === point.id) {
+          return;
+        }
+        reorderPointsInRoute(selectedRouteName, sourcePointId, point.id);
+      });
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "point-delete-button";
+      deleteButton.textContent = "삭제";
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        selectedPointId = point.id;
+        handleDeletePoint();
+      });
+
+      row.appendChild(button);
+      row.appendChild(deleteButton);
+      routePointListEl.appendChild(row);
     });
+  }
+
+  function reorderPointsInRoute(routeName, sourcePointId, targetPointId) {
+    const points = getPointsInRoute(routeName);
+    const sourceIndex = points.findIndex((point) => point.id === sourcePointId);
+    const targetIndex = points.findIndex((point) => point.id === targetPointId);
+
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+      return;
+    }
+
+    const reordered = [...points];
+    const [movedPoint] = reordered.splice(sourceIndex, 1);
+    reordered.splice(targetIndex, 0, movedPoint);
+
+    const createdOrderBase = Date.now();
+    reordered.forEach((point, index) => {
+      const createdOrder = createdOrderBase + index;
+      if (point.source === "custom") {
+        const customIndex = customPoints.findIndex((item) => item.id === point.id);
+        if (customIndex >= 0) {
+          customPoints[customIndex] = {
+            ...customPoints[customIndex],
+            createdOrder,
+          };
+        }
+      } else {
+        pointOverrides[point.id] = {
+          ...(pointOverrides[point.id] || {}),
+          createdOrder,
+        };
+      }
+    });
+
+    saveCustomPoints();
+    saveOverrides();
+    selectedPointId = movedPoint.id;
+    draggedRoutePointId = null;
+    refreshUI();
+    setStatus(`"${routeName}" 노선의 정류장 순서를 변경했습니다.`, false);
   }
 
   function restoreWorkspaceFromStorage() {
@@ -4123,15 +5131,26 @@
     return nextCoordinates;
   }
 
-  function createMarkerImage(color, isSelected) {
-    const size = isSelected ? 26 : 22;
+  function createMarkerImage(color, isSelected, labelText = "") {
+    const size = isSelected ? 30 : 26;
     const stroke = isSelected ? "#1f1a14" : "#ffffff";
     const strokeWidth = isSelected ? 3 : 2;
-    const radius = isSelected ? 9 : 8;
+    const radius = isSelected ? 11 : 10;
     const center = size / 2;
+    const displayLabel = String(labelText || "").slice(0, 3);
     const svg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
         <circle cx="${center}" cy="${center}" r="${radius}" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}" />
+        <text
+          x="${center}"
+          y="${center + 1}"
+          text-anchor="middle"
+          dominant-baseline="middle"
+          font-family="Segoe UI, Noto Sans KR, sans-serif"
+          font-size="${displayLabel.length >= 3 ? 9 : 11}"
+          font-weight="700"
+          fill="#ffffff"
+        >${escapeHtml(displayLabel)}</text>
       </svg>
     `.trim();
 
@@ -4165,7 +5184,7 @@
     );
   }
 
-  function showPathContextMenu(position, onExtend, onDelete) {
+  function showPathContextMenu(position, onExtend, onDelete, onDeleteAll) {
     hidePathContextMenu();
 
     const wrapper = document.createElement("div");
@@ -4202,8 +5221,19 @@
       onDelete();
     });
 
+    const deleteAllButton = document.createElement("button");
+    deleteAllButton.type = "button";
+    deleteAllButton.className = "path-context-button danger";
+    deleteAllButton.textContent = "모든 경로 삭제";
+    deleteAllButton.addEventListener("click", (event) => {
+      stopMenuEvent(event);
+      hidePathContextMenu();
+      onDeleteAll();
+    });
+
     wrapper.appendChild(extendButton);
     wrapper.appendChild(deleteButton);
+    wrapper.appendChild(deleteAllButton);
 
     pathContextMenuOverlay = new window.kakao.maps.CustomOverlay({
       map,
@@ -4236,6 +5266,36 @@
       strokeStyle: "solid",
       endArrow: true,
     });
+    if (drawPathMode) {
+      workingPathCoordinates.forEach((coordinate, index) => {
+        const isFirst = index === 0;
+        const isLast = index === workingPathCoordinates.length - 1;
+        const marker = new window.kakao.maps.Marker({
+          map,
+          position: new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng),
+          draggable: false,
+          image: createVertexMarkerImage(
+            routeSetting.color,
+            isFirst ? "start" : isLast ? "end" : "middle",
+            false
+          ),
+          zIndex: 30,
+        });
+
+        window.kakao.maps.event.addListener(marker, "click", () => {
+          if (isLast && workingPathCoordinates.length >= 2) {
+            handlePathFormSubmit();
+            return;
+          }
+
+          setStatus("마지막 점을 다시 클릭하면 경로를 저장하고 경로 추가 모드를 종료합니다.", false);
+        });
+
+        pathVertexMarkers.push(marker);
+      });
+      return;
+    }
+
     if (!editPathMode) {
       return;
     }
@@ -4303,6 +5363,9 @@
             syncPathPreview();
             updatePathEditorUi();
             setStatus("마지막 구간을 삭제했습니다.", false);
+          },
+          () => {
+            handleDeleteAllPaths();
           }
         );
       });
@@ -4345,7 +5408,7 @@
     });
 
     if (drawing) {
-      pathEditorHelpEl.textContent = "지도를 클릭해 경로 점을 추가합니다. 저장 버튼을 누르면 현재 노선에 경로가 생성됩니다.";
+      pathEditorHelpEl.textContent = "지도를 클릭해 경로 점을 추가합니다. 마지막 점을 다시 클릭하면 현재 경로가 저장되고 추가 모드가 종료됩니다.";
     } else if (editing) {
       pathEditorHelpEl.textContent = "중간 점은 드래그로 이동합니다. 시작점은 초록, 끝점은 빨강입니다. 마지막 점 우클릭으로 연장 또는 삭제를 선택하세요.";
     } else {
@@ -4725,7 +5788,7 @@
       updatePathEditorUi();
       setStatus(
         drawPathMode
-          ? `경로 좌표 ${workingPathCoordinates.length}개를 추가했습니다. 완료하려면 경로 저장을 누르세요.`
+          ? `경로 좌표 ${workingPathCoordinates.length}개를 추가했습니다. 마지막 점을 다시 클릭하면 저장됩니다.`
           : `경로 연장 지점을 추가했습니다. 계속 이어서 그리려면 마지막 꼭짓점을 다시 클릭해 연장 모드를 유지하세요.`,
         false
       );
@@ -4842,6 +5905,13 @@
     }
 
     const bounds = new window.kakao.maps.LatLngBounds();
+    const routeOrderMap = new Map();
+
+    getRoutes().forEach((routeName) => {
+      getPointsInRoute(routeName).forEach((point, index) => {
+        routeOrderMap.set(point.id, index + 1);
+      });
+    });
 
     paths.forEach((pathItem) => {
       if (!isRouteVisible(pathItem.routeName)) {
@@ -4861,9 +5931,9 @@
         ? new window.kakao.maps.Polyline({
             map,
             path: polylinePath,
-            strokeWeight: 16,
-            strokeColor: "#fff8e8",
-            strokeOpacity: 0.96,
+            strokeWeight: 8,
+            strokeColor: "#111111",
+            strokeOpacity: 0.98,
             strokeStyle: "solid",
             clickable: false,
             endArrow: false,
@@ -4872,10 +5942,10 @@
       const polyline = new window.kakao.maps.Polyline({
         map,
         path: polylinePath,
-        strokeWeight: designedStrokeWeight || (pathItem.id === selectedPathId ? 7 : isSelected ? 5 : 3),
-        strokeColor: pathItem.designedRoute ? "#c2410c" : routeSetting.color,
+        strokeWeight: pathItem.designedRoute ? 4 : (pathItem.id === selectedPathId ? 7 : isSelected ? 5 : 3),
+        strokeColor: pathItem.designedRoute ? "#d8c36a" : routeSetting.color,
         strokeOpacity: pathItem.designedRoute ? 0.98 : pathItem.id === selectedPathId ? 1 : isSelected ? 0.92 : 0.5,
-        strokeStyle: pathItem.designedRoute ? "shortdash" : "solid",
+        strokeStyle: "solid",
         clickable: true,
         endArrow: true,
       });
@@ -4906,7 +5976,7 @@
         map,
         position,
         title: point.name,
-        image: createMarkerImage(routeSetting.color, point.id === selectedPointId),
+        image: createMarkerImage(routeSetting.color, point.id === selectedPointId, String(routeOrderMap.get(point.id) || "")),
       });
 
       const infoWindow = new window.kakao.maps.InfoWindow({
@@ -4943,11 +6013,14 @@
   function refreshUI() {
     ensureRouteSettings();
     ensureSelectedRoute();
+    ensureMergeRoutes();
     ensureSelectedPoint();
     ensureSelectedPath();
     updatePointModeButtons();
     updateCounts();
     renderRouteList();
+    renderRouteMergePanel();
+    renderVillageBusDesignPanel();
     renderRoutePointList();
     renderMoveRouteOptions();
     renderPoints();
@@ -5245,6 +6318,38 @@
     setStatus(`경로 "${selectedPath.name}" 을 삭제했습니다.`, false);
   }
 
+  function handleDeleteAllPaths() {
+    const paths = getAllPaths();
+    if (!paths.length) {
+      setStatus("삭제할 경로가 없습니다.", true);
+      return;
+    }
+
+    const confirmed = window.confirm(`모든 경로 ${paths.length}개를 삭제하시겠습니까?`);
+    if (!confirmed) {
+      return;
+    }
+
+    customPaths = [];
+    saveCustomPaths();
+
+    const nextPathOverrides = { ...pathOverrides };
+    uploadedPaths.map(normalizeUploadedPath).forEach((pathItem) => {
+      nextPathOverrides[pathItem.id] = {
+        ...(nextPathOverrides[pathItem.id] || {}),
+        deleted: true,
+      };
+    });
+    pathOverrides = nextPathOverrides;
+    savePathOverrides();
+
+    selectedPathId = null;
+    stopPathModes();
+    updatePathEditorUi();
+    refreshUI();
+    setStatus(`모든 경로 ${paths.length}개를 삭제했습니다.`, false);
+  }
+
   function buildPointFromForm(basePoint) {
     const lat = Number(formEls.lat.value);
     const lng = Number(formEls.lng.value);
@@ -5523,6 +6628,29 @@
     startPathDrawButtonEl.addEventListener("click", startPathDrawMode);
     startPathEditButtonEl.addEventListener("click", startPathEditMode);
     designRouteButtonEl.addEventListener("click", handleDesignRoute);
+    villagePrioritySelectEl.addEventListener("change", () => {
+      updateVillageBusRouteSetting({ priority: villagePrioritySelectEl.value });
+    });
+    mergeRouteASelectEl.addEventListener("change", () => {
+      mergeRouteAName = mergeRouteASelectEl.value;
+      if (mergeRouteAName === mergeRouteBName) {
+        mergeRouteBName = getRoutes().find((routeName) => routeName !== mergeRouteAName) || mergeRouteBName;
+      }
+      renderRouteMergePanel();
+    });
+    mergeRouteBSelectEl.addEventListener("change", () => {
+      mergeRouteBName = mergeRouteBSelectEl.value;
+      if (mergeRouteAName === mergeRouteBName) {
+        mergeRouteAName = getRoutes().find((routeName) => routeName !== mergeRouteBName) || mergeRouteAName;
+      }
+      renderRouteMergePanel();
+    });
+    mergeRoutesButtonEl.addEventListener("click", handleMergeRoutes);
+    viewMergedRouteButtonEl.addEventListener("click", handleViewMergedRoute);
+    designVillageBusRouteButtonEl.addEventListener("click", () => {
+      handleVillageBusDesignRoute(designVillageBusRouteButtonEl);
+    });
+    resetVillageBusRouteButtonEl.addEventListener("click", handleResetDesignedRoute);
     resetDesignedRouteButtonEl.addEventListener("click", handleResetDesignedRoute);
     showAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(true));
     hideAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(false));

@@ -18,8 +18,11 @@ const MIME_TYPES = {
   ".kml": "application/vnd.google-earth.kml+xml; charset=utf-8",
 };
 
-function send(res, statusCode, body, contentType) {
-  res.writeHead(statusCode, { "Content-Type": contentType });
+function send(res, statusCode, body, contentType, extraHeaders = {}) {
+  res.writeHead(statusCode, {
+    "Content-Type": contentType,
+    ...extraHeaders,
+  });
   res.end(body);
 }
 
@@ -42,6 +45,24 @@ function readRequestBody(req) {
 
 function ensureExportsDir(callback) {
   fs.mkdir(EXPORTS_DIR, { recursive: true }, callback);
+}
+
+function normalizeDesignRouteOptions(value) {
+  const current = value && typeof value === "object" ? value : {};
+  const options = {};
+  const allowedPriority = ["RECOMMEND", "TIME", "DISTANCE"];
+  const allowedAvoid = ["motorway", "toll", "uturn", "schoolzone", "ferries"];
+
+  options.priority = allowedPriority.includes(String(current.priority)) ? String(current.priority) : "RECOMMEND";
+
+  const avoid = Array.isArray(current.avoid)
+    ? current.avoid.filter((item, index, array) => allowedAvoid.includes(String(item)) && array.indexOf(item) === index)
+    : [];
+  if (avoid.length) {
+    options.avoid = avoid;
+  }
+
+  return options;
 }
 
 function saveExportFile(fileName, content, res, successPayloadBuilder) {
@@ -275,6 +296,7 @@ http
 
           const payload = parseJsonBody(rawBody);
           const points = Array.isArray(payload.points) ? payload.points : [];
+          const designOptions = normalizeDesignRouteOptions(payload.options);
           const routeName = String(payload.routeName || "설계 노선");
 
           if (points.length < 2) {
@@ -308,8 +330,8 @@ http
                 name: String(destination.name || "도착지"),
               },
               waypoints,
-              priority: "RECOMMEND",
               summary: false,
+              ...designOptions,
             }),
           });
 
@@ -325,6 +347,7 @@ http
           sendJson(res, 200, {
             ok: true,
             routeName,
+            options: designOptions,
             routes: result.routes || [],
           });
         })
@@ -334,7 +357,8 @@ http
       return;
     }
 
-    const urlPath = req.url === "/" ? "/index.html" : req.url;
+    const requestUrl = new URL(req.url || "/", `http://${host || `localhost:${PORT}`}`);
+    const urlPath = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
     const safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
     const filePath = path.join(ROOT, safePath);
 
@@ -351,7 +375,15 @@ http
 
       const ext = path.extname(filePath).toLowerCase();
       const contentType = MIME_TYPES[ext] || "application/octet-stream";
-      send(res, 200, data, contentType);
+      const cacheHeaders =
+        ext === ".html" || ext === ".js" || ext === ".css"
+          ? {
+              "Cache-Control": "no-store, no-cache, must-revalidate",
+              Pragma: "no-cache",
+              Expires: "0",
+            }
+          : {};
+      send(res, 200, data, contentType, cacheHeaders);
     });
   })
   .listen(PORT, HOST, () => {

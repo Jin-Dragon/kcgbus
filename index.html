@@ -4,13 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KML to Kakao Map</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20260310b">
 </head>
 <body>
   <div class="app-shell">
     <aside class="panel">
       <h1>KML Points Viewer</h1>
-      <p class="subtle">KML 파일을 불러오고 정류장과 경로를 편집한 뒤 노선 분석 작업까지 진행할 수 있습니다.</p>
+      <p class="subtle">KML 파일을 불러오고 정류장과 경로를 편집하며 노선 분석과 설계 작업을 진행할 수 있습니다.</p>
 
       <label id="dropzone" class="dropzone" for="file-input">
         <input id="file-input" type="file" accept=".kml" multiple>
@@ -37,7 +37,7 @@
             <button id="show-all-routes-button" class="secondary-button" type="button">모든 노선 표시</button>
             <button id="hide-all-routes-button" class="secondary-button" type="button">모든 노선 숨김</button>
             <button id="save-kml-button" class="primary-button" type="button">KML 저장</button>
-            <button id="save-reset-button" class="secondary-button" type="button">저장 후 초기화</button>
+            <button id="save-reset-button" class="secondary-button" type="button">저장본 초기화</button>
             <button id="analyze-routes-button" class="secondary-button" type="button">분석 시작</button>
             <button id="optimize-routes-button" class="secondary-button" type="button" hidden aria-hidden="true">최적화</button>
           </div>
@@ -50,8 +50,8 @@
           <h2 class="section-title">노선</h2>
           <div class="section-action-groups">
             <div class="action-group">
-              <button id="design-route-button" class="secondary-button" type="button">노선 설계</button>
-              <button id="reset-designed-route-button" class="secondary-button" type="button">설계 노선 초기화</button>
+              <button id="design-route-button" class="secondary-button" type="button" hidden aria-hidden="true">노선 설계</button>
+              <button id="reset-designed-route-button" class="secondary-button" type="button" hidden aria-hidden="true">설계 노선 초기화</button>
               <button id="start-path-draw-button" class="secondary-button" type="button">경로 추가</button>
               <button id="start-path-edit-button" class="secondary-button" type="button">경로 수정</button>
             </div>
@@ -62,12 +62,62 @@
           </div>
         </div>
         <p class="section-help">노선을 선택하면 하위 정류장과 경로를 관리할 수 있습니다. 편집 모드는 <code>Esc</code>로 취소할 수 있습니다.</p>
-        <div id="route-list" class="route-list"></div>
-      </div>
 
-      <div class="section">
-        <h2 class="section-title">선택한 노선의 정류장</h2>
-        <div id="route-point-list" class="route-point-list"></div>
+        <div class="route-workspace">
+          <div id="route-list" class="route-list"></div>
+
+          <div id="route-merge-panel" class="tool-panel">
+            <div class="tool-panel-head">
+              <div>
+                <h3 class="tool-panel-title">두 노선 병합</h3>
+                <p id="route-merge-summary" class="tool-panel-subtitle">공통 주행 구간을 찾은 뒤 연속된 중복 정류장만 병합합니다.</p>
+              </div>
+            </div>
+            <div class="tool-panel-grid">
+              <label class="field">
+                <span>노선 A</span>
+                <select id="merge-route-a-select"></select>
+              </label>
+              <label class="field">
+                <span>노선 B</span>
+                <select id="merge-route-b-select"></select>
+              </label>
+            </div>
+            <div class="tool-panel-actions">
+              <button id="merge-routes-button" class="secondary-button" type="button">두 노선 병합</button>
+              <button id="view-merged-route-button" class="secondary-button" type="button">병합 결과 보기</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2 class="section-title">선택한 노선의 정류장</h2>
+            <div id="route-point-list" class="route-point-list"></div>
+          </div>
+
+          <div id="village-bus-design-panel" class="tool-panel">
+            <div class="tool-panel-head">
+              <div>
+                <h3 class="tool-panel-title">마을버스 설계</h3>
+                <p id="village-bus-route-caption" class="tool-panel-subtitle">노선을 선택하면 전용 설계 옵션을 조정할 수 있습니다.</p>
+              </div>
+            </div>
+            <div class="tool-panel-grid">
+              <label class="field">
+                <span>경로 우선순위</span>
+                <select id="village-priority-select">
+                  <option value="RECOMMEND">추천 경로</option>
+                  <option value="TIME">최단 시간</option>
+                  <option value="DISTANCE">최단 거리</option>
+                </select>
+              </label>
+            </div>
+            <div class="tool-panel-actions">
+              <button id="design-village-bus-route-button" class="primary-button" type="button">노선 생성</button>
+              <button id="reset-village-bus-route-button" class="secondary-button" type="button">설계 종료</button>
+            </div>
+            <p id="village-bus-design-summary" class="tool-panel-summary">기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.</p>
+          </div>
+        </div>
       </div>
 
       <div id="point-details-section" class="section collapsible-section is-collapsed">
@@ -181,7 +231,7 @@
     </div>
   </div>
 
-  <script src="./config.js"></script>
-  <script src="./app.js"></script>
+  <script src="./config.js?v=20260310b"></script>
+  <script src="./app.js?v=20260310b"></script>
 </body>
 </html>
