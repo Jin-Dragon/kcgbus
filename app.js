@@ -3394,6 +3394,29 @@
     `.trim();
   }
 
+  function buildRouteFallbackPathKml(routeName, routePoints, styleId) {
+    if (!Array.isArray(routePoints) || routePoints.length < 2) {
+      return "";
+    }
+
+    const coordinates = [...routePoints]
+      .sort(comparePointsByOrder)
+      .map((point) => (point.altitude == null ? `${point.lng},${point.lat}` : `${point.lng},${point.lat},${point.altitude}`))
+      .join(" ");
+
+    return `
+      <Placemark>
+        <name>${escapeXml(`${routeName} 경로`)}</name>
+        ${styleId ? `<styleUrl>#${escapeXml(styleId)}</styleUrl>` : ""}
+        <description>${escapeXml("정류장 순서를 기준으로 자동 생성된 경로")}</description>
+        <LineString>
+          <tessellate>1</tessellate>
+          <coordinates>${coordinates}</coordinates>
+        </LineString>
+      </Placemark>
+    `.trim();
+  }
+
   function buildCurrentKml() {
     const routes = getRoutes();
     const points = getAllPoints();
@@ -3405,9 +3428,11 @@
         const routePoints = points.filter((point) => point.routeName === routeName);
         const routePaths = paths.filter((pathItem) => pathItem.routeName === routeName);
         const styleId = routeStyleId(routeName);
+        const fallbackPath = routePaths.length ? "" : buildRouteFallbackPathKml(routeName, routePoints, styleId);
         const placemarks = routePoints
           .map((point) => pointToKml(point, styleId))
           .concat(routePaths.map((pathItem) => pathToKml(pathItem, styleId)))
+          .concat(fallbackPath ? [fallbackPath] : [])
           .join("\n");
 
         if (!placemarks) {
@@ -4876,6 +4901,17 @@
         .filter((pathItem) => pathItem.fileName === targetFileName)
         .map((pathItem) => pathItem.id)
     );
+    const removedRouteNames = new Set(
+      uploadedPoints
+        .filter((point) => point.fileName === targetFileName)
+        .map((point) => normalizeRouteName(point.routeName))
+        .concat(
+          uploadedPaths
+            .filter((pathItem) => pathItem.fileName === targetFileName)
+            .map((pathItem) => normalizeRouteName(pathItem.routeName))
+        )
+        .filter(Boolean)
+    );
 
     uploadedPoints = uploadedPoints.filter((point) => point.fileName !== targetFileName);
     uploadedPaths = uploadedPaths.filter((pathItem) => pathItem.fileName !== targetFileName);
@@ -4899,9 +4935,22 @@
       selectedPathId = null;
     }
 
+    removedRouteNames.forEach((routeName) => {
+      const routeStillExists = getAllPoints().some((point) => point.routeName === routeName)
+        || getAllPaths().some((pathItem) => pathItem.routeName === routeName);
+      if (!routeStillExists) {
+        delete routeSettings[routeName];
+        highlightedRouteNames = highlightedRouteNames.filter((item) => item !== routeName);
+        if (selectedRouteName === routeName) {
+          selectedRouteName = null;
+        }
+      }
+    });
+
     saveUploadedWorkspace();
     saveOverrides();
     savePathOverrides();
+    saveRouteSettings();
     shouldFitMapToData = false;
     refreshUI();
     setStatus(`"${targetFileName}" 파일을 불러온 목록에서 제거했습니다.`, false);
