@@ -3349,6 +3349,9 @@
     const dataEntries = [
       point.fileName ? `<Data name="fileName"><value>${escapeXml(point.fileName)}</value></Data>` : "",
       point.description ? `<Data name="description"><value>${escapeXml(point.description)}</value></Data>` : "",
+      Number.isFinite(Number(point.createdOrder))
+        ? `<Data name="createdOrder"><value>${escapeXml(String(point.createdOrder))}</value></Data>`
+        : "",
     ]
       .concat(
         (point.extendedData || []).map(
@@ -3425,7 +3428,7 @@
 
     const folders = routes
       .map((routeName) => {
-        const routePoints = points.filter((point) => point.routeName === routeName);
+        const routePoints = points.filter((point) => point.routeName === routeName).sort(comparePointsByOrder);
         const routePaths = paths.filter((pathItem) => pathItem.routeName === routeName);
         const styleId = routeStyleId(routeName);
         const fallbackPath = routePaths.length ? "" : buildRouteFallbackPathKml(routeName, routePoints, styleId);
@@ -4714,6 +4717,11 @@
       .filter(Boolean);
   }
 
+  function getExtendedDataValue(list, key) {
+    const match = (Array.isArray(list) ? list : []).find((item) => String(item?.name || "").trim() === key);
+    return match ? String(match.value || "").trim() : "";
+  }
+
   function buildUploadedPoint(fileName, routeName, placemark, pointNode, index) {
     const coordinateNode = pointNode.getElementsByTagNameNS("*", "coordinates")[0];
     if (!coordinateNode) {
@@ -4725,6 +4733,8 @@
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       return null;
     }
+    const extendedData = getExtendedData(placemark);
+    const createdOrderValue = Number(getExtendedDataValue(extendedData, "createdOrder"));
 
     return {
       id: `${fileName}-point-${index}`,
@@ -4740,7 +4750,8 @@
       lat,
       lng,
       altitude: Number.isFinite(altitude) ? altitude : null,
-      extendedData: getExtendedData(placemark),
+      createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
+      extendedData,
     };
   }
 
