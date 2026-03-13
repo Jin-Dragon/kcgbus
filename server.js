@@ -1,11 +1,13 @@
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const PORT = Number(process.env.PORT) || 8080;
 const HOST = "0.0.0.0";
 const ROOT = __dirname;
 const EXPORTS_DIR = path.join(ROOT, "exports");
+const TEMP_EXPORTS_DIR = path.join(os.tmpdir(), "kml-kakao-map-autosaves");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
 const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || "";
@@ -43,8 +45,8 @@ function readRequestBody(req) {
   });
 }
 
-function ensureExportsDir(callback) {
-  fs.mkdir(EXPORTS_DIR, { recursive: true }, callback);
+function ensureDir(targetDir, callback) {
+  fs.mkdir(targetDir, { recursive: true }, callback);
 }
 
 function normalizeDesignRouteOptions(value) {
@@ -65,14 +67,14 @@ function normalizeDesignRouteOptions(value) {
   return options;
 }
 
-function saveExportFile(fileName, content, res, successPayloadBuilder) {
+function saveExportFile(fileName, content, res, successPayloadBuilder, targetDir = EXPORTS_DIR) {
   const requestedFileName = String(fileName || "export.txt");
   const safeFileName = path.basename(requestedFileName).replace(/[^\w.-]/g, "_") || "export.txt";
-  const outputPath = path.join(EXPORTS_DIR, safeFileName);
+  const outputPath = path.join(targetDir, safeFileName);
 
-  ensureExportsDir((mkdirError) => {
+  ensureDir(targetDir, (mkdirError) => {
     if (mkdirError) {
-      sendJson(res, 500, { error: "Failed to prepare exports directory" });
+      sendJson(res, 500, { error: "Failed to prepare export directory" });
       return;
     }
 
@@ -92,24 +94,24 @@ async function requestOpenAiAnalysis(payload) {
     return {
       model: null,
       message:
-        "OPENAI_API_KEY가 설정되지 않아 로컬 분석 결과만 저장했습니다. 환경변수를 설정하면 GPT 요약과 최적화 제안을 함께 생성합니다.",
+        "OPENAI_API_KEY가 ?�정?��? ?�아 로컬 분석 결과�??�?�했?�니?? ?�경변?��? ?�정?�면 GPT ?�약�?최적???�안???�께 ?�성?�니??",
     };
   }
 
   const prompt = [
-    "당신은 버스/정류장 노선 데이터 분석가입니다.",
-    "입력 데이터에는 노선별 포인트와 경로 좌표, 그리고 로컬 분석 결과가 포함됩니다.",
-    "해야 할 일:",
-    "1. 반경 30m 내 중복 정류장 후보를 해석한다.",
-    "2. 노선 간 경로 중복 구간 후보를 해석한다.",
-    "3. 운영상 의미 있는 중복과 단순 근접을 구분한다.",
-    "4. 최적화 우선순위를 제안한다.",
-    "출력 형식:",
-    "- summary: 4문장 이내 요약",
-    "- duplicate_stop_insights: 문자열 배열",
-    "- overlapping_path_insights: 문자열 배열",
-    "- optimization_actions: 문자열 배열",
-    "- risks: 문자열 배열",
+    "?�신?� 버스/?�류???�선 ?�이??분석가?�니??",
+    "?�력 ?�이?�에???�선�??�인?��? 경로 좌표, 그리�?로컬 분석 결과가 ?�함?�니??",
+    "?�야 ????",
+    "1. 반경 30m ??중복 ?�류???�보�??�석?�다.",
+    "2. ?�선 �?경로 중복 구간 ?�보�??�석?�다.",
+    "3. ?�영???��? ?�는 중복�??�순 근접??구분?�다.",
+    "4. 최적???�선?�위�??�안?�다.",
+    "출력 ?�식:",
+    "- summary: 4문장 ?�내 ?�약",
+    "- duplicate_stop_insights: 문자??배열",
+    "- overlapping_path_insights: 문자??배열",
+    "- optimization_actions: 문자??배열",
+    "- risks: 문자??배열",
     "",
     JSON.stringify(payload),
   ].join("\n");
@@ -192,7 +194,7 @@ async function requestOpenAiAnalysis(payload) {
 
   return {
     model: OPENAI_MODEL,
-    message: "GPT 분석이 포함되었습니다.",
+    message: "GPT 분석???�함?�었?�니??",
     analysis: parsed,
   };
 }
@@ -227,6 +229,7 @@ http
           const safeFileName = path.basename(requestedFileName).replace(/[^\w.-]/g, "_") || "autosaved-map.kml";
           const fileName = safeFileName.toLowerCase().endsWith(".kml") ? safeFileName : `${safeFileName}.kml`;
           const content = String(payload.content || "");
+          const targetDir = payload.storage === "temp" ? TEMP_EXPORTS_DIR : EXPORTS_DIR;
 
           if (!content.trim()) {
             sendJson(res, 400, { error: "Missing KML content" });
@@ -236,7 +239,7 @@ http
           saveExportFile(fileName, content, res, (outputPath) => ({
                 ok: true,
                 savedPath: outputPath,
-              }));
+              }), targetDir);
         })
         .catch(() => {
           sendJson(res, 400, { error: "Invalid JSON payload" });
@@ -290,17 +293,17 @@ http
       readRequestBody(req)
         .then(async (rawBody) => {
           if (!KAKAO_MOBILITY_REST_API_KEY) {
-            sendJson(res, 500, { error: "KAKAO_MOBILITY_REST_API_KEY 환경변수가 설정되지 않았습니다." });
+            sendJson(res, 500, { error: "KAKAO_MOBILITY_REST_API_KEY ?�경변?��? ?�정?��? ?�았?�니??" });
             return;
           }
 
           const payload = parseJsonBody(rawBody);
           const points = Array.isArray(payload.points) ? payload.points : [];
           const designOptions = normalizeDesignRouteOptions(payload.options);
-          const routeName = String(payload.routeName || "설계 노선");
+          const routeName = String(payload.routeName || "?�계 ?�선");
 
           if (points.length < 2) {
-            sendJson(res, 400, { error: "노선 설계를 하려면 포인트가 2개 이상 필요합니다." });
+            sendJson(res, 400, { error: "?�선 ?�계�??�려�??�인?��? 2�??�상 ?�요?�니??" });
             return;
           }
 
@@ -327,7 +330,7 @@ http
               destination: {
                 x: Number(destination.lng),
                 y: Number(destination.lat),
-                name: String(destination.name || "도착지"),
+                name: String(destination.name || "?�착지"),
               },
               waypoints,
               summary: false,
@@ -338,7 +341,7 @@ http
           if (!kakaoResponse.ok) {
             const errorText = await kakaoResponse.text();
             sendJson(res, kakaoResponse.status, {
-              error: `카카오 모빌리티 노선 설계 요청 실패: ${errorText}`,
+              error: `카카??모빌리티 ?�선 ?�계 ?�청 ?�패: ${errorText}`,
             });
             return;
           }

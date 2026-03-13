@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KML to Kakao Map</title>
-  <link rel="stylesheet" href="./styles.css?v=20260310b">
+  <title>WONDER Linx</title>
+  <link rel="stylesheet" href="./styles.css?v=20260314b">
 </head>
 <body>
   <div class="app-shell">
@@ -16,6 +16,7 @@
         <input id="file-input" type="file" accept=".kml" multiple>
         <span>여러 KML 파일을 드래그하거나 클릭해서 선택</span>
       </label>
+      <ul id="file-list" class="file-list"></ul>
 
       <div class="stats">
         <div class="stat">
@@ -30,25 +31,26 @@
 
       <p id="status" class="status">카카오맵 SDK를 불러오는 중입니다.</p>
 
-      <div class="section">
+      <div class="section file-tools-section">
         <div class="section-head">
           <h2 class="section-title">불러온 파일</h2>
           <div class="section-actions">
-            <button id="show-all-routes-button" class="secondary-button" type="button">모든 노선 표시</button>
-            <button id="hide-all-routes-button" class="secondary-button" type="button">모든 노선 숨김</button>
             <button id="save-kml-button" class="primary-button" type="button">KML 저장</button>
             <button id="save-reset-button" class="secondary-button" type="button">저장본 초기화</button>
             <button id="analyze-routes-button" class="secondary-button" type="button">분석 시작</button>
             <button id="optimize-routes-button" class="secondary-button" type="button" hidden aria-hidden="true">최적화</button>
           </div>
         </div>
-        <ul id="file-list" class="file-list"></ul>
       </div>
 
-      <div class="section">
+      <div class="section route-tools-section">
         <div class="section-head">
           <h2 class="section-title">노선</h2>
           <div class="section-action-groups">
+            <div class="action-group">
+              <button id="show-all-routes-button" class="secondary-button" type="button">모든 노선 표시</button>
+              <button id="hide-all-routes-button" class="secondary-button" type="button">모든 노선 숨김</button>
+            </div>
             <div class="action-group">
               <button id="design-route-button" class="secondary-button" type="button" hidden aria-hidden="true">노선 설계</button>
               <button id="reset-designed-route-button" class="secondary-button" type="button" hidden aria-hidden="true">설계 노선 초기화</button>
@@ -83,10 +85,21 @@
                 <select id="merge-route-b-select"></select>
               </label>
             </div>
+            <div class="tool-panel-checks">
+              <label class="route-toggle">
+                <input id="simple-merge-checkbox" type="checkbox">
+                <span>단순병합</span>
+              </label>
+            </div>
             <div class="tool-panel-actions">
               <button id="merge-routes-button" class="secondary-button" type="button">두 노선 병합</button>
               <button id="view-merged-route-button" class="secondary-button" type="button">병합 결과 보기</button>
             </div>
+          </div>
+
+          <div class="section">
+            <h2 class="section-title">병합된 노선</h2>
+            <div id="merged-route-list" class="route-list"></div>
           </div>
 
           <div class="section">
@@ -217,6 +230,18 @@
     </aside>
 
     <main class="map-wrap">
+      <form id="map-search-form" class="map-search" autocomplete="off">
+        <label class="map-search-field" for="map-search-input">
+          <span class="map-search-label">지역 검색</span>
+          <input
+            id="map-search-input"
+            type="search"
+            placeholder="지역명, 장소명, 주소를 검색"
+          >
+        </label>
+        <button id="map-search-button" class="primary-button map-search-button" type="submit">검색</button>
+        <button id="map-search-clear" class="secondary-button map-search-clear" type="button">초기화</button>
+      </form>
       <div id="map"></div>
     </main>
   </div>
@@ -232,6 +257,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260310b"></script>
+  <script src="./app.js?v=20260314e"></script>
 </body>
 </html>
