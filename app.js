@@ -4941,6 +4941,18 @@
     refreshUI();
   }
 
+  function selectRouteFromList(routeName) {
+    stopPathModes();
+    hasClearedSelection = false;
+    selectedRouteName = routeName;
+    addHighlightedRoute(routeName);
+    selectedPointId = null;
+    selectedPathId = null;
+    ensureSelectedPoint();
+    stopRelocateMode();
+    refreshUI();
+  }
+
   function renderRouteEntries(containerEl, routes, emptyMessage, moveTargetGroup) {
     containerEl.innerHTML = "";
 
@@ -5019,8 +5031,8 @@
         }, 0);
       } else {
         titleText.textContent = routeName;
-        titleText.title = "클릭해서 노선명 수정";
-        titleText.addEventListener("click", (event) => {
+        titleText.title = "더블클릭해서 노선명 수정";
+        titleText.addEventListener("dblclick", (event) => {
           event.stopPropagation();
           editingRouteName = routeName;
           renderRouteList();
@@ -5130,20 +5142,14 @@
       metaText.textContent = `${pointCount}개 정류장 / ${pathCount}개 경로`;
       button.appendChild(titleRow);
       button.appendChild(metaText);
-      button.addEventListener("click", () => {
-        stopPathModes();
-        selectedRouteName = routeName;
-        addHighlightedRoute(routeName);
-        selectedPointId = null;
-        selectedPathId = null;
-        ensureSelectedPoint();
-        stopRelocateMode();
-        refreshUI();
-      });
+      const handleRouteSelect = () => {
+        selectRouteFromList(routeName);
+      };
+      button.addEventListener("click", handleRouteSelect);
       button.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          button.click();
+          handleRouteSelect();
         }
       });
       const handleRouteRowDragOver = (event) => {
@@ -5201,6 +5207,12 @@
       const controls = document.createElement("div");
       controls.className = "route-controls";
       controls.appendChild(dragHandle);
+      row.addEventListener("click", (event) => {
+        if (event.target.closest(".route-inline-action, .route-toggle, .route-color-input, .route-delete-button, .route-drag-handle, .route-title-input")) {
+          return;
+        }
+        handleRouteSelect();
+      });
       row.appendChild(button);
       row.appendChild(controls);
       containerEl.appendChild(row);
