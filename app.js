@@ -3397,29 +3397,6 @@
     `.trim();
   }
 
-  function buildRouteFallbackPathKml(routeName, routePoints, styleId) {
-    if (!Array.isArray(routePoints) || routePoints.length < 2) {
-      return "";
-    }
-
-    const coordinates = [...routePoints]
-      .sort(comparePointsByOrder)
-      .map((point) => (point.altitude == null ? `${point.lng},${point.lat}` : `${point.lng},${point.lat},${point.altitude}`))
-      .join(" ");
-
-    return `
-      <Placemark>
-        <name>${escapeXml(`${routeName} 경로`)}</name>
-        ${styleId ? `<styleUrl>#${escapeXml(styleId)}</styleUrl>` : ""}
-        <description>${escapeXml("정류장 순서를 기준으로 자동 생성된 경로")}</description>
-        <LineString>
-          <tessellate>1</tessellate>
-          <coordinates>${coordinates}</coordinates>
-        </LineString>
-      </Placemark>
-    `.trim();
-  }
-
   function buildCurrentKml() {
     const routes = getRoutes();
     const points = getAllPoints();
@@ -3431,11 +3408,9 @@
         const routePoints = points.filter((point) => point.routeName === routeName).sort(comparePointsByOrder);
         const routePaths = paths.filter((pathItem) => pathItem.routeName === routeName);
         const styleId = routeStyleId(routeName);
-        const fallbackPath = routePaths.length ? "" : buildRouteFallbackPathKml(routeName, routePoints, styleId);
         const placemarks = routePoints
           .map((point) => pointToKml(point, styleId))
           .concat(routePaths.map((pathItem) => pathToKml(pathItem, styleId)))
-          .concat(fallbackPath ? [fallbackPath] : [])
           .join("\n");
 
         if (!placemarks) {
