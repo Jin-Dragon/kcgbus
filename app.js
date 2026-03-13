@@ -853,7 +853,9 @@
       ...point,
       ...override,
       source: "uploaded",
-      createdOrder: Number.isFinite(Number(override.createdOrder)) ? Number(override.createdOrder) : null,
+      createdOrder: Number.isFinite(Number(override.createdOrder))
+        ? Number(override.createdOrder)
+        : (Number.isFinite(Number(point.createdOrder)) ? Number(point.createdOrder) : null),
       routeName: normalizeRouteName(override.routeName || point.routeName || point.fileName),
       extendedData: normalizeExtendedData(override.extendedData || point.extendedData),
     };
