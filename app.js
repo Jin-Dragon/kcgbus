@@ -8,6 +8,7 @@
   const UPLOADED_POINTS_KEY = "kml-kakao-map.uploaded-points";
   const UPLOADED_PATHS_KEY = "kml-kakao-map.uploaded-paths";
   const UPLOADED_FILE_SUMMARIES_KEY = "kml-kakao-map.uploaded-file-summaries";
+  const OBSERVATION_AREAS_KEY = "kml-kakao-map.observation-areas";
   const UI_STATE_KEY = "kml-kakao-map.ui-state";
   const NEW_ROUTE_VALUE = "__new_route__";
   const TEMP_NEW_ROUTE_NAME = "__temp_new_route__";
@@ -82,6 +83,12 @@
   const mapSearchInputEl = document.getElementById("map-search-input");
   const mapSearchButtonEl = document.getElementById("map-search-button");
   const mapSearchClearEl = document.getElementById("map-search-clear");
+  const helpButtonEl = document.getElementById("help-button");
+  const observationAreaNameEl = document.getElementById("observation-area-name");
+  const startObservationAreaButtonEl = document.getElementById("start-observation-area-button");
+  const saveObservationAreaButtonEl = document.getElementById("save-observation-area-button");
+  const cancelObservationAreaButtonEl = document.getElementById("cancel-observation-area-button");
+  const observationAreaListEl = document.getElementById("observation-area-list");
 
   const formEls = {
     name: document.getElementById("form-name"),
@@ -138,6 +145,10 @@
   let analysisPolylines = [];
   let analysisCircles = [];
   let analysisInfoWindows = [];
+  let observationAreaPolygons = [];
+  let observationAreaLabels = [];
+  let observationAreaVertexMarkers = [];
+  let observationAreaPreviewPolygon = null;
   let designedRouteInfoWindows = [];
   let mapSearchPlaces = null;
   let mapSearchMarker = null;
@@ -145,6 +156,10 @@
   let latestAnalysisReport = null;
   let latestOptimizationPlan = null;
   let analysisActive = false;
+  let observationAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
+  let observationAreaDrawMode = false;
+  let workingObservationAreaPoints = [];
+  let selectedObservationAreaId = null;
 
   let uploadedPoints = loadJsonArray(UPLOADED_POINTS_KEY);
   let uploadedPaths = loadJsonArray(UPLOADED_PATHS_KEY);
@@ -178,6 +193,101 @@
     }
     if (mapSearchInfoWindow) {
       mapSearchInfoWindow.close();
+    }
+  }
+
+  function getObservationAreaCenter(points) {
+    if (!Array.isArray(points) || !points.length) {
+      return null;
+    }
+    const total = points.reduce(
+      (sum, point) => ({
+        lat: sum.lat + Number(point.lat || 0),
+        lng: sum.lng + Number(point.lng || 0),
+      }),
+      { lat: 0, lng: 0 }
+    );
+    return {
+      lat: total.lat / points.length,
+      lng: total.lng / points.length,
+    };
+  }
+
+  function buildObservationAreaPath(points) {
+    return (Array.isArray(points) ? points : []).map(
+      (point) => new window.kakao.maps.LatLng(Number(point.lat), Number(point.lng))
+    );
+  }
+
+  function clearObservationAreaOverlays() {
+    observationAreaPolygons.forEach((item) => item.setMap(null));
+    observationAreaLabels.forEach((item) => item.setMap(null));
+    observationAreaVertexMarkers.forEach((item) => item.setMap(null));
+    observationAreaPolygons = [];
+    observationAreaLabels = [];
+    observationAreaVertexMarkers = [];
+    if (observationAreaPreviewPolygon) {
+      observationAreaPreviewPolygon.setMap(null);
+      observationAreaPreviewPolygon = null;
+    }
+  }
+
+  function renderObservationAreas() {
+    clearObservationAreaOverlays();
+    if (!mapReady || !map) {
+      return;
+    }
+
+    observationAreas.forEach((area) => {
+      if (!Array.isArray(area.points) || area.points.length < 3) {
+        return;
+      }
+
+      const polygon = new window.kakao.maps.Polygon({
+        map,
+        path: buildObservationAreaPath(area.points),
+        strokeWeight: area.id === selectedObservationAreaId ? 3 : 2,
+        strokeColor: area.id === selectedObservationAreaId ? "#0f6cbd" : "#2f8cff",
+        strokeOpacity: 0.95,
+        fillColor: area.id === selectedObservationAreaId ? "#7db7ff" : "#9bc7ff",
+        fillOpacity: area.id === selectedObservationAreaId ? 0.32 : 0.22,
+      });
+      observationAreaPolygons.push(polygon);
+
+      const center = getObservationAreaCenter(area.points);
+      if (center) {
+        const label = new window.kakao.maps.CustomOverlay({
+          map,
+          position: new window.kakao.maps.LatLng(center.lat, center.lng),
+          yAnchor: 1.2,
+          content: `<div style="padding:6px 10px;border:1px solid rgba(15,108,189,0.18);border-radius:999px;background:rgba(255,255,255,0.96);font-size:12px;font-weight:700;color:#20476f;box-shadow:0 10px 18px rgba(38,65,96,0.12);">${escapeHtml(area.name)}</div>`,
+        });
+        observationAreaLabels.push(label);
+      }
+
+      window.kakao.maps.event.addListener(polygon, "click", () => {
+        selectedObservationAreaId = area.id;
+        refreshUI();
+      });
+    });
+
+    if (observationAreaDrawMode && workingObservationAreaPoints.length) {
+      observationAreaVertexMarkers = workingObservationAreaPoints.map((point, index) => new window.kakao.maps.Marker({
+        map,
+        position: new window.kakao.maps.LatLng(point.lat, point.lng),
+        title: `관찰 구역 점 ${index + 1}`,
+      }));
+
+      observationAreaPreviewPolygon = new window.kakao.maps.Polygon({
+        map,
+        path: buildObservationAreaPath(workingObservationAreaPoints),
+        strokeWeight: 2,
+        strokeColor: "#1f6fd1",
+        strokeOpacity: 0.95,
+        strokeStyle: "shortdash",
+        fillColor: "#9bc7ff",
+        fillOpacity: workingObservationAreaPoints.length >= 3 ? 0.18 : 0.08,
+      });
     }
   }
 
@@ -266,13 +376,16 @@
       pointOverrides: cloneJson(pointOverrides),
       pathOverrides: cloneJson(pathOverrides),
       routeSettings: cloneJson(routeSettings),
+      observationAreas: cloneJson(observationAreas),
       selectedRouteName,
       mergeRouteAName,
       mergeRouteBName,
       latestMergedRouteName,
       selectedPointId,
       selectedPathId,
+      selectedObservationAreaId,
       addPointMode,
+      observationAreaDrawMode,
       drawPathMode,
       editPathMode,
       pathExtendMode,
@@ -280,6 +393,7 @@
       relocatePointId,
       hasClearedSelection,
       workingPathCoordinates: cloneJson(workingPathCoordinates),
+      workingObservationAreaPoints: cloneJson(workingObservationAreaPoints),
       mapView: captureMapView(),
     };
   }
@@ -294,6 +408,7 @@
     window.localStorage.setItem(UPLOADED_POINTS_KEY, JSON.stringify(uploadedPoints));
     window.localStorage.setItem(UPLOADED_PATHS_KEY, JSON.stringify(uploadedPaths));
     window.localStorage.setItem(UPLOADED_FILE_SUMMARIES_KEY, JSON.stringify(uploadedFileSummaries));
+    window.localStorage.setItem(OBSERVATION_AREAS_KEY, JSON.stringify(observationAreas));
     saveUiState();
   }
 
@@ -332,13 +447,16 @@
     pointOverrides = cloneJson(snapshot.pointOverrides || {});
     pathOverrides = cloneJson(snapshot.pathOverrides || {});
     routeSettings = cloneJson(snapshot.routeSettings || {});
+    observationAreas = cloneJson(snapshot.observationAreas || []).map(normalizeObservationArea);
     selectedRouteName = typeof snapshot.selectedRouteName === "string" ? snapshot.selectedRouteName : null;
     mergeRouteAName = typeof snapshot.mergeRouteAName === "string" ? snapshot.mergeRouteAName : null;
     mergeRouteBName = typeof snapshot.mergeRouteBName === "string" ? snapshot.mergeRouteBName : null;
     latestMergedRouteName = typeof snapshot.latestMergedRouteName === "string" ? snapshot.latestMergedRouteName : null;
     selectedPointId = typeof snapshot.selectedPointId === "string" ? snapshot.selectedPointId : null;
     selectedPathId = typeof snapshot.selectedPathId === "string" ? snapshot.selectedPathId : null;
+    selectedObservationAreaId = typeof snapshot.selectedObservationAreaId === "string" ? snapshot.selectedObservationAreaId : null;
     addPointMode = snapshot.addPointMode === true;
+    observationAreaDrawMode = snapshot.observationAreaDrawMode === true;
     drawPathMode = snapshot.drawPathMode === true;
     editPathMode = snapshot.editPathMode === true;
     pathExtendMode = snapshot.pathExtendMode === true;
@@ -346,6 +464,7 @@
     relocatePointId = typeof snapshot.relocatePointId === "string" ? snapshot.relocatePointId : null;
     hasClearedSelection = snapshot.hasClearedSelection === true;
     workingPathCoordinates = cloneJson(snapshot.workingPathCoordinates || []);
+    workingObservationAreaPoints = cloneJson(snapshot.workingObservationAreaPoints || []);
     latestAnalysisReport = null;
     latestOptimizationPlan = null;
     analysisActive = false;
@@ -617,6 +736,145 @@
       : "\uC815\uB958\uC7A5 \uC218\uC815";
   }
 
+  function updateObservationAreaButtons() {
+    if (!startObservationAreaButtonEl || !saveObservationAreaButtonEl || !cancelObservationAreaButtonEl) {
+      return;
+    }
+    startObservationAreaButtonEl.classList.toggle("is-active", observationAreaDrawMode);
+    startObservationAreaButtonEl.textContent = observationAreaDrawMode ? "구역 표시 중" : "구역 그리기";
+    saveObservationAreaButtonEl.disabled = !observationAreaDrawMode || workingObservationAreaPoints.length < 3;
+    cancelObservationAreaButtonEl.disabled = !observationAreaDrawMode;
+  }
+
+  function renderObservationAreaPanel() {
+    if (!observationAreaListEl || !observationAreaNameEl) {
+      return;
+    }
+
+    observationAreaNameEl.disabled = !observationAreaDrawMode;
+    if (!observationAreaDrawMode) {
+      observationAreaNameEl.value = "";
+    }
+    updateObservationAreaButtons();
+
+    observationAreaListEl.innerHTML = "";
+    if (!observationAreas.length) {
+      observationAreaListEl.innerHTML = '<div class="observation-area-empty">저장된 관찰 구역이 없습니다. 구역 그리기로 새 구역을 만들어 보세요.</div>';
+      return;
+    }
+
+    observationAreas.forEach((area) => {
+      const itemEl = document.createElement("div");
+      itemEl.className = "observation-area-item";
+      const metaEl = document.createElement("div");
+      metaEl.innerHTML = `<strong>${escapeHtml(area.name)}</strong><span>꼭짓점 ${area.points.length}개</span>`;
+
+      const actionsEl = document.createElement("div");
+      actionsEl.className = "observation-area-actions";
+
+      const focusButton = document.createElement("button");
+      focusButton.type = "button";
+      focusButton.className = "observation-area-chip";
+      focusButton.textContent = "보기";
+      focusButton.addEventListener("click", () => {
+        focusObservationArea(area.id);
+      });
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "observation-area-chip";
+      deleteButton.textContent = "삭제";
+      deleteButton.addEventListener("click", () => {
+        removeObservationArea(area.id);
+      });
+
+      actionsEl.appendChild(focusButton);
+      actionsEl.appendChild(deleteButton);
+      itemEl.appendChild(metaEl);
+      itemEl.appendChild(actionsEl);
+      observationAreaListEl.appendChild(itemEl);
+    });
+  }
+
+  function stopObservationAreaDrawMode() {
+    observationAreaDrawMode = false;
+    workingObservationAreaPoints = [];
+    if (observationAreaNameEl) {
+      observationAreaNameEl.value = "";
+    }
+    updateObservationAreaButtons();
+  }
+
+  function startObservationAreaDrawMode() {
+    stopPathModes();
+    stopRelocateMode();
+    setAddPointMode(false);
+    observationAreaDrawMode = true;
+    workingObservationAreaPoints = [];
+    if (observationAreaNameEl && !observationAreaNameEl.value.trim()) {
+      observationAreaNameEl.value = `관찰 구역 ${observationAreas.length + 1}`;
+    }
+    renderObservationAreas();
+    renderObservationAreaPanel();
+    setStatus("관찰 구역 그리기 모드입니다. 지도에서 꼭짓점을 차례대로 클릭한 뒤 구역 저장을 누르세요.", false);
+  }
+
+  function saveObservationAreaDraft() {
+    if (!observationAreaDrawMode || workingObservationAreaPoints.length < 3) {
+      setStatus("관찰 구역을 저장하려면 꼭짓점이 3개 이상 필요합니다.", true);
+      return;
+    }
+
+    const areaName = String(observationAreaNameEl?.value || "").trim() || `관찰 구역 ${observationAreas.length + 1}`;
+    pushUndoSnapshot();
+    observationAreas = observationAreas.concat([
+      normalizeObservationArea({
+        id: `observation-${Date.now()}`,
+        name: areaName,
+        points: workingObservationAreaPoints,
+        createdAt: new Date().toISOString(),
+      }),
+    ]);
+    selectedObservationAreaId = observationAreas[observationAreas.length - 1].id;
+    saveObservationAreas();
+    stopObservationAreaDrawMode();
+    refreshUI();
+    setStatus(`"${areaName}" 관찰 구역을 저장했습니다.`, false);
+  }
+
+  function focusObservationArea(areaId) {
+    const area = observationAreas.find((item) => item.id === areaId);
+    if (!area || !mapReady || !map || area.points.length < 3) {
+      return;
+    }
+    selectedObservationAreaId = area.id;
+    const bounds = new window.kakao.maps.LatLngBounds();
+    area.points.forEach((point) => {
+      bounds.extend(new window.kakao.maps.LatLng(point.lat, point.lng));
+    });
+    map.setBounds(bounds);
+    refreshUI();
+    setStatus(`"${area.name}" 구역으로 지도를 이동했습니다.`, false);
+  }
+
+  function removeObservationArea(areaId) {
+    const area = observationAreas.find((item) => item.id === areaId);
+    if (!area) {
+      return;
+    }
+    if (!window.confirm(`"${area.name}" 관찰 구역을 삭제하시겠습니까?`)) {
+      return;
+    }
+    pushUndoSnapshot();
+    observationAreas = observationAreas.filter((item) => item.id !== areaId);
+    if (selectedObservationAreaId === areaId) {
+      selectedObservationAreaId = null;
+    }
+    saveObservationAreas();
+    refreshUI();
+    setStatus(`"${area.name}" 관찰 구역을 삭제했습니다.`, false);
+  }
+
   function setCollapsibleSectionExpanded(sectionEl, toggleEl, expanded) {
     if (!sectionEl || !toggleEl) {
       return;
@@ -697,6 +955,10 @@
     window.localStorage.setItem(UPLOADED_FILE_SUMMARIES_KEY, JSON.stringify(uploadedFileSummaries));
   }
 
+  function saveObservationAreas() {
+    window.localStorage.setItem(OBSERVATION_AREAS_KEY, JSON.stringify(observationAreas));
+  }
+
   function saveUiState() {
     window.localStorage.setItem(
       UI_STATE_KEY,
@@ -715,6 +977,24 @@
           value: String(item?.value || ""),
         }))
       : [];
+  }
+
+  function normalizeObservationArea(area) {
+    const points = Array.isArray(area?.points)
+      ? area.points
+          .map((point) => ({
+            lat: Number(point?.lat),
+            lng: Number(point?.lng),
+          }))
+          .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+      : [];
+
+    return {
+      id: String(area?.id || `observation-${Date.now()}`),
+      name: String(area?.name || "관찰 구역").trim() || "관찰 구역",
+      points,
+      createdAt: typeof area?.createdAt === "string" ? area.createdAt : new Date().toISOString(),
+    };
   }
 
   function normalizeRouteName(value) {
@@ -3549,6 +3829,7 @@
     window.localStorage.removeItem(UPLOADED_POINTS_KEY);
     window.localStorage.removeItem(UPLOADED_PATHS_KEY);
     window.localStorage.removeItem(UPLOADED_FILE_SUMMARIES_KEY);
+    window.localStorage.removeItem(OBSERVATION_AREAS_KEY);
     window.localStorage.removeItem(UI_STATE_KEY);
   }
 
@@ -3561,6 +3842,7 @@
     stopPathModes();
     stopRelocateMode();
     setAddPointMode(false);
+    stopObservationAreaDrawMode();
     clearDraftMarker();
 
     uploadedPoints = [];
@@ -3571,10 +3853,13 @@
     pointOverrides = {};
     pathOverrides = {};
     routeSettings = {};
+    observationAreas = [];
     workingPathCoordinates = [];
+    workingObservationAreaPoints = [];
     selectedRouteName = null;
     selectedPointId = null;
     selectedPathId = null;
+    selectedObservationAreaId = null;
     selectedPathVertexIndex = null;
     hasClearedSelection = false;
     shouldFitMapToData = true;
@@ -3891,6 +4176,185 @@
   function closeAnalysisModal() {
     analysisModalEl.classList.add("is-hidden");
     analysisModalEl.setAttribute("aria-hidden", "true");
+  }
+
+  function buildHelpWindowHtml() {
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WONDER Linx 도움말</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef4fb;
+      --panel: #ffffff;
+      --line: #d5deea;
+      --text: #203247;
+      --muted: #667a90;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background:
+        radial-gradient(circle at top right, rgba(47, 140, 255, 0.18), transparent 24%),
+        linear-gradient(180deg, #f5f9ff, var(--bg));
+      color: var(--text);
+      font-family: "Segoe UI", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    }
+    .help-shell {
+      max-width: 860px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+    .hero {
+      padding: 22px 24px;
+      border: 1px solid rgba(47, 140, 255, 0.18);
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(47, 140, 255, 0.14), rgba(255, 255, 255, 0.98));
+      box-shadow: 0 18px 36px rgba(40, 72, 112, 0.1);
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .help-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .help-card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 14px 28px rgba(40, 72, 112, 0.06);
+    }
+    .help-card h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+    }
+    .help-card ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .help-card strong {
+      color: var(--text);
+    }
+    .help-note {
+      padding: 16px 18px;
+      border: 1px solid #cfe0f6;
+      border-radius: 16px;
+      background: #edf5ff;
+      color: #36597d;
+      line-height: 1.6;
+    }
+    @media (max-width: 720px) {
+      body { padding: 16px; }
+      .help-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="help-shell">
+    <section class="hero">
+      <h1>WONDER Linx 도움말</h1>
+      <p>KML 불러오기, 노선 편집, 병합, 경로 설계, 저장과 재불러오기 흐름을 빠르게 확인할 수 있는 요약 안내입니다.</p>
+    </section>
+    <section class="help-grid">
+      <article class="help-card">
+        <h2>파일 메뉴</h2>
+        <ul>
+          <li><strong>여러 KML 파일 드래그/선택:</strong> 파일을 불러와 지도와 리스트에 표시합니다.</li>
+          <li><strong>KML 저장:</strong> 현재 작업 중인 노선, 정류장, 경로를 KML로 저장합니다.</li>
+          <li><strong>저장후 초기화:</strong> 저장을 마친 뒤 현재 작업 공간을 비웁니다.</li>
+          <li><strong>불러온 파일 목록의 x:</strong> 해당 파일에서 온 데이터와 연결된 목록을 작업 화면에서 제거합니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>노선 메뉴</h2>
+        <ul>
+          <li><strong>모든 노선 표시/숨김:</strong> 전체 노선의 지도 표시 상태를 한 번에 바꿉니다.</li>
+          <li><strong>기존 노선 리스트:</strong> 기본 노선들을 보고 선택, 순서 변경, 색상 변경을 할 수 있습니다.</li>
+          <li><strong>병합된 노선 리스트:</strong> 새로 만든 병합 노선을 따로 관리합니다.</li>
+          <li><strong>선택한 노선의 정류장:</strong> 현재 노선의 정류장 순서를 확인하고 이동할 수 있습니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>경로와 정류장 편집</h2>
+        <ul>
+          <li><strong>경로 추가:</strong> 지도를 클릭해 새 경로를 그리고 마지막 점을 다시 눌러 저장합니다.</li>
+          <li><strong>경로 수정:</strong> 기존 경로의 점을 움직이거나 저장, 삭제할 수 있습니다.</li>
+          <li><strong>정류장 추가:</strong> 새 정류장을 선택한 노선에 넣습니다.</li>
+          <li><strong>정류장 수정:</strong> 기존 정류장 정보를 바꾸거나 다른 노선으로 이동합니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>병합과 설계</h2>
+        <ul>
+          <li><strong>두 노선 병합:</strong> 공통 구간을 찾아 중복 정류장을 정리한 새 노선을 만듭니다.</li>
+          <li><strong>단순병합:</strong> 공통 구간 판단 없이 두 노선 정류장을 순서대로 모두 합칩니다.</li>
+          <li><strong>병합 결과 보기:</strong> 최근 병합한 노선을 즉시 다시 선택합니다.</li>
+          <li><strong>마을버스 설계:</strong> 추천, 최단 시간, 최단 거리 기준으로 경로를 설계합니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>지도 도구</h2>
+        <ul>
+          <li><strong>지역 검색:</strong> 장소명이나 주소로 지도를 이동하고 검색 마커를 표시합니다.</li>
+          <li><strong>분석 시작:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
+          <li><strong>Esc:</strong> 경로 편집, 정류장 추가, 일부 선택 상태를 빠르게 취소합니다.</li>
+          <li><strong>지도 빈 공간 클릭:</strong> 현재 선택한 노선, 정류장, 경로 선택을 해제합니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>저장과 재불러오기</h2>
+        <ul>
+          <li><strong>KML 저장 후 재불러오기:</strong> 노선 순서와 기존/신규 리스트 구분이 함께 저장되도록 되어 있습니다.</li>
+          <li><strong>병합 노선:</strong> 저장 후 다시 불러와도 병합된 노선 리스트 위치를 유지합니다.</li>
+          <li><strong>오래된 KML:</strong> 예전에 저장한 파일은 일부 최신 메타데이터가 없어 기본 방식으로 불러올 수 있습니다.</li>
+        </ul>
+      </article>
+      <article class="help-card">
+        <h2>작업 팁</h2>
+        <ul>
+          <li><strong>브라우저 새로고침 후 이상할 때:</strong> 캐시가 남을 수 있으니 한 번 더 새로고침해 최신 스크립트를 받으세요.</li>
+          <li><strong>노선 순서 정리:</strong> 노선 리스트와 정류장 리스트는 드래그 또는 순서 입력으로 정리할 수 있습니다.</li>
+          <li><strong>파일 삭제 전 확인:</strong> 연결된 사용자 편집 데이터도 같이 정리될 수 있으니 필요한 경우 먼저 저장하세요.</li>
+        </ul>
+      </article>
+    </section>
+    <section class="help-note">
+      각 기능은 현재 화면 상태와 선택된 노선에 따라 비활성화될 수 있습니다. 버튼이 눌리지 않으면 먼저 노선 또는 정류장을 선택한 뒤 다시 시도하세요.
+    </section>
+  </div>
+</body>
+</html>`;
+  }
+
+  function openHelpWindow() {
+    const helpWindow = window.open("", "wonder-linx-help", "popup=yes,width=860,height=920,resizable=yes,scrollbars=yes");
+    if (!helpWindow) {
+      setStatus("도움말 창이 차단되었습니다. 브라우저 팝업 차단을 해제한 뒤 다시 시도하세요.", true);
+      return;
+    }
+
+    helpWindow.document.open();
+    helpWindow.document.write(buildHelpWindowHtml());
+    helpWindow.document.close();
+    helpWindow.focus();
   }
 
   function renderLocalAnalysisModal(report) {
@@ -4623,6 +5087,7 @@
     polylines.forEach((item) => item.polyline.setMap(null));
     directionOverlays.forEach((item) => item.setMap(null));
     clearAnalysisOverlays();
+    clearObservationAreaOverlays();
     markers = [];
     infoWindows = [];
     polylines = [];
@@ -6211,7 +6676,7 @@
   }
 
   function restoreWorkspaceFromStorage() {
-    if (!uploadedPoints.length && !uploadedPaths.length && !customPoints.length && !customPaths.length) {
+    if (!uploadedPoints.length && !uploadedPaths.length && !customPoints.length && !customPaths.length && !observationAreas.length) {
       return;
     }
 
@@ -6786,6 +7251,7 @@
       return;
     }
 
+    stopObservationAreaDrawMode();
     stopRelocateMode();
     selectedPointId = null;
     selectedPathId = null;
@@ -6806,6 +7272,7 @@
       return;
     }
 
+    stopObservationAreaDrawMode();
     stopRelocateMode();
     selectedPointId = null;
     drawPathMode = false;
@@ -7022,6 +7489,7 @@
   function setAddPointMode(enabled) {
     addPointMode = enabled;
     if (enabled) {
+      stopObservationAreaDrawMode();
       if (!selectedRouteName) {
         selectedRouteName = TEMP_NEW_ROUTE_NAME;
       }
@@ -7078,6 +7546,7 @@
     }
 
     openPointFormSection();
+    stopObservationAreaDrawMode();
     setAddPointMode(false);
     beginRelocateMode(point);
   }
@@ -7126,6 +7595,14 @@
     designedRouteInfoWindows.forEach((item) => item.close());
     designedRouteInfoWindows = [];
 
+    if (observationAreaDrawMode) {
+      workingObservationAreaPoints = workingObservationAreaPoints.concat([{ lat, lng }]);
+      renderObservationAreas();
+      renderObservationAreaPanel();
+      setStatus(`관찰 구역 꼭짓점 ${workingObservationAreaPoints.length}개를 추가했습니다. 3개 이상이 되면 저장할 수 있습니다.`, false);
+      return;
+    }
+
     if (drawPathMode || editPathMode) {
       if (editPathMode && selectedPathVertexIndex != null) {
         const movedIndex = selectedPathVertexIndex;
@@ -7172,11 +7649,12 @@
     }
 
     if (!addPointMode) {
-      if (selectedRouteName || selectedPointId || selectedPathId || highlightedRouteNames.length) {
+      if (selectedRouteName || selectedPointId || selectedPathId || selectedObservationAreaId || highlightedRouteNames.length) {
         hasClearedSelection = true;
         selectedRouteName = null;
         selectedPointId = null;
         selectedPathId = null;
+        selectedObservationAreaId = null;
         clearHighlightedRoutes();
         setEmptyDetails();
         setEmptyPathDetails();
@@ -7443,6 +7921,7 @@
     renderRouteList();
     renderRouteMergePanel();
     renderVillageBusDesignPanel();
+    renderObservationAreaPanel();
     renderRoutePointList();
     renderMoveRouteOptions();
     renderPoints();
@@ -7451,6 +7930,7 @@
     renderPathDetails(getPathById(selectedPathId));
     fillPathForm(getPathById(selectedPathId));
     updatePathEditorUi();
+    renderObservationAreas();
     if (drawPathMode || editPathMode) {
       syncPathPreview();
     }
@@ -7945,6 +8425,13 @@
       return;
     }
 
+    if (observationAreaDrawMode) {
+      stopObservationAreaDrawMode();
+      refreshUI();
+      setStatus("관찰 구역 그리기 모드를 취소했습니다.", false);
+      return;
+    }
+
     if (addPointMode) {
       setAddPointMode(false);
       clearDraftMarker();
@@ -8145,6 +8632,19 @@
       clearMapSearchResult();
       setStatus("지역 검색 결과를 초기화했습니다.", false);
     });
+    startObservationAreaButtonEl?.addEventListener("click", () => {
+      if (observationAreaDrawMode) {
+        return;
+      }
+      startObservationAreaDrawMode();
+    });
+    saveObservationAreaButtonEl?.addEventListener("click", saveObservationAreaDraft);
+    cancelObservationAreaButtonEl?.addEventListener("click", () => {
+      stopObservationAreaDrawMode();
+      refreshUI();
+      setStatus("관찰 구역 그리기 모드를 취소했습니다.", false);
+    });
+    helpButtonEl?.addEventListener("click", openHelpWindow);
     window.addEventListener("keydown", handleKeydown);
   }
 
@@ -8174,7 +8674,7 @@
       await loadKakaoMapSdk(config.appKey);
       initMap();
       refreshUI();
-      if (uploadedPoints.length || uploadedPaths.length || customPoints.length || customPaths.length) {
+      if (uploadedPoints.length || uploadedPaths.length || customPoints.length || customPaths.length || observationAreas.length) {
         setStatus("이전 작업 상태를 복원했습니다.", false);
       }
       setStatus("준비되었습니다. 노선을 선택하고 정류장과 경로를 관리하세요.", false);

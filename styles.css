@@ -391,6 +391,66 @@ h1::before {
   gap: 8px;
 }
 
+.observation-area-grid {
+  grid-template-columns: 1fr;
+}
+
+.observation-area-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.observation-area-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid #d9e2ee;
+  border-radius: 10px;
+  background: #f9fbff;
+}
+
+.observation-area-item strong {
+  display: block;
+  font-size: 13px;
+}
+
+.observation-area-item span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.observation-area-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.observation-area-chip {
+  padding: 6px 9px;
+  border: 1px solid #cfe0f6;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #2d74d6;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.observation-area-empty {
+  padding: 12px;
+  border: 1px dashed #d9e2ee;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  background: #fcfdff;
+}
+
 .route-workspace {
   margin-top: 12px;
   display: grid;
@@ -1196,6 +1256,20 @@ h1::before {
   background: #d8e5f3;
 }
 
+.help-button {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 20;
+  min-width: 82px;
+  height: 44px;
+  border-color: rgba(31, 65, 114, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 32px rgba(38, 65, 96, 0.14);
+  backdrop-filter: blur(10px);
+}
+
 .map-search {
   position: absolute;
   top: 18px;
@@ -1346,6 +1420,12 @@ h1::before {
 
   .map-search-field {
     flex-basis: 100%;
+  }
+
+  .help-button {
+    position: static;
+    margin: 14px 14px 0 auto;
+    display: block;
   }
 
   #map {

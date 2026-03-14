@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WONDER Linx</title>
-  <link rel="stylesheet" href="./styles.css?v=20260314b">
+  <link rel="stylesheet" href="./styles.css?v=20260314c">
 </head>
 <body>
   <div class="app-shell">
@@ -130,6 +130,27 @@
             </div>
             <p id="village-bus-design-summary" class="tool-panel-summary">기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.</p>
           </div>
+
+          <div id="observation-area-panel" class="tool-panel">
+            <div class="tool-panel-head">
+              <div>
+                <h3 class="tool-panel-title">관찰 구역</h3>
+                <p id="observation-area-summary" class="tool-panel-subtitle">집중해서 볼 지역을 반투명 구역으로 저장해 둘 수 있습니다.</p>
+              </div>
+            </div>
+            <div class="tool-panel-grid observation-area-grid">
+              <label class="field">
+                <span>구역 이름</span>
+                <input id="observation-area-name" type="text" placeholder="예: 상암 북측 점검 구역">
+              </label>
+            </div>
+            <div class="tool-panel-actions">
+              <button id="start-observation-area-button" class="secondary-button" type="button">구역 그리기</button>
+              <button id="save-observation-area-button" class="primary-button" type="button" disabled>구역 저장</button>
+              <button id="cancel-observation-area-button" class="secondary-button" type="button" disabled>그리기 취소</button>
+            </div>
+            <div id="observation-area-list" class="observation-area-list"></div>
+          </div>
         </div>
       </div>
 
@@ -230,6 +251,7 @@
     </aside>
 
     <main class="map-wrap">
+      <button id="help-button" class="secondary-button help-button" type="button">도움말</button>
       <form id="map-search-form" class="map-search" autocomplete="off">
         <label class="map-search-field" for="map-search-input">
           <span class="map-search-label">지역 검색</span>
@@ -257,6 +279,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260314o"></script>
+  <script src="./app.js?v=20260314p"></script>
 </body>
 </html>
