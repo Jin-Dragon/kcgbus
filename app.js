@@ -150,10 +150,12 @@
   let analysisCircles = [];
   let analysisInfoWindows = [];
   let observationAreaPolygons = [];
+  let observationAreaBorders = [];
   let observationAreaLabels = [];
   let observationAreaVertexMarkers = [];
   let observationAreaPreviewPolygon = null;
   let observationAreaEditMarkers = [];
+  let hoveredObservationAreaId = null;
   let designedRouteInfoWindows = [];
   let mapSearchPlaces = null;
   let mapSearchMarker = null;
@@ -255,10 +257,12 @@
 
   function clearObservationAreaOverlays() {
     observationAreaPolygons.forEach((item) => item.setMap(null));
+    observationAreaBorders.forEach((item) => item.setMap(null));
     observationAreaLabels.forEach((item) => item.setMap(null));
     observationAreaVertexMarkers.forEach((item) => item.setMap(null));
     observationAreaEditMarkers.forEach((item) => item.setMap(null));
     observationAreaPolygons = [];
+    observationAreaBorders = [];
     observationAreaLabels = [];
     observationAreaVertexMarkers = [];
     observationAreaEditMarkers = [];
@@ -279,19 +283,30 @@
         return;
       }
 
+      const path = buildObservationAreaPath(area.points);
       const polygon = new window.kakao.maps.Polygon({
         map,
-        path: buildObservationAreaPath(area.points),
-        strokeWeight: area.id === selectedObservationAreaId ? 3 : 2,
+        path,
+        strokeWeight: area.id === selectedObservationAreaId ? 3 : 1,
         strokeColor: normalizeHexColor(area.color, "#2f8cff"),
-        strokeOpacity: 0.95,
+        strokeOpacity: area.id === selectedObservationAreaId ? 0.92 : 0.38,
         fillColor: normalizeHexColor(area.color, "#2f8cff"),
         fillOpacity: area.id === selectedObservationAreaId ? 0.32 : 0.22,
       });
       observationAreaPolygons.push(polygon);
 
+      const borderPath = path.length >= 2 ? [...path, path[0]] : path;
+      const border = new window.kakao.maps.Polyline({
+        map,
+        path: borderPath,
+        strokeWeight: area.id === selectedObservationAreaId ? 5 : 2,
+        strokeColor: normalizeHexColor(area.color, "#2f8cff"),
+        strokeOpacity: area.id === selectedObservationAreaId ? 0.98 : 0.55,
+      });
+      observationAreaBorders.push(border);
+
       const center = getObservationAreaCenter(area.points);
-      if (center && area.id === selectedObservationAreaId) {
+      if (center && hoveredObservationAreaId === area.id) {
         const label = new window.kakao.maps.CustomOverlay({
           map,
           position: new window.kakao.maps.LatLng(center.lat, center.lng),
@@ -301,10 +316,31 @@
         observationAreaLabels.push(label);
       }
 
-      window.kakao.maps.event.addListener(polygon, "click", () => {
+      const selectObservationArea = () => {
         selectedObservationAreaId = area.id;
         refreshUI();
-      });
+      };
+      const showObservationAreaLabel = () => {
+        if (hoveredObservationAreaId === area.id) {
+          return;
+        }
+        hoveredObservationAreaId = area.id;
+        renderObservationAreas();
+      };
+      const hideObservationAreaLabel = () => {
+        if (hoveredObservationAreaId !== area.id) {
+          return;
+        }
+        hoveredObservationAreaId = null;
+        renderObservationAreas();
+      };
+
+      window.kakao.maps.event.addListener(polygon, "click", selectObservationArea);
+      window.kakao.maps.event.addListener(border, "click", selectObservationArea);
+      window.kakao.maps.event.addListener(polygon, "mouseover", showObservationAreaLabel);
+      window.kakao.maps.event.addListener(border, "mouseover", showObservationAreaLabel);
+      window.kakao.maps.event.addListener(polygon, "mouseout", hideObservationAreaLabel);
+      window.kakao.maps.event.addListener(border, "mouseout", hideObservationAreaLabel);
 
       window.kakao.maps.event.addListener(polygon, "mousedown", (mouseEvent) => {
         beginObservationAreaDrag(area.id, mouseEvent);
