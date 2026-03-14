@@ -1275,6 +1275,33 @@
     setCollapsibleSectionExpanded(sectionEl, toggleEl, expanded);
   }
 
+  function setToolPanelExpanded(panelEl, expanded) {
+    if (!panelEl) {
+      return;
+    }
+    panelEl.classList.toggle("is-collapsed", !expanded);
+    const toggleButton = panelEl.querySelector(".tool-panel-toggle");
+    if (toggleButton) {
+      toggleButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+      toggleButton.textContent = expanded ? "닫기" : "열기";
+    }
+  }
+
+  function bindCollapsibleToolPanels() {
+    document.querySelectorAll('.tool-panel[data-collapsible="true"]').forEach((panelEl) => {
+      const toggleButton = panelEl.querySelector(".tool-panel-toggle");
+      if (!toggleButton || toggleButton.dataset.bound === "true") {
+        return;
+      }
+      toggleButton.dataset.bound = "true";
+      setToolPanelExpanded(panelEl, !panelEl.classList.contains("is-collapsed"));
+      toggleButton.addEventListener("click", () => {
+        const expanded = panelEl.classList.contains("is-collapsed");
+        setToolPanelExpanded(panelEl, expanded);
+      });
+    });
+  }
+
   function openPointDetailsSection() {
     setCollapsibleSectionExpanded(pointDetailsSectionEl, pointDetailsToggleEl, true);
   }
@@ -5139,6 +5166,7 @@
           <li><strong>여러 KML 파일 드래그/선택:</strong> 파일을 불러와 지도와 리스트에 표시합니다.</li>
           <li><strong>KML 저장:</strong> 현재 작업 중인 노선, 정류장, 경로를 KML로 저장합니다.</li>
           <li><strong>저장후 초기화:</strong> 저장을 마친 뒤 현재 작업 공간을 비웁니다.</li>
+          <li><strong>전체노선 비교분석:</strong> 기존노선과 개선노선의 전후 비교표를 새 창 대시보드로 엽니다.</li>
           <li><strong>불러온 파일 목록의 x:</strong> 해당 파일에서 온 데이터와 연결된 목록을 작업 화면에서 제거합니다.</li>
         </ul>
       </article>
@@ -5146,8 +5174,9 @@
         <h2>노선 메뉴</h2>
         <ul>
           <li><strong>모든 노선 표시/숨김:</strong> 전체 노선의 지도 표시 상태를 한 번에 바꿉니다.</li>
-          <li><strong>기존 노선 리스트:</strong> 기본 노선들을 보고 선택, 순서 변경, 색상 변경을 할 수 있습니다.</li>
-          <li><strong>병합된 노선 리스트:</strong> 새로 만든 병합 노선을 따로 관리합니다.</li>
+          <li><strong>기존노선과 노선리스트:</strong> 기본 노선들을 한 묶음 카드에서 보고 선택, 순서 변경, 색상 변경을 할 수 있습니다.</li>
+          <li><strong>개선노선과 노선리스트:</strong> 병합으로 만든 개선 노선을 별도 묶음 카드에서 관리합니다.</li>
+          <li><strong>노선 카드 총거리:</strong> 각 노선 카드에는 정류장 수, 경로 수와 함께 총 운행거리가 표시됩니다.</li>
           <li><strong>선택한 노선의 정류장:</strong> 현재 노선의 정류장 순서를 확인하고 이동할 수 있습니다.</li>
         </ul>
       </article>
@@ -5156,6 +5185,8 @@
         <ul>
           <li><strong>경로 추가:</strong> 지도를 클릭해 새 경로를 그리고 마지막 점을 다시 눌러 저장합니다.</li>
           <li><strong>경로 수정:</strong> 기존 경로의 점을 움직이거나 저장, 삭제할 수 있습니다.</li>
+          <li><strong>빨간 끝점 연장:</strong> 빨간 끝점을 클릭하면 연속으로 경로를 이어갈 수 있고, 다시 클릭하면 저장 후 종료됩니다.</li>
+          <li><strong>중간 점 수정 종료:</strong> 중간 점을 수정한 뒤 지도 빈 곳을 클릭하면 저장 후 수정 모드가 종료됩니다.</li>
           <li><strong>정류장 추가:</strong> 새 정류장을 선택한 노선에 넣습니다.</li>
           <li><strong>정류장 수정:</strong> 기존 정류장 정보를 바꾸거나 다른 노선으로 이동합니다.</li>
         </ul>
@@ -5163,10 +5194,11 @@
       <article class="help-card">
         <h2>병합과 설계</h2>
         <ul>
-          <li><strong>두 노선 병합:</strong> 공통 구간을 찾아 중복 정류장을 정리한 새 노선을 만듭니다.</li>
+          <li><strong>두 노선 병합:</strong> 공통 구간을 찾아 중복 정류장을 정리한 새 노선을 만듭니다. 기본 화면에서는 접혀 있고 열기 텍스트로 펼칠 수 있습니다.</li>
           <li><strong>단순병합:</strong> 공통 구간 판단 없이 두 노선 정류장을 순서대로 모두 합칩니다.</li>
           <li><strong>병합 결과 보기:</strong> 최근 병합한 노선을 즉시 다시 선택합니다.</li>
-          <li><strong>마을버스 설계:</strong> 추천, 최단 시간, 최단 거리 기준으로 경로를 설계합니다.</li>
+          <li><strong>경로 설계:</strong> 설계된 정류장을 기반으로 최적의 경로를 설계합니다.</li>
+          <li><strong>접기 패널:</strong> 경로 설계와 관찰 구역 메뉴는 노선리스트 밖의 독립 패널이며, 기본 로드 시 접힌 상태로 시작합니다.</li>
         </ul>
       </article>
       <article class="help-card">
@@ -5178,6 +5210,7 @@
           <li><strong>선택 구역 저장:</strong> 이미 만든 구역의 이름과 색상도 다시 저장해서 바꿀 수 있습니다.</li>
           <li><strong>숨김/보기/삭제:</strong> 각 구역별로 지도 표시를 끄거나, 해당 위치로 이동하거나, 구역을 지울 수 있습니다.</li>
           <li><strong>구역 이동/수정:</strong> 이동 모드에서는 구역 자체를 드래그해 옮길 수 있고, 수정 모드에서는 꼭짓점을 드래그하거나 우클릭으로 포인트 추가/삭제가 가능합니다.</li>
+          <li><strong>패널 열기/닫기:</strong> 관찰 구역 패널도 기본은 접혀 있으며, 텍스트형 열기/닫기로 펼칩니다.</li>
           <li><strong>분석 시작:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
           <li><strong>Esc:</strong> 경로 편집, 정류장 추가, 일부 선택 상태를 빠르게 취소합니다.</li>
           <li><strong>지도 빈 공간 클릭:</strong> 현재 선택한 노선, 정류장, 경로 선택을 해제합니다.</li>
@@ -7423,8 +7456,8 @@
           element.disabled = true;
         }
       });
-      villageBusRouteCaptionEl.textContent = "노선을 선택하면 전용 설계 옵션을 조정할 수 있습니다.";
-      villageBusDesignSummaryEl.textContent = "기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.";
+      villageBusRouteCaptionEl.textContent = "설계된 정류장을 기반으로 최적의 경로를 설계합니다.";
+      villageBusDesignSummaryEl.textContent = "설계된 정류장을 기반으로 최적의 경로를 설계합니다.";
       return;
     }
 
@@ -7437,9 +7470,9 @@
       }
     });
     const setting = getRouteSetting(selectedRouteName).villageBusDesign;
-    villageBusRouteCaptionEl.textContent = `${selectedRouteName} 노선에 적용할 마을버스 설계 정책입니다. 정류장 순서는 유지됩니다.`;
+    villageBusRouteCaptionEl.textContent = "설계된 정류장을 기반으로 최적의 경로를 설계합니다.";
     villagePrioritySelectEl.value = setting.priority;
-    villageBusDesignSummaryEl.textContent = getVillageBusDesignSummaryText(setting);
+    villageBusDesignSummaryEl.textContent = "설계된 정류장을 기반으로 최적의 경로를 설계합니다.";
   }
 
   function renderRoutePointList() {
@@ -9562,6 +9595,7 @@
 
   function bindFormEvents() {
     ensureSaveDesignedPathButton();
+    bindCollapsibleToolPanels();
     syncStatLabels();
     syncSectionTitles();
     syncOptimizationFeatureVisibility();

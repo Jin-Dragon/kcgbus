@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WONDER Linx</title>
-  <link rel="stylesheet" href="./styles.css?v=20260314c">
+  <link rel="stylesheet" href="./styles.css?v=20260314g">
 </head>
 <body>
   <div class="app-shell">
@@ -38,7 +38,7 @@
             <button id="save-kml-button" class="primary-button" type="button">KML 저장</button>
             <button id="save-reset-button" class="secondary-button" type="button">저장후 초기화</button>
             <button id="analyze-routes-button" class="secondary-button" type="button">분석 시작</button>
-            <button id="compare-route-groups-button" class="secondary-button" type="button">전체노선 비교분석</button>
+            <button id="compare-route-groups-button" class="secondary-button compare-route-groups-button" type="button">전체노선 비교분석</button>
             <button id="optimize-routes-button" class="secondary-button" type="button" hidden aria-hidden="true">최적화</button>
           </div>
         </div>
@@ -67,39 +67,51 @@
         <p class="section-help">노선을 선택하면 하위 정류장과 경로를 관리할 수 있습니다. 편집 모드는 <code>Esc</code>로 취소할 수 있습니다.</p>
 
         <div class="route-workspace">
-          <div id="route-list" class="route-list"></div>
-
-          <div id="route-merge-panel" class="tool-panel">
+          <div id="route-merge-panel" class="tool-panel is-collapsed" data-collapsible="true">
             <div class="tool-panel-head">
               <div>
                 <h3 class="tool-panel-title">두 노선 병합</h3>
                 <p id="route-merge-summary" class="tool-panel-subtitle">공통 주행 구간을 찾은 뒤 연속된 중복 정류장만 병합합니다.</p>
               </div>
+              <button class="tool-panel-toggle" type="button" aria-expanded="false">열기</button>
             </div>
-            <div class="tool-panel-grid">
-              <label class="field">
-                <span>노선 A</span>
-                <select id="merge-route-a-select"></select>
-              </label>
-              <label class="field">
-                <span>노선 B</span>
-                <select id="merge-route-b-select"></select>
-              </label>
-            </div>
-            <div class="tool-panel-checks">
-              <label class="route-toggle">
-                <input id="simple-merge-checkbox" type="checkbox">
-                <span>단순병합</span>
-              </label>
-            </div>
-            <div class="tool-panel-actions">
-              <button id="merge-routes-button" class="secondary-button" type="button">두 노선 병합</button>
-              <button id="view-merged-route-button" class="secondary-button" type="button">병합 결과 보기</button>
+            <div class="tool-panel-body">
+              <div class="tool-panel-grid">
+                <label class="field">
+                  <span>노선 A</span>
+                  <select id="merge-route-a-select"></select>
+                </label>
+                <label class="field">
+                  <span>노선 B</span>
+                  <select id="merge-route-b-select"></select>
+                </label>
+              </div>
+              <div class="tool-panel-checks">
+                <label class="route-toggle">
+                  <input id="simple-merge-checkbox" type="checkbox">
+                  <span>단순병합</span>
+                </label>
+              </div>
+              <div class="tool-panel-actions">
+                <button id="merge-routes-button" class="secondary-button" type="button">두 노선 병합</button>
+                <button id="view-merged-route-button" class="secondary-button" type="button">병합 결과 보기</button>
+              </div>
             </div>
           </div>
 
-          <div class="section">
-            <h2 class="section-title">병합된 노선</h2>
+          <div class="section route-subsection route-bundle route-bundle-original">
+            <div class="route-bundle-head">
+              <span class="route-bundle-kicker">기존노선</span>
+              <h2 class="section-title">기존노선과 노선리스트</h2>
+            </div>
+            <div id="route-list" class="route-list"></div>
+          </div>
+
+          <div class="section route-subsection route-bundle route-bundle-merged">
+            <div class="route-bundle-head">
+              <span class="route-bundle-kicker">개선노선</span>
+              <h2 class="section-title">개선노선과 노선리스트</h2>
+            </div>
             <div id="merged-route-list" class="route-list"></div>
           </div>
 
@@ -108,57 +120,64 @@
             <div id="route-point-list" class="route-point-list"></div>
           </div>
 
-          <div id="village-bus-design-panel" class="tool-panel">
-            <div class="tool-panel-head">
-              <div>
-                <h3 class="tool-panel-title">마을버스 설계</h3>
-                <p id="village-bus-route-caption" class="tool-panel-subtitle">노선을 선택하면 전용 설계 옵션을 조정할 수 있습니다.</p>
-              </div>
-            </div>
-            <div class="tool-panel-grid">
-              <label class="field">
-                <span>경로 우선순위</span>
-                <select id="village-priority-select">
-                  <option value="RECOMMEND">추천 경로</option>
-                  <option value="TIME">최단 시간</option>
-                  <option value="DISTANCE">최단 거리</option>
-                </select>
-              </label>
-            </div>
-            <div class="tool-panel-actions">
-              <button id="design-village-bus-route-button" class="primary-button" type="button">노선 생성</button>
-              <button id="reset-village-bus-route-button" class="secondary-button" type="button">설계 종료</button>
-            </div>
-            <p id="village-bus-design-summary" class="tool-panel-summary">기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.</p>
-          </div>
+        </div>
+      </div>
 
-          <div id="observation-area-panel" class="tool-panel">
-            <div class="tool-panel-head">
-              <div>
-                <h3 class="tool-panel-title">관찰 구역</h3>
-                <p id="observation-area-summary" class="tool-panel-subtitle">집중해서 볼 지역을 반투명 구역으로 저장해 둘 수 있습니다.</p>
-              </div>
-            </div>
-            <div class="tool-panel-grid observation-area-grid">
-              <label class="field">
-                <span>구역 이름</span>
-                <input id="observation-area-name" type="text" placeholder="예: 상암 북측 점검 구역">
-              </label>
-              <label class="field observation-area-color-field">
-                <span>구역 색상</span>
-                <input id="observation-area-color" type="color" value="#2f8cff">
-              </label>
-            </div>
-            <div class="tool-panel-actions">
-              <button id="start-observation-area-button" class="secondary-button" type="button">구역 그리기</button>
-              <button id="update-observation-area-button" class="secondary-button" type="button" disabled>선택 구역 저장</button>
-              <button id="move-observation-area-button" class="secondary-button" type="button" disabled>구역 이동</button>
-              <button id="edit-observation-area-button" class="secondary-button" type="button" disabled>구역 수정</button>
-              <button id="save-observation-area-button" class="primary-button" type="button" disabled>구역 저장</button>
-              <button id="cancel-observation-area-button" class="secondary-button" type="button" disabled>그리기 취소</button>
-            </div>
-            <div id="observation-area-list" class="observation-area-list"></div>
+      <div id="village-bus-design-panel" class="section tool-panel is-collapsed" data-collapsible="true">
+        <div class="tool-panel-head">
+          <div>
+            <h3 class="tool-panel-title">마을버스 설계</h3>
+            <p id="village-bus-route-caption" class="tool-panel-subtitle">설계된 정류장을 기반으로 최적의 경로를 설계합니다.</p>
           </div>
+          <button class="tool-panel-toggle" type="button" aria-expanded="false">열기</button>
+        </div>
+        <div class="tool-panel-body">
+          <div class="tool-panel-grid">
+            <label class="field">
+              <span>경로 우선순위</span>
+              <select id="village-priority-select">
+                <option value="RECOMMEND">추천 경로</option>
+                <option value="TIME">최단 시간</option>
+                <option value="DISTANCE">최단 거리</option>
+              </select>
+            </label>
+          </div>
+          <div class="tool-panel-actions">
+            <button id="design-village-bus-route-button" class="primary-button" type="button">노선 생성</button>
+            <button id="reset-village-bus-route-button" class="secondary-button" type="button">설계 종료</button>
+          </div>
+          <p id="village-bus-design-summary" class="tool-panel-summary">기본값은 대형 차량, 도로이벤트 기본 반영이며 경로 우선순위만 선택할 수 있습니다.</p>
+        </div>
+      </div>
+
+      <div id="observation-area-panel" class="section tool-panel is-collapsed" data-collapsible="true">
+        <div class="tool-panel-head">
+          <div>
+            <h3 class="tool-panel-title">관찰 구역</h3>
+            <p id="observation-area-summary" class="tool-panel-subtitle">집중해서 볼 지역을 반투명 구역으로 저장해 둘 수 있습니다.</p>
+          </div>
+          <button class="tool-panel-toggle" type="button" aria-expanded="false">열기</button>
+        </div>
+        <div class="tool-panel-body">
+          <div class="tool-panel-grid observation-area-grid">
+            <label class="field">
+              <span>구역 이름</span>
+              <input id="observation-area-name" type="text" placeholder="예: 상암 북측 점검 구역">
+            </label>
+            <label class="field observation-area-color-field">
+              <span>구역 색상</span>
+              <input id="observation-area-color" type="color" value="#2f8cff">
+            </label>
+          </div>
+          <div class="tool-panel-actions">
+            <button id="start-observation-area-button" class="secondary-button" type="button">구역 그리기</button>
+            <button id="update-observation-area-button" class="secondary-button" type="button" disabled>선택 구역 저장</button>
+            <button id="move-observation-area-button" class="secondary-button" type="button" disabled>구역 이동</button>
+            <button id="edit-observation-area-button" class="secondary-button" type="button" disabled>구역 수정</button>
+            <button id="save-observation-area-button" class="primary-button" type="button" disabled>구역 저장</button>
+            <button id="cancel-observation-area-button" class="secondary-button" type="button" disabled>그리기 취소</button>
+          </div>
+          <div id="observation-area-list" class="observation-area-list"></div>
         </div>
       </div>
 
@@ -248,7 +267,7 @@
             <span>설명</span>
             <textarea id="path-description" name="pathDescription" rows="3" placeholder="설명"></textarea>
           </label>
-          <p id="path-editor-help" class="section-help">노선을 선택한 뒤 새 경로를 그리거나 기존 경로를 편집할 수 있습니다.</p>
+          <p id="path-editor-help" class="section-help">설계된 정류장을 기반으로 최적의 경로를 설계합니다.</p>
           <div class="form-actions">
             <button id="finish-path-button" class="primary-button" type="button">경로 저장</button>
             <button id="cancel-path-button" class="secondary-button" type="button">편집 취소</button>
@@ -287,6 +306,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260314ai"></script>
+  <script src="./app.js?v=20260314am"></script>
 </body>
 </html>
