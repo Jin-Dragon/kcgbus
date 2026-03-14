@@ -194,6 +194,19 @@
     statusEl.classList.toggle("error", Boolean(isError));
   }
 
+  function logRenameRouteDebug(stage, payload = {}) {
+    window.fetch("/api/debug-rename-route", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        stage,
+        payload,
+      }),
+    }).catch(() => {});
+  }
+
   function clearMapSearchResult() {
     if (mapSearchMarker) {
       mapSearchMarker.setMap(null);
@@ -1599,6 +1612,13 @@
   function renameRoute(oldRouteName, nextRouteName) {
     const previousName = normalizeRouteName(oldRouteName);
     const renamedRouteName = normalizeRouteName(nextRouteName);
+    const beforeRoutes = getRoutes();
+    const routePoints = getAllPoints().filter((point) => normalizeRouteName(point.routeName) === previousName);
+    const routePaths = getAllPaths().filter((pathItem) => normalizeRouteName(pathItem.routeName) === previousName);
+    const customPointIds = new Set(routePoints.filter((point) => point.source === "custom").map((point) => point.id));
+    const uploadedPointIds = new Set(routePoints.filter((point) => point.source !== "custom").map((point) => point.id));
+    const customPathIds = new Set(routePaths.filter((pathItem) => pathItem.source === "custom-path").map((pathItem) => pathItem.id));
+    const uploadedPathIds = new Set(routePaths.filter((pathItem) => pathItem.source !== "custom-path").map((pathItem) => pathItem.id));
 
     if (!previousName || !renamedRouteName) {
       throw new Error("노선명을 입력하세요.");
@@ -1611,13 +1631,26 @@
     }
 
     pushUndoSnapshot();
+    const previousSetting = getRouteSetting(previousName);
+    logRenameRouteDebug("before-rename", {
+      previousName,
+      renamedRouteName,
+      previousSetting,
+      selectedRouteName,
+      mergeRouteAName,
+      mergeRouteBName,
+      latestMergedRouteName,
+      beforeRoutes,
+    });
     customPoints = customPoints.map((point) => (
-      point.routeName === previousName ? { ...point, routeName: renamedRouteName } : point
+      customPointIds.has(point.id)
+        ? { ...point, routeName: renamedRouteName }
+        : point
     ));
     saveCustomPoints();
 
     uploadedPoints
-      .filter((point) => normalizeRouteName(point.routeName) === previousName)
+      .filter((point) => uploadedPointIds.has(point.id))
       .forEach((point) => {
         pointOverrides[point.id] = {
           ...(pointOverrides[point.id] || {}),
@@ -1627,12 +1660,14 @@
     saveOverrides();
 
     customPaths = customPaths.map((pathItem) => (
-      pathItem.routeName === previousName ? { ...pathItem, routeName: renamedRouteName } : pathItem
+      customPathIds.has(pathItem.id)
+        ? { ...pathItem, routeName: renamedRouteName }
+        : pathItem
     ));
     saveCustomPaths();
 
     uploadedPaths
-      .filter((pathItem) => normalizeRouteName(pathItem.routeName) === previousName)
+      .filter((pathItem) => uploadedPathIds.has(pathItem.id))
       .forEach((pathItem) => {
         pathOverrides[pathItem.id] = {
           ...(pathOverrides[pathItem.id] || {}),
@@ -1641,14 +1676,11 @@
       });
     savePathOverrides();
 
-    const previousSetting = routeSettings[previousName];
-    if (previousSetting) {
-      routeSettings[renamedRouteName] = {
-        ...previousSetting,
-      };
-      delete routeSettings[previousName];
-      saveRouteSettings();
-    }
+    routeSettings[renamedRouteName] = {
+      ...previousSetting,
+    };
+    delete routeSettings[previousName];
+    saveRouteSettings();
 
     if (selectedRouteName === previousName) {
       selectedRouteName = renamedRouteName;
@@ -1665,6 +1697,23 @@
     highlightedRouteNames = highlightedRouteNames.map((routeName) => (
       routeName === previousName ? renamedRouteName : routeName
     ));
+
+    logRenameRouteDebug("after-rename", {
+      previousName,
+      renamedRouteName,
+      renamedSetting: routeSettings[renamedRouteName],
+      selectedRouteName,
+      mergeRouteAName,
+      mergeRouteBName,
+      latestMergedRouteName,
+      afterRoutes: getRoutes(),
+      routeGroup: getRouteSetting(renamedRouteName).routeGroup,
+      routeOrder: getRouteSetting(renamedRouteName).routeOrder,
+      oldPointCount: getAllPoints().filter((point) => normalizeRouteName(point.routeName) === previousName).length,
+      newPointCount: getAllPoints().filter((point) => normalizeRouteName(point.routeName) === renamedRouteName).length,
+      oldPathCount: getAllPaths().filter((pathItem) => normalizeRouteName(pathItem.routeName) === previousName).length,
+      newPathCount: getAllPaths().filter((pathItem) => normalizeRouteName(pathItem.routeName) === renamedRouteName).length,
+    });
 
     return renamedRouteName;
   }
@@ -3067,6 +3116,8 @@
       throw new Error("Designed route did not return enough coordinates.");
     }
     return {
+      payload: result,
+      routeIndex: selected.index,
       coordinates,
       usedFallback: false,
       totalDistanceMeters: summary.totalDistanceMeters,
@@ -3083,24 +3134,45 @@
       attempts.push({
         label: "context-both",
         points: [allPoints[startIndex - 1], startPoint, endPoint, allPoints[startIndex + 2]],
+        sectionIndex: 1,
       });
     }
     if (startIndex > 0) {
       attempts.push({
         label: "context-prev",
         points: [allPoints[startIndex - 1], startPoint, endPoint],
+        sectionIndex: 1,
       });
     }
     if (startIndex + 1 < allPoints.length - 1) {
       attempts.push({
         label: "context-next",
         points: [startPoint, endPoint, allPoints[startIndex + 2]],
+        sectionIndex: 0,
       });
     }
 
     for (const attempt of attempts) {
       try {
         const result = await requestDesignedRouteSegment(`${routeName}-${attempt.label}-${startIndex + 1}`, attempt.points, designOptions);
+        const sectionCoordinates = extractDesignedRouteSectionCoordinates(
+          result.payload,
+          result.routeIndex,
+          attempt.sectionIndex
+        );
+        if (sectionCoordinates.length >= 2) {
+          const sectionSummary = extractDesignedRouteSectionSummary(
+            result.payload,
+            result.routeIndex,
+            attempt.sectionIndex
+          );
+          return {
+            coordinates: sectionCoordinates,
+            usedFallback: false,
+            totalDistanceMeters: sectionSummary.totalDistanceMeters || measureCoordinatePathDistance(sectionCoordinates),
+            totalDurationSeconds: sectionSummary.totalDurationSeconds || result.totalDurationSeconds,
+          };
+        }
         const slicedCoordinates = sliceCoordinatesBetweenPoints(result.coordinates, startPoint, endPoint);
         if (slicedCoordinates.length >= 2) {
           const slicedDistance = measureCoordinatePathDistance(slicedCoordinates);
@@ -4948,6 +5020,23 @@
     return deduped;
   }
 
+  function extractDesignedRouteSectionCoordinates(payload, routeIndex = 0, sectionIndex = 0) {
+    const coordinates = [];
+    const section = payload?.routes?.[routeIndex]?.sections?.[sectionIndex];
+    (section?.roads || []).forEach((road) => {
+      coordinates.push(...convertVertexesToCoordinates(road.vertexes || []));
+    });
+
+    const deduped = [];
+    coordinates.forEach((coordinate) => {
+      const last = deduped[deduped.length - 1];
+      if (!last || last.lat !== coordinate.lat || last.lng !== coordinate.lng) {
+        deduped.push(coordinate);
+      }
+    });
+    return deduped;
+  }
+
   function buildPointSequenceCoordinates(points) {
     return points
       .map((point) => ({
@@ -4963,6 +5052,14 @@
     return {
       totalDistanceMeters: Number(summary.distance) || 0,
       totalDurationSeconds: Number(summary.duration) || 0,
+    };
+  }
+
+  function extractDesignedRouteSectionSummary(payload, routeIndex = 0, sectionIndex = 0) {
+    const section = payload?.routes?.[routeIndex]?.sections?.[sectionIndex] || {};
+    return {
+      totalDistanceMeters: Number(section.distance) || 0,
+      totalDurationSeconds: Number(section.duration) || 0,
     };
   }
 
@@ -6310,6 +6407,15 @@
       .filter((routeName) => getRouteSetting(routeName).routeGroup === "merged")
       .filter((routeName) => !mergedQuery || normalizeSearchText(routeName).includes(mergedQuery));
 
+    if (editingRouteName) {
+      logRenameRouteDebug("render-route-list", {
+        editingRouteName,
+        originalRoutes,
+        mergedRoutes,
+        selectedRouteName,
+      });
+    }
+
     ensureRouteListTitleInput(routeListEl, "original", "불러온 노선");
     ensureRouteListSearchInput(routeListEl, "original");
     renderRouteEntries(routeListEl, originalRoutes, "노선이 없습니다.", "merged");
@@ -7092,7 +7198,8 @@
     pushUndoSnapshot();
     const reordered = [...points];
     const [movedPoint] = reordered.splice(sourceIndex, 1);
-    reordered.splice(targetIndex, 0, movedPoint);
+    const insertIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+    reordered.splice(insertIndex, 0, movedPoint);
 
     const createdOrderBase = Date.now();
     reordered.forEach((point, index) => {
