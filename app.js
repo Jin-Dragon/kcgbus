@@ -3321,6 +3321,18 @@
     return `route-${normalized || "default"}`;
   }
 
+  function buildRouteMetadataEntries(routeName) {
+    const setting = getRouteSetting(routeName);
+    const entries = [];
+    if (setting.routeGroup === "merged" || setting.routeGroup === "default") {
+      entries.push(`<Data name="routeGroup"><value>${escapeXml(setting.routeGroup)}</value></Data>`);
+    }
+    if (Number.isFinite(Number(setting.routeOrder))) {
+      entries.push(`<Data name="routeOrder"><value>${escapeXml(String(setting.routeOrder))}</value></Data>`);
+    }
+    return entries;
+  }
+
   function buildRouteStyle(routeName) {
     const setting = getRouteSetting(routeName);
     const styleId = routeStyleId(routeName);
@@ -3348,13 +3360,13 @@
   }
 
   function pointToKml(point, styleId) {
-    const dataEntries = [
+    const dataEntries = buildRouteMetadataEntries(point.routeName).concat([
       point.fileName ? `<Data name="fileName"><value>${escapeXml(point.fileName)}</value></Data>` : "",
       point.description ? `<Data name="description"><value>${escapeXml(point.description)}</value></Data>` : "",
       Number.isFinite(Number(point.createdOrder))
         ? `<Data name="createdOrder"><value>${escapeXml(String(point.createdOrder))}</value></Data>`
         : "",
-    ]
+    ])
       .concat(
         (point.extendedData || []).map(
           (item) => `<Data name="${escapeXml(item.name)}"><value>${escapeXml(item.value)}</value></Data>`
@@ -3385,12 +3397,14 @@
           : `${coordinate.lng},${coordinate.lat},${coordinate.altitude}`
       )
       .join(" ");
+    const dataEntries = buildRouteMetadataEntries(pathItem.routeName).join("");
 
     return `
       <Placemark>
         <name>${escapeXml(pathItem.name)}</name>
         ${styleId ? `<styleUrl>#${escapeXml(styleId)}</styleUrl>` : ""}
         ${pathItem.description ? `<description>${escapeXml(pathItem.description)}</description>` : ""}
+        ${dataEntries ? `<ExtendedData>${dataEntries}</ExtendedData>` : ""}
         <LineString>
           <tessellate>1</tessellate>
           <coordinates>${coordinates}</coordinates>
@@ -4712,6 +4726,8 @@
     }
     const extendedData = getExtendedData(placemark);
     const createdOrderValue = Number(getExtendedDataValue(extendedData, "createdOrder"));
+    const routeGroupValue = getExtendedDataValue(extendedData, "routeGroup");
+    const routeOrderValue = Number(getExtendedDataValue(extendedData, "routeOrder"));
 
     return {
       id: `${fileName}-point-${index}`,
@@ -4728,6 +4744,8 @@
       lng,
       altitude: Number.isFinite(altitude) ? altitude : null,
       createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
+      routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
+      routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
       extendedData,
     };
   }
@@ -4761,6 +4779,10 @@
       return null;
     }
 
+    const extendedData = getExtendedData(placemark);
+    const routeGroupValue = getExtendedDataValue(extendedData, "routeGroup");
+    const routeOrderValue = Number(getExtendedDataValue(extendedData, "routeOrder"));
+
     return {
       id: `${fileName}-path-${index}`,
       source: "uploaded-path",
@@ -4769,9 +4791,39 @@
       name: directChildText(placemark, "name") || normalizeRouteName(routeName || fileName),
       description: directChildText(placemark, "description"),
       styleUrl: directChildText(placemark, "styleUrl"),
+      routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
+      routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
       rawCoordinates,
       coordinates,
     };
+  }
+
+  function restoreRouteSettingsFromImportedKml(points, paths) {
+    const routeMetaByName = new Map();
+    [...(Array.isArray(points) ? points : []), ...(Array.isArray(paths) ? paths : [])].forEach((item) => {
+      const routeName = normalizeRouteName(item?.routeName);
+      if (!routeName) {
+        return;
+      }
+
+      const current = routeMetaByName.get(routeName) || {};
+      const next = { ...current };
+      if ((item?.routeGroup === "merged" || item?.routeGroup === "default") && !next.routeGroup) {
+        next.routeGroup = item.routeGroup;
+      }
+      if (Number.isFinite(Number(item?.routeOrder)) && !Number.isFinite(Number(next.routeOrder))) {
+        next.routeOrder = Number(item.routeOrder);
+      }
+      routeMetaByName.set(routeName, next);
+    });
+
+    routeMetaByName.forEach((meta, routeName) => {
+      routeSettings[routeName] = {
+        ...getRouteSetting(routeName),
+        ...(meta.routeGroup ? { routeGroup: meta.routeGroup } : {}),
+        ...(Number.isFinite(Number(meta.routeOrder)) ? { routeOrder: Number(meta.routeOrder) } : {}),
+      };
+    });
   }
 
   function parseKml(text, filename) {
@@ -4924,6 +4976,43 @@
     }
 
     removedRouteNames.forEach((routeName) => {
+      const routeStillExistsInUploads = uploadedPoints.some((point) => normalizeRouteName(point.routeName) === routeName)
+        || uploadedPaths.some((pathItem) => normalizeRouteName(pathItem.routeName) === routeName);
+
+      if (!routeStillExistsInUploads) {
+        const removedCustomPointIds = new Set(
+          customPoints
+            .filter((point) => normalizeRouteName(point.routeName) === routeName)
+            .map((point) => point.id)
+        );
+        const removedCustomPathIds = new Set(
+          customPaths
+            .filter((pathItem) => normalizeRouteName(pathItem.routeName) === routeName)
+            .map((pathItem) => pathItem.id)
+        );
+
+        customPoints = customPoints.filter((point) => normalizeRouteName(point.routeName) !== routeName);
+        customPaths = customPaths.filter((pathItem) => normalizeRouteName(pathItem.routeName) !== routeName);
+
+        Object.keys(pointOverrides).forEach((pointId) => {
+          if (removedCustomPointIds.has(pointId)) {
+            delete pointOverrides[pointId];
+          }
+        });
+        Object.keys(pathOverrides).forEach((pathId) => {
+          if (removedCustomPathIds.has(pathId)) {
+            delete pathOverrides[pathId];
+          }
+        });
+
+        if (selectedPointId && removedCustomPointIds.has(selectedPointId)) {
+          selectedPointId = null;
+        }
+        if (selectedPathId && removedCustomPathIds.has(selectedPathId)) {
+          selectedPathId = null;
+        }
+      }
+
       const routeStillExists = getAllPoints().some((point) => point.routeName === routeName)
         || getAllPaths().some((pathItem) => pathItem.routeName === routeName);
       if (!routeStillExists) {
@@ -4935,10 +5024,14 @@
       }
     });
 
+    saveCustomPoints();
+    saveCustomPaths();
     saveUploadedWorkspace();
     saveOverrides();
     savePathOverrides();
     saveRouteSettings();
+    fileCountEl.textContent = String(uploadedFileSummaries.length);
+    renderFileList(uploadedFileSummaries);
     shouldFitMapToData = false;
     refreshUI();
     setStatus(`"${targetFileName}" 파일을 불러온 목록에서 제거했습니다.`, false);
@@ -7804,7 +7897,9 @@
     uploadedPoints = points;
     uploadedPaths = paths;
     uploadedFileSummaries = fileSummaries;
+    restoreRouteSettingsFromImportedKml(points, paths);
     saveUploadedWorkspace();
+    saveRouteSettings();
     shouldFitMapToData = true;
     fileCountEl.textContent = String(files.length);
     renderFileList(fileSummaries);
