@@ -85,7 +85,11 @@
   const mapSearchClearEl = document.getElementById("map-search-clear");
   const helpButtonEl = document.getElementById("help-button");
   const observationAreaNameEl = document.getElementById("observation-area-name");
+  const observationAreaColorEl = document.getElementById("observation-area-color");
   const startObservationAreaButtonEl = document.getElementById("start-observation-area-button");
+  const updateObservationAreaButtonEl = document.getElementById("update-observation-area-button");
+  const moveObservationAreaButtonEl = document.getElementById("move-observation-area-button");
+  const editObservationAreaButtonEl = document.getElementById("edit-observation-area-button");
   const saveObservationAreaButtonEl = document.getElementById("save-observation-area-button");
   const cancelObservationAreaButtonEl = document.getElementById("cancel-observation-area-button");
   const observationAreaListEl = document.getElementById("observation-area-list");
@@ -149,6 +153,7 @@
   let observationAreaLabels = [];
   let observationAreaVertexMarkers = [];
   let observationAreaPreviewPolygon = null;
+  let observationAreaEditMarkers = [];
   let designedRouteInfoWindows = [];
   let mapSearchPlaces = null;
   let mapSearchMarker = null;
@@ -158,8 +163,11 @@
   let analysisActive = false;
   let observationAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
   let observationAreaDrawMode = false;
+  let observationAreaMoveMode = false;
+  let observationAreaEditMode = false;
   let workingObservationAreaPoints = [];
   let selectedObservationAreaId = null;
+  let observationAreaDragState = null;
 
   let uploadedPoints = loadJsonArray(UPLOADED_POINTS_KEY);
   let uploadedPaths = loadJsonArray(UPLOADED_PATHS_KEY);
@@ -213,6 +221,19 @@
     };
   }
 
+  function normalizeHexColor(value, fallback = "#2f8cff") {
+    const normalized = String(value || "").trim();
+    return /^#[0-9a-fA-F]{6}$/.test(normalized) ? normalized.toLowerCase() : fallback;
+  }
+
+  function hexToRgba(hexColor, alpha) {
+    const color = normalizeHexColor(hexColor);
+    const r = Number.parseInt(color.slice(1, 3), 16);
+    const g = Number.parseInt(color.slice(3, 5), 16);
+    const b = Number.parseInt(color.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
   function buildObservationAreaPath(points) {
     return (Array.isArray(points) ? points : []).map(
       (point) => new window.kakao.maps.LatLng(Number(point.lat), Number(point.lng))
@@ -223,9 +244,11 @@
     observationAreaPolygons.forEach((item) => item.setMap(null));
     observationAreaLabels.forEach((item) => item.setMap(null));
     observationAreaVertexMarkers.forEach((item) => item.setMap(null));
+    observationAreaEditMarkers.forEach((item) => item.setMap(null));
     observationAreaPolygons = [];
     observationAreaLabels = [];
     observationAreaVertexMarkers = [];
+    observationAreaEditMarkers = [];
     if (observationAreaPreviewPolygon) {
       observationAreaPreviewPolygon.setMap(null);
       observationAreaPreviewPolygon = null;
@@ -239,7 +262,7 @@
     }
 
     observationAreas.forEach((area) => {
-      if (!Array.isArray(area.points) || area.points.length < 3) {
+      if (area.hidden || !Array.isArray(area.points) || area.points.length < 3) {
         return;
       }
 
@@ -247,20 +270,20 @@
         map,
         path: buildObservationAreaPath(area.points),
         strokeWeight: area.id === selectedObservationAreaId ? 3 : 2,
-        strokeColor: area.id === selectedObservationAreaId ? "#0f6cbd" : "#2f8cff",
+        strokeColor: normalizeHexColor(area.color, "#2f8cff"),
         strokeOpacity: 0.95,
-        fillColor: area.id === selectedObservationAreaId ? "#7db7ff" : "#9bc7ff",
+        fillColor: normalizeHexColor(area.color, "#2f8cff"),
         fillOpacity: area.id === selectedObservationAreaId ? 0.32 : 0.22,
       });
       observationAreaPolygons.push(polygon);
 
       const center = getObservationAreaCenter(area.points);
-      if (center) {
+      if (center && area.id === selectedObservationAreaId) {
         const label = new window.kakao.maps.CustomOverlay({
           map,
           position: new window.kakao.maps.LatLng(center.lat, center.lng),
           yAnchor: 1.2,
-          content: `<div style="padding:6px 10px;border:1px solid rgba(15,108,189,0.18);border-radius:999px;background:rgba(255,255,255,0.96);font-size:12px;font-weight:700;color:#20476f;box-shadow:0 10px 18px rgba(38,65,96,0.12);">${escapeHtml(area.name)}</div>`,
+          content: `<div style="padding:6px 10px;border:1px solid ${hexToRgba(area.color, 0.24)};border-radius:999px;background:rgba(255,255,255,0.96);font-size:12px;font-weight:700;color:#20476f;box-shadow:0 10px 18px rgba(38,65,96,0.12);">${escapeHtml(area.name)}</div>`,
         });
         observationAreaLabels.push(label);
       }
@@ -269,6 +292,46 @@
         selectedObservationAreaId = area.id;
         refreshUI();
       });
+
+      window.kakao.maps.event.addListener(polygon, "mousedown", (mouseEvent) => {
+        beginObservationAreaDrag(area.id, mouseEvent);
+      });
+
+      if (area.id === selectedObservationAreaId && observationAreaEditMode) {
+        observationAreaEditMarkers = area.points.map((point, index) => {
+          const marker = new window.kakao.maps.Marker({
+            map,
+            position: new window.kakao.maps.LatLng(point.lat, point.lng),
+            title: `${area.name} 꼭짓점 ${index + 1}`,
+            draggable: true,
+          });
+          window.kakao.maps.event.addListener(marker, "dragstart", () => {
+            pushUndoSnapshot();
+          });
+          window.kakao.maps.event.addListener(marker, "dragend", () => {
+            const dragged = marker.getPosition();
+            updateObservationAreaVertex(area.id, index, Number(dragged.getLat().toFixed(7)), Number(dragged.getLng().toFixed(7)));
+          });
+          window.kakao.maps.event.addListener(marker, "rightclick", () => {
+            showPathContextMenu(marker.getPosition(), [
+              {
+                label: "포인트 삭제",
+                danger: true,
+                onClick: () => {
+                  deleteObservationAreaVertex(area.id, index);
+                },
+              },
+              {
+                label: "포인트 추가",
+                onClick: () => {
+                  insertObservationAreaVertex(area.id, index);
+                },
+              },
+            ]);
+          });
+          return marker;
+        });
+      }
     });
 
     if (observationAreaDrawMode && workingObservationAreaPoints.length) {
@@ -282,12 +345,78 @@
         map,
         path: buildObservationAreaPath(workingObservationAreaPoints),
         strokeWeight: 2,
-        strokeColor: "#1f6fd1",
+        strokeColor: normalizeHexColor(observationAreaColorEl?.value, "#2f8cff"),
         strokeOpacity: 0.95,
         strokeStyle: "shortdash",
-        fillColor: "#9bc7ff",
+        fillColor: normalizeHexColor(observationAreaColorEl?.value, "#2f8cff"),
         fillOpacity: workingObservationAreaPoints.length >= 3 ? 0.18 : 0.08,
       });
+    }
+  }
+
+  function beginObservationAreaDrag(areaId, mouseEvent) {
+    if (!observationAreaMoveMode || areaId !== selectedObservationAreaId) {
+      return;
+    }
+    const lat = Number(mouseEvent?.latLng?.getLat?.().toFixed(7));
+    const lng = Number(mouseEvent?.latLng?.getLng?.().toFixed(7));
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+    pushUndoSnapshot();
+    observationAreaDragState = {
+      areaId,
+      lastLat: lat,
+      lastLng: lng,
+    };
+    if (window.kakao?.maps?.event) {
+      window.kakao.maps.event.preventMap();
+    }
+    setStatus("관찰 구역을 드래그해 이동 중입니다. 마우스를 놓으면 위치가 저장됩니다.", false);
+  }
+
+  function handleObservationAreaDrag(mouseEvent) {
+    if (!observationAreaDragState) {
+      return;
+    }
+    const lat = Number(mouseEvent?.latLng?.getLat?.().toFixed(7));
+    const lng = Number(mouseEvent?.latLng?.getLng?.().toFixed(7));
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+
+    const deltaLat = lat - observationAreaDragState.lastLat;
+    const deltaLng = lng - observationAreaDragState.lastLng;
+    if (!deltaLat && !deltaLng) {
+      return;
+    }
+
+    updateObservationArea(
+      observationAreaDragState.areaId,
+      (area) => ({
+        ...area,
+        points: area.points.map((point) => ({
+          lat: Number((point.lat + deltaLat).toFixed(7)),
+          lng: Number((point.lng + deltaLng).toFixed(7)),
+        })),
+      }),
+      { persist: false }
+    );
+    observationAreaDragState.lastLat = lat;
+    observationAreaDragState.lastLng = lng;
+    renderObservationAreas();
+  }
+
+  function finishObservationAreaDrag() {
+    if (!observationAreaDragState) {
+      return;
+    }
+    const area = observationAreas.find((item) => item.id === observationAreaDragState.areaId);
+    observationAreaDragState = null;
+    saveObservationAreas();
+    refreshUI();
+    if (area) {
+      setStatus(`"${area.name}" 구역 위치를 저장했습니다.`, false);
     }
   }
 
@@ -740,20 +869,39 @@
     if (!startObservationAreaButtonEl || !saveObservationAreaButtonEl || !cancelObservationAreaButtonEl) {
       return;
     }
+    const selectedArea = observationAreas.find((area) => area.id === selectedObservationAreaId) || null;
     startObservationAreaButtonEl.classList.toggle("is-active", observationAreaDrawMode);
     startObservationAreaButtonEl.textContent = observationAreaDrawMode ? "구역 표시 중" : "구역 그리기";
+    updateObservationAreaButtonEl.disabled = !selectedArea || observationAreaDrawMode;
+    moveObservationAreaButtonEl.disabled = !selectedArea || observationAreaDrawMode;
+    editObservationAreaButtonEl.disabled = !selectedArea || observationAreaDrawMode;
+    moveObservationAreaButtonEl.classList.toggle("is-active", observationAreaMoveMode);
+    editObservationAreaButtonEl.classList.toggle("is-active", observationAreaEditMode);
+    moveObservationAreaButtonEl.textContent = observationAreaMoveMode ? "이동 위치 선택 중" : "구역 이동";
+    editObservationAreaButtonEl.textContent = observationAreaEditMode ? "수정 종료" : "구역 수정";
     saveObservationAreaButtonEl.disabled = !observationAreaDrawMode || workingObservationAreaPoints.length < 3;
     cancelObservationAreaButtonEl.disabled = !observationAreaDrawMode;
   }
 
   function renderObservationAreaPanel() {
-    if (!observationAreaListEl || !observationAreaNameEl) {
+    if (!observationAreaListEl || !observationAreaNameEl || !observationAreaColorEl) {
       return;
     }
 
-    observationAreaNameEl.disabled = !observationAreaDrawMode;
-    if (!observationAreaDrawMode) {
+    const selectedArea = observationAreas.find((area) => area.id === selectedObservationAreaId) || null;
+    const canEditFields = observationAreaDrawMode || Boolean(selectedArea);
+    observationAreaNameEl.disabled = !canEditFields;
+    observationAreaColorEl.disabled = !canEditFields;
+    if (observationAreaDrawMode) {
+      if (!observationAreaNameEl.value.trim()) {
+        observationAreaNameEl.value = `관찰 구역 ${observationAreas.length + 1}`;
+      }
+    } else if (selectedArea) {
+      observationAreaNameEl.value = selectedArea.name;
+      observationAreaColorEl.value = normalizeHexColor(selectedArea.color, "#2f8cff");
+    } else {
       observationAreaNameEl.value = "";
+      observationAreaColorEl.value = "#2f8cff";
     }
     updateObservationAreaButtons();
 
@@ -766,17 +914,43 @@
     observationAreas.forEach((area) => {
       const itemEl = document.createElement("div");
       itemEl.className = "observation-area-item";
+      if (area.id === selectedObservationAreaId) {
+        itemEl.classList.add("is-selected");
+      }
+      itemEl.style.setProperty("--area-color", normalizeHexColor(area.color, "#2f8cff"));
+      itemEl.addEventListener("click", () => {
+        selectedObservationAreaId = area.id;
+        refreshUI();
+        setStatus(`"${area.name}" 구역을 선택했습니다.`, false);
+      });
       const metaEl = document.createElement("div");
       metaEl.innerHTML = `<strong>${escapeHtml(area.name)}</strong><span>꼭짓점 ${area.points.length}개</span>`;
 
       const actionsEl = document.createElement("div");
       actionsEl.className = "observation-area-actions";
 
+      const hiddenLabel = document.createElement("label");
+      const hiddenCheckbox = document.createElement("input");
+      hiddenCheckbox.type = "checkbox";
+      hiddenCheckbox.checked = area.hidden === true;
+      hiddenCheckbox.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      hiddenCheckbox.addEventListener("change", (event) => {
+        event.stopPropagation();
+        setObservationAreaHidden(area.id, hiddenCheckbox.checked);
+      });
+      const hiddenText = document.createElement("span");
+      hiddenText.textContent = "숨김";
+      hiddenLabel.appendChild(hiddenCheckbox);
+      hiddenLabel.appendChild(hiddenText);
+
       const focusButton = document.createElement("button");
       focusButton.type = "button";
       focusButton.className = "observation-area-chip";
       focusButton.textContent = "보기";
-      focusButton.addEventListener("click", () => {
+      focusButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         focusObservationArea(area.id);
       });
 
@@ -784,10 +958,12 @@
       deleteButton.type = "button";
       deleteButton.className = "observation-area-chip";
       deleteButton.textContent = "삭제";
-      deleteButton.addEventListener("click", () => {
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         removeObservationArea(area.id);
       });
 
+      actionsEl.appendChild(hiddenLabel);
       actionsEl.appendChild(focusButton);
       actionsEl.appendChild(deleteButton);
       itemEl.appendChild(metaEl);
@@ -798,9 +974,15 @@
 
   function stopObservationAreaDrawMode() {
     observationAreaDrawMode = false;
+    observationAreaMoveMode = false;
+    observationAreaEditMode = false;
+    observationAreaDragState = null;
     workingObservationAreaPoints = [];
     if (observationAreaNameEl) {
       observationAreaNameEl.value = "";
+    }
+    if (observationAreaColorEl) {
+      observationAreaColorEl.value = "#2f8cff";
     }
     updateObservationAreaButtons();
   }
@@ -810,13 +992,161 @@
     stopRelocateMode();
     setAddPointMode(false);
     observationAreaDrawMode = true;
+    observationAreaMoveMode = false;
+    observationAreaEditMode = false;
     workingObservationAreaPoints = [];
-    if (observationAreaNameEl && !observationAreaNameEl.value.trim()) {
-      observationAreaNameEl.value = `관찰 구역 ${observationAreas.length + 1}`;
-    }
     renderObservationAreas();
     renderObservationAreaPanel();
     setStatus("관찰 구역 그리기 모드입니다. 지도에서 꼭짓점을 차례대로 클릭한 뒤 구역 저장을 누르세요.", false);
+  }
+
+  function updateObservationArea(areaId, updater, options = {}) {
+    const { persist = true } = options;
+    const index = observationAreas.findIndex((area) => area.id === areaId);
+    if (index < 0) {
+      return null;
+    }
+    const current = normalizeObservationArea(observationAreas[index]);
+    const next = normalizeObservationArea(updater(current) || current);
+    observationAreas[index] = next;
+    if (persist) {
+      saveObservationAreas();
+    }
+    return next;
+  }
+
+  function setObservationAreaHidden(areaId, hidden) {
+    pushUndoSnapshot();
+    const updated = updateObservationArea(areaId, (area) => ({
+      ...area,
+      hidden,
+    }));
+    if (!updated) {
+      return;
+    }
+    if (hidden && selectedObservationAreaId === areaId) {
+      selectedObservationAreaId = areaId;
+    }
+    refreshUI();
+    setStatus(`"${updated.name}" 구역을 ${hidden ? "숨김" : "표시"} 상태로 변경했습니다.`, false);
+  }
+
+  function updateSelectedObservationAreaSettings() {
+    const selectedArea = observationAreas.find((area) => area.id === selectedObservationAreaId);
+    if (!selectedArea) {
+      setStatus("수정할 관찰 구역을 먼저 선택하세요.", true);
+      return;
+    }
+    pushUndoSnapshot();
+    const updated = updateObservationArea(selectedArea.id, (area) => ({
+      ...area,
+      name: String(observationAreaNameEl?.value || "").trim() || area.name,
+      color: normalizeHexColor(observationAreaColorEl?.value, area.color),
+    }));
+    if (!updated) {
+      return;
+    }
+    refreshUI();
+    setStatus(`"${updated.name}" 구역 설정을 저장했습니다.`, false);
+  }
+
+  function updateObservationAreaVertex(areaId, pointIndex, lat, lng) {
+    const updated = updateObservationArea(areaId, (area) => ({
+      ...area,
+      points: area.points.map((point, index) => (
+        index === pointIndex ? { lat, lng } : point
+      )),
+    }));
+    if (!updated) {
+      return;
+    }
+    refreshUI();
+    setStatus(`"${updated.name}" 구역 꼭짓점을 수정했습니다.`, false);
+  }
+
+  function deleteObservationAreaVertex(areaId, pointIndex) {
+    const area = observationAreas.find((item) => item.id === areaId);
+    if (!area) {
+      return;
+    }
+    if (area.points.length <= 3) {
+      setStatus("관찰 구역은 최소 3개의 포인트가 필요합니다.", true);
+      return;
+    }
+    pushUndoSnapshot();
+    const updated = updateObservationArea(areaId, (currentArea) => ({
+      ...currentArea,
+      points: currentArea.points.filter((point, index) => index !== pointIndex),
+    }));
+    if (!updated) {
+      return;
+    }
+    refreshUI();
+    setStatus(`"${updated.name}" 구역 포인트를 삭제했습니다.`, false);
+  }
+
+  function insertObservationAreaVertex(areaId, pointIndex) {
+    const area = observationAreas.find((item) => item.id === areaId);
+    if (!area || area.points.length < 2) {
+      return;
+    }
+    const currentPoint = area.points[pointIndex];
+    const nextPoint = area.points[(pointIndex + 1) % area.points.length];
+    if (!currentPoint || !nextPoint) {
+      return;
+    }
+    const newPoint = {
+      lat: Number(((currentPoint.lat + nextPoint.lat) / 2).toFixed(7)),
+      lng: Number(((currentPoint.lng + nextPoint.lng) / 2).toFixed(7)),
+    };
+    pushUndoSnapshot();
+    const updated = updateObservationArea(areaId, (currentArea) => {
+      const nextPoints = currentArea.points.map((point) => ({ ...point }));
+      nextPoints.splice(pointIndex + 1, 0, newPoint);
+      return {
+        ...currentArea,
+        points: nextPoints,
+      };
+    });
+    if (!updated) {
+      return;
+    }
+    refreshUI();
+    setStatus(`"${updated.name}" 구역에 새 포인트를 추가했습니다.`, false);
+  }
+
+  function toggleObservationAreaEditMode() {
+    const selectedArea = observationAreas.find((area) => area.id === selectedObservationAreaId);
+    if (!selectedArea) {
+      setStatus("수정할 관찰 구역을 먼저 선택하세요.", true);
+      return;
+    }
+    observationAreaMoveMode = false;
+    observationAreaEditMode = !observationAreaEditMode;
+    refreshUI();
+    setStatus(
+      observationAreaEditMode
+        ? `"${selectedArea.name}" 구역 수정 모드입니다. 지도 위 꼭짓점을 드래그해 형태를 조정하세요.`
+        : "관찰 구역 수정 모드를 종료했습니다.",
+      false
+    );
+  }
+
+  function toggleObservationAreaMoveMode() {
+    const selectedArea = observationAreas.find((area) => area.id === selectedObservationAreaId);
+    if (!selectedArea) {
+      setStatus("이동할 관찰 구역을 먼저 선택하세요.", true);
+      return;
+    }
+    observationAreaEditMode = false;
+    observationAreaMoveMode = !observationAreaMoveMode;
+    refreshUI();
+    setStatus(
+      observationAreaMoveMode
+        ? `"${selectedArea.name}" 구역 이동 모드입니다. 지도 위 구역을 마우스로 잡고 드래그하세요.`
+        : "관찰 구역 이동 모드를 종료했습니다.",
+      false
+    );
   }
 
   function saveObservationAreaDraft() {
@@ -826,11 +1156,14 @@
     }
 
     const areaName = String(observationAreaNameEl?.value || "").trim() || `관찰 구역 ${observationAreas.length + 1}`;
+    const areaColor = normalizeHexColor(observationAreaColorEl?.value, "#2f8cff");
     pushUndoSnapshot();
     observationAreas = observationAreas.concat([
       normalizeObservationArea({
         id: `observation-${Date.now()}`,
         name: areaName,
+        color: areaColor,
+        hidden: false,
         points: workingObservationAreaPoints,
         createdAt: new Date().toISOString(),
       }),
@@ -992,6 +1325,8 @@
     return {
       id: String(area?.id || `observation-${Date.now()}`),
       name: String(area?.name || "관찰 구역").trim() || "관찰 구역",
+      color: normalizeHexColor(area?.color, "#2f8cff"),
+      hidden: area?.hidden === true,
       points,
       createdAt: typeof area?.createdAt === "string" ? area.createdAt : new Date().toISOString(),
     };
@@ -4314,6 +4649,7 @@
         <h2>지도 도구</h2>
         <ul>
           <li><strong>지역 검색:</strong> 장소명이나 주소로 지도를 이동하고 검색 마커를 표시합니다.</li>
+          <li><strong>관찰 구역:</strong> 이름과 색상을 정해 반투명 구역을 여러 개 저장하고, 보기 또는 삭제로 관리할 수 있습니다.</li>
           <li><strong>분석 시작:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
           <li><strong>Esc:</strong> 경로 편집, 정류장 추가, 일부 선택 상태를 빠르게 취소합니다.</li>
           <li><strong>지도 빈 공간 클릭:</strong> 현재 선택한 노선, 정류장, 경로 선택을 해제합니다.</li>
@@ -5079,6 +5415,7 @@
     mapSearchInfoWindow = new window.kakao.maps.InfoWindow({ removable: false });
     mapReady = true;
     window.kakao.maps.event.addListener(map, "click", handleMapClick);
+    window.kakao.maps.event.addListener(map, "mousemove", handleObservationAreaDrag);
   }
 
   function clearMap() {
@@ -8432,6 +8769,20 @@
       return;
     }
 
+    if (observationAreaMoveMode) {
+      observationAreaMoveMode = false;
+      refreshUI();
+      setStatus("관찰 구역 이동 모드를 취소했습니다.", false);
+      return;
+    }
+
+    if (observationAreaEditMode) {
+      observationAreaEditMode = false;
+      refreshUI();
+      setStatus("관찰 구역 수정 모드를 취소했습니다.", false);
+      return;
+    }
+
     if (addPointMode) {
       setAddPointMode(false);
       clearDraftMarker();
@@ -8638,13 +8989,22 @@
       }
       startObservationAreaDrawMode();
     });
+    updateObservationAreaButtonEl?.addEventListener("click", updateSelectedObservationAreaSettings);
+    moveObservationAreaButtonEl?.addEventListener("click", toggleObservationAreaMoveMode);
+    editObservationAreaButtonEl?.addEventListener("click", toggleObservationAreaEditMode);
     saveObservationAreaButtonEl?.addEventListener("click", saveObservationAreaDraft);
     cancelObservationAreaButtonEl?.addEventListener("click", () => {
       stopObservationAreaDrawMode();
       refreshUI();
       setStatus("관찰 구역 그리기 모드를 취소했습니다.", false);
     });
+    observationAreaColorEl?.addEventListener("input", () => {
+      if (observationAreaDrawMode || selectedObservationAreaId) {
+        renderObservationAreas();
+      }
+    });
     helpButtonEl?.addEventListener("click", openHelpWindow);
+    document.addEventListener("mouseup", finishObservationAreaDrag);
     window.addEventListener("keydown", handleKeydown);
   }
 

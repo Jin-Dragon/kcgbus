@@ -392,7 +392,16 @@ h1::before {
 }
 
 .observation-area-grid {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr) 120px;
+}
+
+.observation-area-color-field input[type="color"] {
+  width: 100%;
+  min-height: 42px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
 }
 
 .observation-area-list {
@@ -412,9 +421,26 @@ h1::before {
   background: #f9fbff;
 }
 
+.observation-area-item.is-selected {
+  border-color: #8fc0ff;
+  background: #edf5ff;
+}
+
 .observation-area-item strong {
   display: block;
   font-size: 13px;
+}
+
+.observation-area-item strong::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--area-color, #2f8cff);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+  vertical-align: -1px;
 }
 
 .observation-area-item span {
@@ -429,6 +455,18 @@ h1::before {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.observation-area-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 1px solid #cfe0f6;
+  border-radius: 999px;
+  background: #fff;
+  color: #48637f;
+  font-size: 11px;
 }
 
 .observation-area-chip {
