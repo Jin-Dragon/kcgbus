@@ -28,6 +28,7 @@
   const saveKmlButtonEl = document.getElementById("save-kml-button");
   const saveResetButtonEl = document.getElementById("save-reset-button");
   const analyzeRoutesButtonEl = document.getElementById("analyze-routes-button");
+  const compareRouteGroupsButtonEl = document.getElementById("compare-route-groups-button");
   const optimizeRoutesButtonEl = document.getElementById("optimize-routes-button");
   const showAllRoutesButtonEl = document.getElementById("show-all-routes-button");
   const hideAllRoutesButtonEl = document.getElementById("hide-all-routes-button");
@@ -1941,6 +1942,26 @@
     return Math.round(Number(durationSeconds || 0) / 60);
   }
 
+  function formatPercent(value, digits = 1) {
+    return `${(Number(value || 0) * 100).toFixed(digits)}%`;
+  }
+
+  function formatAreaSquareKm(value) {
+    return `${(Number(value || 0)).toFixed(2)}km²`;
+  }
+
+  function calculateChangeRate(beforeValue, afterValue, mode = "decrease-good") {
+    const before = Number(beforeValue || 0);
+    const after = Number(afterValue || 0);
+    if (before <= 0) {
+      return 0;
+    }
+    if (mode === "increase-good") {
+      return (after - before) / before;
+    }
+    return (before - after) / before;
+  }
+
   function calculatePathDistanceMeters(pathItem) {
     const coordinates = Array.isArray(pathItem?.coordinates) ? pathItem.coordinates : [];
     if (coordinates.length < 2) {
@@ -2272,6 +2293,336 @@
       duplicatePoints,
       overlappingSegments,
     };
+  }
+
+  function estimateRouteDurationSeconds(distanceMeters) {
+    const averageBusSpeedKmh = 18;
+    const distanceKm = Number(distanceMeters || 0) / 1000;
+    return distanceKm > 0 ? (distanceKm / averageBusSpeedKmh) * 3600 : 0;
+  }
+
+  function convertGeoPointToMeters(point, originLat) {
+    const latRad = (Number(point.lat || 0) * Math.PI) / 180;
+    const lngRad = (Number(point.lng || 0) * Math.PI) / 180;
+    const originLatRad = (Number(originLat || 0) * Math.PI) / 180;
+    const earthRadiusMeters = 6371000;
+    return {
+      x: earthRadiusMeters * lngRad * Math.cos(originLatRad),
+      y: earthRadiusMeters * latRad,
+    };
+  }
+
+  function crossProduct(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  }
+
+  function buildConvexHull(points) {
+    const sorted = points
+      .slice()
+      .sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+
+    if (sorted.length <= 1) {
+      return sorted;
+    }
+
+    const lower = [];
+    sorted.forEach((point) => {
+      while (lower.length >= 2 && crossProduct(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+        lower.pop();
+      }
+      lower.push(point);
+    });
+
+    const upper = [];
+    for (let index = sorted.length - 1; index >= 0; index -= 1) {
+      const point = sorted[index];
+      while (upper.length >= 2 && crossProduct(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+        upper.pop();
+      }
+      upper.push(point);
+    }
+
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  function calculatePolygonAreaSquareMeters(points) {
+    if (points.length < 3) {
+      return 0;
+    }
+
+    let area = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const current = points[index];
+      const next = points[(index + 1) % points.length];
+      area += current.x * next.y - next.x * current.y;
+    }
+    return Math.abs(area) / 2;
+  }
+
+  function calculateCoverageAreaSquareKm(routeNames) {
+    const routeNameSet = new Set(routeNames);
+    const rawPoints = [];
+
+    getAllPoints().forEach((point) => {
+      if (routeNameSet.has(point.routeName)) {
+        rawPoints.push({ lat: point.lat, lng: point.lng });
+      }
+    });
+
+    getAllPaths().forEach((pathItem) => {
+      if (!routeNameSet.has(pathItem.routeName)) {
+        return;
+      }
+      const coordinates = Array.isArray(pathItem.coordinates) ? pathItem.coordinates : [];
+      if (!coordinates.length) {
+        return;
+      }
+      const sampleStep = Math.max(1, Math.floor(coordinates.length / 50));
+      for (let index = 0; index < coordinates.length; index += sampleStep) {
+        const coordinate = coordinates[index];
+        rawPoints.push({ lat: coordinate.lat, lng: coordinate.lng });
+      }
+      const lastCoordinate = coordinates[coordinates.length - 1];
+      rawPoints.push({ lat: lastCoordinate.lat, lng: lastCoordinate.lng });
+    });
+
+    const uniquePoints = [];
+    const seen = new Set();
+    rawPoints.forEach((point) => {
+      const key = `${Number(point.lat).toFixed(6)}:${Number(point.lng).toFixed(6)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniquePoints.push(point);
+      }
+    });
+
+    if (uniquePoints.length < 3) {
+      return 0;
+    }
+
+    const originLat = uniquePoints.reduce((sum, point) => sum + Number(point.lat || 0), 0) / uniquePoints.length;
+    const meterPoints = uniquePoints.map((point) => convertGeoPointToMeters(point, originLat));
+    const hull = buildConvexHull(meterPoints);
+    return calculatePolygonAreaSquareMeters(hull) / 1000000;
+  }
+
+  function buildRouteGroupComparisonMetrics(routeNames, busCount, minimumBusPerRoute = 1) {
+    const routeNameSet = new Set(routeNames);
+    const routeSummaries = routeNames.map((routeName) => {
+      const routePaths = getAllPaths().filter((pathItem) => pathItem.routeName === routeName);
+      const routePoints = getAllPoints().filter((point) => point.routeName === routeName);
+      const totalDistanceMeters = routePaths.reduce(
+        (sum, pathItem) =>
+          sum + (Number(pathItem.totalDistanceMeters || pathItem.estimatedDistanceMeters) || calculatePathDistanceMeters(pathItem)),
+        0
+      );
+      const totalDurationSeconds = routePaths.reduce((sum, pathItem) => {
+        const measuredDuration = Number(pathItem.totalDurationSeconds || pathItem.estimatedDurationSeconds) || 0;
+        const fallbackDuration = estimateRouteDurationSeconds(
+          Number(pathItem.totalDistanceMeters || pathItem.estimatedDistanceMeters) || calculatePathDistanceMeters(pathItem)
+        );
+        return sum + (measuredDuration || fallbackDuration);
+      }, 0);
+
+      return {
+        routeName,
+        pointCount: routePoints.length,
+        pathCount: routePaths.length,
+        totalDistanceMeters,
+        totalDurationSeconds,
+      };
+    });
+
+    const totalDistanceMeters = routeSummaries.reduce((sum, route) => sum + route.totalDistanceMeters, 0);
+    const totalDurationSeconds = routeSummaries.reduce((sum, route) => sum + route.totalDurationSeconds, 0);
+    const local = summarizeLocalAnalysis(routeNames);
+    const coverageAreaSquareKm = calculateCoverageAreaSquareKm(routeNames);
+    const effectiveBusCount = Math.max(busCount, routeNames.length * minimumBusPerRoute);
+    const averageBusesPerRoute = routeNames.length ? effectiveBusCount / routeNames.length : 0;
+    const averageRouteDurationSeconds = routeNames.length ? totalDurationSeconds / routeNames.length : 0;
+    const averageHeadwayMinutes = averageBusesPerRoute > 0 ? averageRouteDurationSeconds / 60 / averageBusesPerRoute : 0;
+
+    return {
+      routeNames,
+      routeCount: routeNames.length,
+      pointCount: getAllPoints().filter((point) => routeNameSet.has(point.routeName)).length,
+      pathCount: getAllPaths().filter((pathItem) => routeNameSet.has(pathItem.routeName)).length,
+      totalDistanceMeters,
+      totalDurationSeconds,
+      averageDistanceMeters: routeNames.length ? totalDistanceMeters / routeNames.length : 0,
+      averageDurationSeconds: averageRouteDurationSeconds,
+      busCount: effectiveBusCount,
+      averageBusesPerRoute,
+      averageHeadwayMinutes,
+      averageWaitMinutes: averageHeadwayMinutes / 2,
+      coverageAreaSquareKm,
+      duplicatePointCount: local.duplicatePointCount,
+      overlappingSegmentCount: local.overlappingSegmentCount,
+      routeSummaries,
+    };
+  }
+
+  function buildRouteGroupComparisonReport() {
+    const existingRouteNames = getRouteNamesByGroup("default");
+    const improvedRouteNames = getRouteNamesByGroup("merged");
+    const existing = buildRouteGroupComparisonMetrics(existingRouteNames, existingRouteNames.length, 1);
+    const improved = buildRouteGroupComparisonMetrics(improvedRouteNames, 12, 2);
+
+    const distanceReductionMeters = Math.max(0, existing.totalDistanceMeters - improved.totalDistanceMeters);
+    const durationReductionSeconds = Math.max(0, existing.averageDurationSeconds - improved.averageDurationSeconds);
+    const waitReductionMinutes = Math.max(0, existing.averageWaitMinutes - improved.averageWaitMinutes);
+    const coverageChangeSquareKm = improved.coverageAreaSquareKm - existing.coverageAreaSquareKm;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      type: "route-group-comparison-dashboard",
+      existing,
+      improved,
+      assumptions: {
+        existingBusPolicy: "개선 전 노선당 1대",
+        improvedBusPolicy: "개선 후 노선당 최소 2대, 총 12대",
+        fallbackSpeedKmh: 18,
+      },
+      improvements: {
+        distanceReductionMeters,
+        distanceReductionRate: existing.totalDistanceMeters > 0 ? distanceReductionMeters / existing.totalDistanceMeters : 0,
+        durationReductionSeconds,
+        durationReductionRate: existing.averageDurationSeconds > 0 ? durationReductionSeconds / existing.averageDurationSeconds : 0,
+        waitReductionMinutes,
+        waitReductionRate: existing.averageWaitMinutes > 0 ? waitReductionMinutes / existing.averageWaitMinutes : 0,
+        coverageChangeSquareKm,
+        coverageChangeRate: calculateChangeRate(existing.coverageAreaSquareKm, improved.coverageAreaSquareKm, "increase-good"),
+        averageDistanceReductionRate: calculateChangeRate(existing.averageDistanceMeters, improved.averageDistanceMeters, "decrease-good"),
+        busCountIncreaseRate: calculateChangeRate(existing.busCount, improved.busCount, "increase-good"),
+        busesPerRouteIncreaseRate: calculateChangeRate(existing.averageBusesPerRoute, improved.averageBusesPerRoute, "increase-good"),
+        headwayReductionRate: calculateChangeRate(existing.averageHeadwayMinutes, improved.averageHeadwayMinutes, "decrease-good"),
+        duplicateReductionRate: calculateChangeRate(existing.duplicatePointCount, improved.duplicatePointCount, "decrease-good"),
+        overlapReductionRate: calculateChangeRate(existing.overlappingSegmentCount, improved.overlappingSegmentCount, "decrease-good"),
+      },
+      message: `기존노선 ${existing.routeCount}개와 개선노선 ${improved.routeCount}개의 전후 비교표를 생성했습니다.`,
+    };
+  }
+
+  function buildComparisonRow(label, beforeText, afterText, improvementText) {
+    return `
+      <tr>
+        <th>${escapeHtml(label)}</th>
+        <td>${escapeHtml(beforeText)}</td>
+        <td>${escapeHtml(afterText)}</td>
+        <td>${escapeHtml(improvementText)}</td>
+      </tr>
+    `;
+  }
+
+  function buildRouteComparisonWindowHtml(report) {
+    const rows = [
+      buildComparisonRow("총 노선 수", `${report.existing.routeCount}개`, `${report.improved.routeCount}개`, `${formatPercent(calculateChangeRate(report.existing.routeCount, report.improved.routeCount, "increase-good"))} 변화`),
+      buildComparisonRow("총 정류장 수", `${report.existing.pointCount}개`, `${report.improved.pointCount}개`, `${formatPercent(calculateChangeRate(report.existing.pointCount, report.improved.pointCount, "increase-good"))} 변화`),
+      buildComparisonRow("총 노선 운행거리", `${formatDistanceKm(report.existing.totalDistanceMeters)}km`, `${formatDistanceKm(report.improved.totalDistanceMeters)}km`, `${formatDistanceKm(report.improvements.distanceReductionMeters)}km 단축 (${formatPercent(report.improvements.distanceReductionRate)})`),
+      buildComparisonRow("노선 구역 커버리지", `${formatAreaSquareKm(report.existing.coverageAreaSquareKm)}`, `${formatAreaSquareKm(report.improved.coverageAreaSquareKm)}`, `${report.improvements.coverageChangeSquareKm >= 0 ? "확대" : "축소"} ${formatPercent(Math.abs(report.improvements.coverageChangeRate))}`),
+      buildComparisonRow("중복 정류장 후보", `${report.existing.duplicatePointCount}건`, `${report.improved.duplicatePointCount}건`, `${formatPercent(report.improvements.duplicateReductionRate)} 개선`),
+      buildComparisonRow("중복 경로 구간", `${report.existing.overlappingSegmentCount}건`, `${report.improved.overlappingSegmentCount}건`, `${formatPercent(report.improvements.overlapReductionRate)} 개선`),
+    ].join("");
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>전체노선 비교분석</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f7fb; --card:#ffffff; --line:#d7dfeb; --text:#172033; --muted:#5d6b85; --accent:#1d4ed8; --accent-soft:#e8f0ff; --good:#0f9f6e; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:linear-gradient(180deg,#f8fbff 0%,#eef3f9 100%); color:var(--text); font:14px/1.5 "Segoe UI",sans-serif; }
+    .wrap { max-width:1200px; margin:0 auto; }
+    .hero { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }
+    .hero h1 { margin:0 0 6px; font-size:28px; }
+    .hero p { margin:0; color:var(--muted); }
+    .cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:18px; box-shadow:0 10px 30px rgba(19,34,68,.06); }
+    .card h2 { margin:0 0 8px; font-size:13px; color:var(--muted); }
+    .card strong { display:block; font-size:28px; margin-bottom:6px; }
+    .card p { margin:0; color:var(--muted); }
+    table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:18px; overflow:hidden; box-shadow:0 10px 30px rgba(19,34,68,.06); }
+    th, td { padding:14px 16px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    thead th { background:#f8fbff; font-size:13px; }
+    tbody th { width:18%; background:#fcfdff; }
+    tbody tr:last-child th, tbody tr:last-child td { border-bottom:none; }
+    .detail { margin-top:18px; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:18px; box-shadow:0 10px 30px rgba(19,34,68,.06); }
+    .detail h2 { margin:0 0 10px; font-size:18px; }
+    .detail ul { margin:0; padding-left:18px; color:var(--muted); }
+    .detail li + li { margin-top:8px; }
+    .tag { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; }
+    .good { color:var(--good); }
+    @media (max-width: 900px) { .cards { grid-template-columns:1fr; } .hero { flex-direction:column; } table, thead, tbody, tr, th, td { display:block; } thead { display:none; } tbody th { width:auto; border-bottom:none; padding-bottom:0; } tbody td { padding-top:6px; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <div class="tag">전체노선 비교분석</div>
+        <h1>기존노선 vs 개선노선</h1>
+        <p>${escapeHtml(report.message)}</p>
+      </div>
+      <p>${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h2>총 운행거리 개선</h2>
+        <strong class="good">${escapeHtml(formatDistanceKm(report.improvements.distanceReductionMeters))}km</strong>
+        <p>${escapeHtml(formatPercent(report.improvements.distanceReductionRate))} 단축</p>
+      </div>
+      <div class="card">
+        <h2>평균 운행시간 개선</h2>
+        <strong class="good">${escapeHtml(String(formatDurationMinutes(report.improvements.durationReductionSeconds)))}분</strong>
+        <p>${escapeHtml(formatPercent(report.improvements.durationReductionRate))} 단축</p>
+      </div>
+      <div class="card">
+        <h2>평균 대기시간 개선</h2>
+        <strong class="good">${escapeHtml(report.improvements.waitReductionMinutes.toFixed(1))}분</strong>
+        <p>${escapeHtml(formatPercent(report.improvements.waitReductionRate))} 감소</p>
+      </div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>비교 항목</th>
+          <th>개선 전</th>
+          <th>개선 후</th>
+          <th>개선 내용</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="detail">
+      <h2>상세 내용</h2>
+      <ul>
+        <li>개선 전은 노선당 1대 배차, 개선 후는 노선당 최소 2대이면서 총 12대를 균등 배분하는 조건으로 비교했습니다.</li>
+        <li>운행시간은 경로에 저장된 총 운행시간을 우선 사용했고, 시간이 없는 경로는 평균 시속 ${escapeHtml(String(report.assumptions.fallbackSpeedKmh))}km 기준으로 보정했습니다.</li>
+        <li>구역 커버리지는 정류장과 경로 좌표의 외곽 면적을 기준으로 계산해 전후 서비스 범위 변화를 비교했습니다.</li>
+        <li>개선안은 평균 운행시간과 배차간격을 함께 줄여 승객 대기시간을 낮추는 방향으로 해석할 수 있습니다.</li>
+        <li>중복 정류장과 중복 경로 구간 감소는 노선 체계 단순화와 운영 안정성 개선에 유리합니다.</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>`;
+  }
+
+  function openRouteComparisonWindow(report) {
+    const comparisonWindow = window.open("", "route-group-comparison-dashboard", "width=1360,height=920,resizable=yes,scrollbars=yes");
+    if (!comparisonWindow) {
+      setStatus("팝업이 차단되었습니다. 전체노선 비교분석 창을 허용해 주세요.", true);
+      return false;
+    }
+    comparisonWindow.document.open();
+    comparisonWindow.document.write(buildRouteComparisonWindowHtml(report));
+    comparisonWindow.document.close();
+    comparisonWindow.focus();
+    return true;
   }
 
   function chooseCanonicalStopName(points) {
@@ -5544,6 +5895,34 @@
     }
   }
 
+  async function handleCompareRouteGroups() {
+    const existingRouteNames = getRouteNamesByGroup("default");
+    const improvedRouteNames = getRouteNamesByGroup("merged");
+
+    if (!existingRouteNames.length || !improvedRouteNames.length) {
+      setStatus("전체노선 비교분석을 하려면 기존노선과 개선노선이 모두 있어야 합니다.", true);
+      return;
+    }
+
+    compareRouteGroupsButtonEl.disabled = true;
+    setStatus("전체노선 비교분석 표를 생성합니다.", false);
+
+    try {
+      const report = buildRouteGroupComparisonReport();
+      latestAnalysisReport = report;
+      const opened = openRouteComparisonWindow(report);
+      if (!opened) {
+        return;
+      }
+      await saveAnalysisReport(report);
+      setStatus("전체노선 비교분석 창을 열고 analysis-report.json으로 저장했습니다.", false);
+    } catch (error) {
+      setStatus(error.message || "전체노선 비교분석 중 오류가 발생했습니다.", true);
+    } finally {
+      compareRouteGroupsButtonEl.disabled = false;
+    }
+  }
+
   function scheduleAutoSaveKml() {
     if (autoSaveTimer) {
       return;
@@ -6195,8 +6574,14 @@
         button.classList.add("is-selected");
       }
 
+      const routePaths = getAllPaths().filter((path) => path.routeName === routeName);
       const pointCount = getAllPoints().filter((point) => point.routeName === routeName).length;
-      const pathCount = getAllPaths().filter((path) => path.routeName === routeName).length;
+      const pathCount = routePaths.length;
+      const totalRouteDistanceMeters = routePaths.reduce(
+        (sum, pathItem) =>
+          sum + (Number(pathItem.totalDistanceMeters || pathItem.estimatedDistanceMeters) || calculatePathDistanceMeters(pathItem)),
+        0
+      );
       const hasDesignedRoute = getAllPaths().some(
         (pathItem) => pathItem.routeName === routeName && pathItem.designedRoute === true
       );
@@ -6352,7 +6737,7 @@
       titleRow.appendChild(routeIconActions);
 
       const metaText = document.createElement("span");
-      metaText.textContent = `${pointCount}개 정류장 / ${pathCount}개 경로`;
+      metaText.textContent = `${pointCount}개 정류장 / ${pathCount}개 경로 / 총 ${formatDistanceKm(totalRouteDistanceMeters)}km`;
       button.appendChild(titleRow);
       button.appendChild(metaText);
       const handleRouteSelect = () => {
@@ -9306,6 +9691,7 @@
     saveKmlButtonEl.addEventListener("click", handleSaveKml);
     saveResetButtonEl.addEventListener("click", handleSaveAndReset);
     analyzeRoutesButtonEl.addEventListener("click", handleAnalyzeRoutesLocal);
+    compareRouteGroupsButtonEl.addEventListener("click", handleCompareRouteGroups);
     if (OPTIMIZATION_FEATURE_ENABLED && optimizeRoutesButtonEl) {
       optimizeRoutesButtonEl.addEventListener("click", handleOptimizeRoutes);
     }
