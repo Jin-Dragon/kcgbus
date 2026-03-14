@@ -7702,8 +7702,24 @@
       window.kakao.maps.event.addListener(marker, "dragend", updateDraggedVertex);
 
       window.kakao.maps.event.addListener(marker, "click", () => {
-        if (isLast && pathExtendMode) {
-          handlePathFormSubmit();
+        if (isLast) {
+          if (pathExtendMode) {
+            persistWorkingPath({
+              closeModes: true,
+              successMessage: () => "경로 수정 내용을 저장하고 편집을 종료했습니다.",
+            });
+            return;
+          }
+          pathExtendMode = !pathExtendMode;
+          selectedPathVertexIndex = null;
+          syncPathPreview();
+          updatePathEditorUi();
+          setStatus(
+            pathExtendMode
+              ? "경로 연장 모드를 시작했습니다. 지도 클릭으로 점을 계속 추가하고, 빨간 끝점을 다시 클릭하면 연장 모드를 종료합니다."
+              : "경로 연장 모드를 종료했습니다.",
+            false
+          );
           return;
         }
 
@@ -7746,13 +7762,36 @@
       return;
     }
 
+    const indexesToDelete = new Set([index]);
+    if (index === 0) {
+      if (index + 1 < workingPathCoordinates.length) {
+        indexesToDelete.add(index + 1);
+      }
+      if (index + 2 < workingPathCoordinates.length) {
+        indexesToDelete.add(index + 2);
+      }
+    } else if (index === workingPathCoordinates.length - 1) {
+      indexesToDelete.add(index - 1);
+      if (index - 2 >= 0) {
+        indexesToDelete.add(index - 2);
+      }
+    } else {
+      indexesToDelete.add(index - 1);
+      indexesToDelete.add(index + 1);
+    }
+    const nextCoordinates = workingPathCoordinates.filter((_, coordinateIndex) => !indexesToDelete.has(coordinateIndex));
+    if (nextCoordinates.length < 2) {
+      setStatus("선택한 점과 양옆 선분을 함께 삭제하면 경로 좌표가 2개 미만이 됩니다.", true);
+      return;
+    }
+
     pushUndoSnapshot();
-    workingPathCoordinates = workingPathCoordinates.filter((_, coordinateIndex) => coordinateIndex !== index);
+    workingPathCoordinates = nextCoordinates;
     selectedPathVertexIndex = null;
     pathExtendMode = false;
     syncPathPreview();
     updatePathEditorUi();
-    setStatus("선택한 경로 점을 삭제했습니다.", false);
+    setStatus("선택한 점과 양옆에 연결된 경로 선분을 삭제했습니다.", false);
   }
 
   function discardWorkingPath() {
@@ -7815,7 +7854,9 @@
     if (drawing) {
       pathEditorHelpEl.textContent = "지도를 클릭해 경로 점을 추가합니다. 마지막 점을 다시 클릭하면 현재 경로가 저장되고 추가 모드가 종료됩니다.";
     } else if (editing) {
-      pathEditorHelpEl.textContent = "중간 점은 드래그로 이동합니다. 시작점은 초록, 끝점은 빨강입니다. 마지막 점 우클릭으로 연장 또는 삭제를 선택하세요.";
+      pathEditorHelpEl.textContent = pathExtendMode
+        ? "경로 연장 중입니다. 지도 클릭으로 점을 계속 추가하고, 빨간 끝점을 다시 클릭하면 연장 모드를 종료합니다."
+        : "중간 점은 드래그로 이동합니다. 시작점은 초록, 끝점은 빨강입니다. 빨간 끝점을 클릭하면 연장 모드로 전환됩니다.";
     } else if (canSaveDesignedPath) {
       pathEditorHelpEl.textContent = "설계 노선이 선택되어 있습니다. 경로 저장을 누르면 현재 설계 라인을 그대로 일반 경로로 저장합니다.";
     } else {
@@ -7894,7 +7935,10 @@
   }
 
   function startPathEditMode() {
-    const selectedPath = getPathById(selectedPathId);
+    const selectedPath = getPathById(selectedPathId)
+      || (selectedRouteName
+        ? getAllPaths().find((pathItem) => pathItem.routeName === selectedRouteName)
+        : null);
     if (!selectedPath) {
       setStatus("편집할 경로를 먼저 선택하세요.", true);
       return;
@@ -7907,8 +7951,11 @@
     editPathMode = true;
     pathExtendMode = false;
     selectedPathVertexIndex = null;
+    selectedPathId = selectedPath.id;
+    selectedRouteName = selectedPath.routeName;
     workingPathCoordinates = selectedPath.coordinates.map((coordinate) => ({ ...coordinate }));
     fillPathForm(selectedPath);
+    renderPoints();
     updatePathEditorUi();
     syncPathPreview();
     setStatus("경로 편집 모드입니다. 점을 드래그해 수정하세요.", false);
@@ -8243,8 +8290,8 @@
         };
         workingPathCoordinates = expandMovedVertexWithMidpoints(workingPathCoordinates, movedIndex);
         persistWorkingPath({
-          closeModes: false,
-          successMessage: () => "선택한 지점을 이동하고 연결선 사이에 보정 좌표를 추가해 경로를 자동 저장했습니다.",
+          closeModes: true,
+          successMessage: () => "선택한 지점을 이동하고 경로 수정 모드를 종료했습니다.",
         });
         return;
       }
@@ -8267,7 +8314,7 @@
       setStatus(
         drawPathMode
           ? `경로 좌표 ${workingPathCoordinates.length}개를 추가했습니다. 마지막 점을 다시 클릭하면 저장됩니다.`
-          : `경로 연장 지점을 추가했습니다. 계속 이어서 그리려면 마지막 꼭짓점을 다시 클릭해 연장 모드를 유지하세요.`,
+          : "경로 연장 지점을 추가했습니다. 연장 모드는 유지됩니다. 빨간 끝점을 다시 클릭하면 종료합니다.",
         false
       );
       return;
@@ -9013,24 +9060,26 @@
     }
 
     pushUndoSnapshot();
-    uploadedPoints = points;
-    uploadedPaths = paths;
-    uploadedFileSummaries = fileSummaries;
-    observationAreas = areas;
+    uploadedPoints = [...uploadedPoints, ...points];
+    uploadedPaths = [...uploadedPaths, ...paths];
+    uploadedFileSummaries = [...uploadedFileSummaries, ...fileSummaries];
+    observationAreas = [...observationAreas, ...areas];
     restoreRouteSettingsFromImportedKml(points, paths);
     saveUploadedWorkspace();
     saveRouteSettings();
     saveObservationAreas();
     shouldFitMapToData = true;
-    fileCountEl.textContent = String(files.length);
-    renderFileList(fileSummaries);
+    fileCountEl.textContent = String(uploadedFileSummaries.length);
+    renderFileList(uploadedFileSummaries);
     stopPathModes();
     stopRelocateMode();
-    selectedRouteName = points[0]?.routeName || paths[0]?.routeName || selectedRouteName;
+    if (!selectedRouteName) {
+      selectedRouteName = points[0]?.routeName || paths[0]?.routeName || selectedRouteName;
+    }
     selectedPointId = null;
     selectedPathId = null;
     refreshUI();
-    setStatus("정류장, 경로, 관찰 구역을 지도에 표시했습니다.", false);
+    setStatus("기존 프로젝트에 정류장, 경로, 관찰 구역을 추가로 불러왔습니다.", false);
   }
 
   function handleKeydown(event) {
