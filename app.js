@@ -5644,7 +5644,7 @@
     };
   }
 
-  function buildUploadedObservationArea(fileName, placemark, polygonNode, index) {
+  function buildUploadedObservationArea(fileName, routeName, placemark, polygonNode, index) {
     const coordinatesNode = polygonNode.getElementsByTagNameNS("*", "coordinates")[0];
     if (!coordinatesNode) {
       return null;
@@ -5678,7 +5678,10 @@
     }
 
     const extendedData = getExtendedData(placemark);
-    if (getExtendedDataValue(extendedData, "observationArea") !== "true") {
+    const isObservationArea =
+      getExtendedDataValue(extendedData, "observationArea") === "true"
+      || normalizeRouteName(routeName) === normalizeRouteName("관찰 구역");
+    if (!isObservationArea) {
       return null;
     }
 
@@ -5747,7 +5750,13 @@
       directChildrenByTag(node, "Placemark").forEach((placemark) => {
         const polygonNodes = Array.from(placemark.getElementsByTagNameNS("*", "Polygon"));
         polygonNodes.forEach((polygonNode) => {
-          const area = buildUploadedObservationArea(filename, placemark, polygonNode, observationAreaIndex);
+          const area = buildUploadedObservationArea(
+            filename,
+            nextRouteName || filename,
+            placemark,
+            polygonNode,
+            observationAreaIndex
+          );
           observationAreaIndex += 1;
           if (area) {
             areas.push(area);
