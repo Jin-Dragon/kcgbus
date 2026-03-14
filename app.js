@@ -1324,6 +1324,7 @@
 
     return {
       id: String(area?.id || `observation-${Date.now()}`),
+      fileName: area?.fileName ? String(area.fileName) : "",
       name: String(area?.name || "관찰 구역").trim() || "관찰 구역",
       color: normalizeHexColor(area?.color, "#2f8cff"),
       hidden: area?.hidden === true,
@@ -4028,6 +4029,36 @@
     `.trim();
   }
 
+  function observationAreaToKml(area) {
+    if (!Array.isArray(area?.points) || area.points.length < 3) {
+      return "";
+    }
+
+    const coordinates = area.points
+      .map((point) => `${point.lng},${point.lat},0`)
+      .concat([`${area.points[0].lng},${area.points[0].lat},0`])
+      .join(" ");
+    const dataEntries = [
+      '<Data name="observationArea"><value>true</value></Data>',
+      `<Data name="color"><value>${escapeXml(normalizeHexColor(area.color, "#2f8cff"))}</value></Data>`,
+      `<Data name="hidden"><value>${area.hidden === true ? "true" : "false"}</value></Data>`,
+    ].join("");
+
+    return `
+      <Placemark>
+        <name>${escapeXml(area.name || "관찰 구역")}</name>
+        <ExtendedData>${dataEntries}</ExtendedData>
+        <Polygon>
+          <outerBoundaryIs>
+            <LinearRing>
+              <coordinates>${coordinates}</coordinates>
+            </LinearRing>
+          </outerBoundaryIs>
+        </Polygon>
+      </Placemark>
+    `.trim();
+  }
+
   function buildCurrentKml() {
     const routes = getRoutes();
     const points = getAllPoints();
@@ -4057,6 +4088,18 @@
       })
       .filter(Boolean)
       .join("\n");
+    const observationAreaPlacemarks = observationAreas
+      .map((area) => observationAreaToKml(area))
+      .filter(Boolean)
+      .join("\n");
+    const observationAreaFolder = observationAreaPlacemarks
+      ? `
+          <Folder>
+            <name>${escapeXml("관찰 구역")}</name>
+            ${observationAreaPlacemarks}
+          </Folder>
+        `.trim()
+      : "";
 
     return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -4064,6 +4107,7 @@
     <name>${escapeXml(AUTO_SAVE_FILENAME)}</name>
     ${styles}
     ${folders}
+    ${observationAreaFolder}
   </Document>
 </kml>`;
   }
@@ -5600,6 +5644,54 @@
     };
   }
 
+  function buildUploadedObservationArea(fileName, placemark, polygonNode, index) {
+    const coordinatesNode = polygonNode.getElementsByTagNameNS("*", "coordinates")[0];
+    if (!coordinatesNode) {
+      return null;
+    }
+
+    const coordinates = coordinatesNode.textContent
+      .trim()
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => {
+        const [lng, lat] = item.split(",").map((value) => Number(value.trim()));
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          return null;
+        }
+        return { lat, lng };
+      })
+      .filter(Boolean);
+
+    if (coordinates.length < 4) {
+      return null;
+    }
+
+    const normalizedPoints = coordinates.filter((point, pointIndex, array) => (
+      pointIndex < array.length - 1
+        || point.lat !== array[0].lat
+        || point.lng !== array[0].lng
+    ));
+    if (normalizedPoints.length < 3) {
+      return null;
+    }
+
+    const extendedData = getExtendedData(placemark);
+    if (getExtendedDataValue(extendedData, "observationArea") !== "true") {
+      return null;
+    }
+
+    return normalizeObservationArea({
+      id: `${fileName}-observation-area-${index}`,
+      fileName,
+      name: directChildText(placemark, "name") || `관찰 구역 ${index + 1}`,
+      color: getExtendedDataValue(extendedData, "color") || "#2f8cff",
+      hidden: getExtendedDataValue(extendedData, "hidden") === "true",
+      points: normalizedPoints,
+    });
+  }
+
   function restoreRouteSettingsFromImportedKml(points, paths) {
     const routeMetaByName = new Map();
     [...(Array.isArray(points) ? points : []), ...(Array.isArray(paths) ? paths : [])].forEach((item) => {
@@ -5636,8 +5728,10 @@
 
     let pointIndex = 0;
     let pathIndex = 0;
+    let observationAreaIndex = 0;
     const points = [];
     const paths = [];
+    const areas = [];
 
     function walk(node, currentRouteName, depth) {
       const nodeName = node.localName;
@@ -5651,6 +5745,15 @@
       }
 
       directChildrenByTag(node, "Placemark").forEach((placemark) => {
+        const polygonNodes = Array.from(placemark.getElementsByTagNameNS("*", "Polygon"));
+        polygonNodes.forEach((polygonNode) => {
+          const area = buildUploadedObservationArea(filename, placemark, polygonNode, observationAreaIndex);
+          observationAreaIndex += 1;
+          if (area) {
+            areas.push(area);
+          }
+        });
+
         const pointNodes = Array.from(placemark.getElementsByTagNameNS("*", "Point"));
         pointNodes.forEach((pointNode) => {
           const point = buildUploadedPoint(
@@ -5688,7 +5791,7 @@
     }
 
     walk(xml.documentElement, "", 0);
-    return { points, paths };
+    return { points, paths, areas };
   }
 
   function renderFileList(filesSummary) {
@@ -5697,7 +5800,7 @@
       const li = document.createElement("li");
       const nameBlock = document.createElement("div");
       nameBlock.className = "file-list-item-main";
-      nameBlock.innerHTML = `<strong>${escapeHtml(item.name)}</strong><small>${item.pointCount}개 정류장 / ${item.pathCount}개 경로</small>`;
+      nameBlock.innerHTML = `<strong>${escapeHtml(item.name)}</strong><small>${item.pointCount}개 정류장 / ${item.pathCount}개 경로 / ${Number(item.areaCount) || 0}개 구역</small>`;
 
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
@@ -5754,10 +5857,16 @@
         )
         .filter(Boolean)
     );
+    const removedAreaIds = new Set(
+      observationAreas
+        .filter((area) => area.fileName === targetFileName)
+        .map((area) => area.id)
+    );
 
     uploadedPoints = uploadedPoints.filter((point) => point.fileName !== targetFileName);
     uploadedPaths = uploadedPaths.filter((pathItem) => pathItem.fileName !== targetFileName);
     uploadedFileSummaries = uploadedFileSummaries.filter((item) => item.name !== targetFileName);
+    observationAreas = observationAreas.filter((area) => area.fileName !== targetFileName);
 
     Object.keys(pointOverrides).forEach((pointId) => {
       if (removedPointIds.has(pointId)) {
@@ -5775,6 +5884,9 @@
     }
     if (selectedPathId && removedPathIds.has(selectedPathId)) {
       selectedPathId = null;
+    }
+    if (selectedObservationAreaId && removedAreaIds.has(selectedObservationAreaId)) {
+      selectedObservationAreaId = null;
     }
 
     removedRouteNames.forEach((routeName) => {
@@ -5832,6 +5944,7 @@
     saveOverrides();
     savePathOverrides();
     saveRouteSettings();
+    saveObservationAreas();
     fileCountEl.textContent = String(uploadedFileSummaries.length);
     renderFileList(uploadedFileSummaries);
     shouldFitMapToData = false;
@@ -8697,6 +8810,7 @@
     const fileSummaries = [];
     const points = [];
     const paths = [];
+    const areas = [];
 
     for (const file of files) {
       const text = await file.text();
@@ -8705,18 +8819,22 @@
         name: file.name,
         pointCount: parsed.points.length,
         pathCount: parsed.paths.length,
+        areaCount: parsed.areas.length,
       });
       points.push(...parsed.points);
       paths.push(...parsed.paths);
+      areas.push(...parsed.areas);
     }
 
     pushUndoSnapshot();
     uploadedPoints = points;
     uploadedPaths = paths;
     uploadedFileSummaries = fileSummaries;
+    observationAreas = areas;
     restoreRouteSettingsFromImportedKml(points, paths);
     saveUploadedWorkspace();
     saveRouteSettings();
+    saveObservationAreas();
     shouldFitMapToData = true;
     fileCountEl.textContent = String(files.length);
     renderFileList(fileSummaries);
@@ -8726,7 +8844,7 @@
     selectedPointId = null;
     selectedPathId = null;
     refreshUI();
-    setStatus("정류장과 경로를 지도에 표시했습니다.", false);
+    setStatus("정류장, 경로, 관찰 구역을 지도에 표시했습니다.", false);
   }
 
   function handleKeydown(event) {
