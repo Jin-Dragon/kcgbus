@@ -1761,6 +1761,10 @@
   }
 
   function ensureSelectedPoint() {
+    if (addPointMode) {
+      return;
+    }
+
     const points = getPointsInSelectedRoute();
     if (!points.length) {
       selectedPointId = null;
@@ -4059,10 +4063,27 @@
     `.trim();
   }
 
+  function getExportObservationAreas() {
+    const merged = new Map();
+    const currentAreas = Array.isArray(observationAreas) ? observationAreas : [];
+    const persistedAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
+
+    currentAreas
+      .concat(persistedAreas)
+      .map(normalizeObservationArea)
+      .filter((area) => Array.isArray(area.points) && area.points.length >= 3)
+      .forEach((area) => {
+        merged.set(area.id, area);
+      });
+
+    return Array.from(merged.values());
+  }
+
   function buildCurrentKml() {
     const routes = getRoutes();
     const points = getAllPoints();
     const paths = getAllPaths();
+    const exportObservationAreas = getExportObservationAreas();
     const styles = routes.map(buildRouteStyle).filter(Boolean).join("\n");
 
     const folders = routes
@@ -4088,7 +4109,7 @@
       })
       .filter(Boolean)
       .join("\n");
-    const observationAreaPlacemarks = observationAreas
+    const observationAreaPlacemarks = exportObservationAreas
       .map((area) => observationAreaToKml(area))
       .filter(Boolean)
       .join("\n");
@@ -4693,7 +4714,11 @@
         <h2>지도 도구</h2>
         <ul>
           <li><strong>지역 검색:</strong> 장소명이나 주소로 지도를 이동하고 검색 마커를 표시합니다.</li>
-          <li><strong>관찰 구역:</strong> 이름과 색상을 정해 반투명 구역을 여러 개 저장하고, 보기 또는 삭제로 관리할 수 있습니다.</li>
+          <li><strong>관찰 구역 그리기:</strong> 이름과 색상을 정한 뒤 지도에서 꼭짓점을 3개 이상 찍고 저장하면 반투명 구역이 만들어집니다.</li>
+          <li><strong>관찰 구역 선택:</strong> 목록에서 구역을 클릭하면 해당 구역이 선택되고, 지도 위에서는 선택된 구역 이름만 표시됩니다.</li>
+          <li><strong>선택 구역 저장:</strong> 이미 만든 구역의 이름과 색상도 다시 저장해서 바꿀 수 있습니다.</li>
+          <li><strong>숨김/보기/삭제:</strong> 각 구역별로 지도 표시를 끄거나, 해당 위치로 이동하거나, 구역을 지울 수 있습니다.</li>
+          <li><strong>구역 이동/수정:</strong> 이동 모드에서는 구역 자체를 드래그해 옮길 수 있고, 수정 모드에서는 꼭짓점을 드래그하거나 우클릭으로 포인트 추가/삭제가 가능합니다.</li>
           <li><strong>분석 시작:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
           <li><strong>Esc:</strong> 경로 편집, 정류장 추가, 일부 선택 상태를 빠르게 취소합니다.</li>
           <li><strong>지도 빈 공간 클릭:</strong> 현재 선택한 노선, 정류장, 경로 선택을 해제합니다.</li>
@@ -4704,6 +4729,7 @@
         <ul>
           <li><strong>KML 저장 후 재불러오기:</strong> 노선 순서와 기존/신규 리스트 구분이 함께 저장되도록 되어 있습니다.</li>
           <li><strong>병합 노선:</strong> 저장 후 다시 불러와도 병합된 노선 리스트 위치를 유지합니다.</li>
+          <li><strong>관찰 구역:</strong> 현재 저장된 구역 이름, 색상, 숨김 상태도 KML에 함께 저장되고 다시 불러올 수 있습니다.</li>
           <li><strong>오래된 KML:</strong> 예전에 저장한 파일은 일부 최신 메타데이터가 없어 기본 방식으로 불러올 수 있습니다.</li>
         </ul>
       </article>
@@ -7952,6 +7978,8 @@
       if (!selectedRouteName) {
         selectedRouteName = TEMP_NEW_ROUTE_NAME;
       }
+      selectedPointId = null;
+      selectedPathId = null;
       stopRelocateMode();
       renderFormRouteOptions(selectedRouteName || "");
     }
@@ -8384,8 +8412,12 @@
     renderRoutePointList();
     renderMoveRouteOptions();
     renderPoints();
-    renderPointDetails(getPointById(selectedPointId));
-    fillForm(getPointById(selectedPointId));
+    if (addPointMode) {
+      renderPointDetails(null);
+    } else {
+      renderPointDetails(getPointById(selectedPointId));
+      fillForm(getPointById(selectedPointId));
+    }
     renderPathDetails(getPathById(selectedPathId));
     fillPathForm(getPathById(selectedPathId));
     updatePathEditorUi();
@@ -8763,7 +8795,19 @@
       const selectedPoint = getPointById(selectedPointId);
       pushUndoSnapshot();
 
-      if (selectedPoint && selectedPoint.source === "custom") {
+      if (addPointMode) {
+        if (!selectedRouteName) {
+          throw new Error("정류장을 만들기 전에 노선을 먼저 선택하세요.");
+        }
+
+        const lat = Number(formEls.lat.value);
+        const lng = Number(formEls.lng.value);
+        const point = buildPointFromForm(createCustomPoint(lat, lng));
+        customPoints = [...customPoints, point];
+        saveCustomPoints();
+        selectedPointId = point.id;
+        selectedRouteName = point.routeName;
+      } else if (selectedPoint && selectedPoint.source === "custom") {
         const index = customPoints.findIndex((point) => point.id === selectedPoint.id);
         customPoints[index] = buildPointFromForm(customPoints[index]);
         saveCustomPoints();
@@ -8787,17 +8831,7 @@
         saveOverrides();
         selectedRouteName = updatedPoint.routeName;
       } else {
-        if (!selectedRouteName) {
-          throw new Error("정류장을 만들기 전에 노선을 먼저 선택하세요.");
-        }
-
-        const lat = Number(formEls.lat.value);
-        const lng = Number(formEls.lng.value);
-        const point = buildPointFromForm(createCustomPoint(lat, lng));
-        customPoints = [...customPoints, point];
-        saveCustomPoints();
-        selectedPointId = point.id;
-        selectedRouteName = point.routeName;
+        throw new Error("저장할 정류장을 먼저 선택하거나 정류장 추가 모드를 사용하세요.");
       }
 
       stopRelocateMode();
