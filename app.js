@@ -32,6 +32,8 @@
   const optimizeRoutesButtonEl = document.getElementById("optimize-routes-button");
   const showAllRoutesButtonEl = document.getElementById("show-all-routes-button");
   const hideAllRoutesButtonEl = document.getElementById("hide-all-routes-button");
+  const toggleOriginalRoutesButtonEl = document.getElementById("toggle-original-routes-button");
+  const toggleMergedRoutesButtonEl = document.getElementById("toggle-merged-routes-button");
   const routeListEl = document.getElementById("route-list");
   const mergedRouteListEl = document.getElementById("merged-route-list");
   const routePointListEl = document.getElementById("route-point-list");
@@ -6854,11 +6856,11 @@
     const routes = getRoutes();
     const originalQuery = normalizeSearchText(routeListSearchQueries.original);
     const mergedQuery = normalizeSearchText(routeListSearchQueries.merged);
-    const originalRoutes = routes
-      .filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged")
+    const originalGroupRoutes = routes.filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged");
+    const mergedGroupRoutes = routes.filter((routeName) => getRouteSetting(routeName).routeGroup === "merged");
+    const originalRoutes = originalGroupRoutes
       .filter((routeName) => !originalQuery || normalizeSearchText(routeName).includes(originalQuery));
-    const mergedRoutes = routes
-      .filter((routeName) => getRouteSetting(routeName).routeGroup === "merged")
+    const mergedRoutes = mergedGroupRoutes
       .filter((routeName) => !mergedQuery || normalizeSearchText(routeName).includes(mergedQuery));
 
     if (editingRouteName) {
@@ -6870,6 +6872,9 @@
       });
     }
 
+    updateRouteGroupToggleButton(toggleOriginalRoutesButtonEl, originalGroupRoutes, "기존");
+    updateRouteGroupToggleButton(toggleMergedRoutesButtonEl, mergedGroupRoutes, "개선");
+
     ensureRouteListTitleInput(routeListEl, "original", "불러온 노선");
     ensureRouteListSearchInput(routeListEl, "original");
     renderRouteEntries(routeListEl, originalRoutes, "노선이 없습니다.", "merged");
@@ -6879,6 +6884,18 @@
       ensureRouteListSearchInput(mergedRouteListEl, "merged");
       renderRouteEntries(mergedRouteListEl, mergedRoutes, "병합된 노선이 없습니다.", "default");
     }
+  }
+
+  function updateRouteGroupToggleButton(buttonEl, routeNames, groupLabel) {
+    if (!buttonEl) {
+      return;
+    }
+    const hasRoutes = routeNames.length > 0;
+    const allVisible = hasRoutes && routeNames.every((routeName) => getRouteSetting(routeName).visible);
+    buttonEl.disabled = !hasRoutes;
+    buttonEl.textContent = allVisible ? "노선 숨김" : "노선 표시";
+    buttonEl.dataset.nextVisible = allVisible ? "false" : "true";
+    buttonEl.dataset.groupLabel = groupLabel;
   }
 
   function setAllRoutesVisible(visible) {
@@ -6899,6 +6916,28 @@
     saveRouteSettings();
     refreshUI();
     setStatus(visible ? "모든 노선을 표시합니다." : "모든 노선을 숨겼습니다.", false);
+  }
+
+  function setRouteGroupVisible(routeNames, visible, groupLabel) {
+    if (!routeNames.length) {
+      setStatus(`${groupLabel} 노선 목록이 없습니다.`, true);
+      return;
+    }
+
+    pushUndoSnapshot();
+    routeNames.forEach((routeName) => {
+      routeSettings[routeName] = {
+        ...getRouteSetting(routeName),
+        visible,
+      };
+    });
+
+    saveRouteSettings();
+    refreshUI();
+    setStatus(
+      visible ? `${groupLabel} 노선 리스트를 표시 상태로 바꿉니다.` : `${groupLabel} 노선 리스트를 숨김 상태로 바꿉니다.`,
+      false
+    );
   }
 
   function updateVillageBusRouteSetting(partialVillageBusDesign) {
@@ -9713,6 +9752,20 @@
     resetDesignedRouteButtonEl.addEventListener("click", handleResetDesignedRoute);
     showAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(true));
     hideAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(false));
+    toggleOriginalRoutesButtonEl?.addEventListener("click", () => {
+      setRouteGroupVisible(
+        getRoutes().filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged"),
+        toggleOriginalRoutesButtonEl.dataset.nextVisible === "true",
+        "기존"
+      );
+    });
+    toggleMergedRoutesButtonEl?.addEventListener("click", () => {
+      setRouteGroupVisible(
+        getRoutes().filter((routeName) => getRouteSetting(routeName).routeGroup === "merged"),
+        toggleMergedRoutesButtonEl.dataset.nextVisible === "true",
+        "개선"
+      );
+    });
     finishPathButtonEl.addEventListener("click", handlePathFormSubmit);
     if (saveDesignedPathButtonEl) {
       saveDesignedPathButtonEl.addEventListener("click", handlePathFormSubmit);

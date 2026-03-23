@@ -556,11 +556,19 @@ h1::before {
 }
 
 .route-bundle-head {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid #e2e9f2;
+}
+
+.route-bundle-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .route-bundle .section-title {
@@ -596,6 +604,22 @@ h1::before {
 .route-subsection-title {
   margin: 0;
   font-size: 14px;
+}
+
+.route-bundle-toggle-button {
+  flex: none;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .route-bundle-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .route-bundle-toggle-button {
+    width: 100%;
+  }
 }
 
 .tool-panel select:disabled,
