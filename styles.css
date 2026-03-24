@@ -299,6 +299,13 @@ h1::before {
   font-weight: 700;
 }
 
+.file-secondary-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
 .file-tools-section .compare-route-groups-button:hover:not(:disabled) {
   border-color: #1857b8;
   background: linear-gradient(180deg, #3f98ff, #2563eb);
@@ -993,6 +1000,11 @@ h1::before {
   margin-top: 4px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.point-meta {
+  color: #4d6480;
+  font-size: 11px;
 }
 
 .route-badge {

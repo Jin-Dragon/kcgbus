@@ -27,6 +27,9 @@
   const fileListEl = document.getElementById("file-list");
   const saveKmlButtonEl = document.getElementById("save-kml-button");
   const saveResetButtonEl = document.getElementById("save-reset-button");
+  const exportRidershipCsvButtonEl = document.getElementById("export-ridership-csv-button");
+  const importRidershipCsvButtonEl = document.getElementById("import-ridership-csv-button");
+  const ridershipFileInputEl = document.getElementById("ridership-file-input");
   const analyzeRoutesButtonEl = document.getElementById("analyze-routes-button");
   const compareRouteGroupsButtonEl = document.getElementById("compare-route-groups-button");
   const optimizeRoutesButtonEl = document.getElementById("optimize-routes-button");
@@ -197,6 +200,41 @@
   function setStatus(message, isError) {
     statusEl.textContent = message;
     statusEl.classList.toggle("error", Boolean(isError));
+  }
+
+  function normalizeRidershipValue(value) {
+    if (value == null || value === "") {
+      return null;
+    }
+    const normalized = Number(String(value).trim().replace(/,/g, ""));
+    if (!Number.isFinite(normalized) || normalized < 0) {
+      return null;
+    }
+    return Math.round(normalized);
+  }
+
+  function formatRidershipValue(value) {
+    const normalized = normalizeRidershipValue(value);
+    return normalized == null ? "" : normalized.toLocaleString("ko-KR");
+  }
+
+  function buildStopKey(routeName, stopName, lat, lng) {
+    if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) {
+      return "";
+    }
+    return [
+      normalizeRouteName(routeName || DEFAULT_ROUTE_NAME),
+      String(stopName || "").trim(),
+      Number(lat).toFixed(6),
+      Number(lng).toFixed(6),
+    ].join("|");
+  }
+
+  function getPointStopKey(point) {
+    if (!point) {
+      return "";
+    }
+    return buildStopKey(point.routeName, point.name, point.lat, point.lng);
   }
 
   function logRenameRouteDebug(stage, payload = {}) {
@@ -1391,6 +1429,31 @@
       : [];
   }
 
+  function getRidershipFromExtendedData(value) {
+    const extendedData = normalizeExtendedData(value);
+    const keys = ["ridership", "boardingCount", "passengerCount", "탑승객 수", "탑승객수"];
+    for (const key of keys) {
+      const ridership = normalizeRidershipValue(getExtendedDataValue(extendedData, key));
+      if (ridership != null) {
+        return ridership;
+      }
+    }
+    return null;
+  }
+
+  function withRidershipExtendedData(value, ridership) {
+    const normalizedRidership = normalizeRidershipValue(ridership);
+    const excludedNames = new Set(["ridership", "boardingCount", "passengerCount", "탑승객 수", "탑승객수"]);
+    const next = normalizeExtendedData(value).filter((item) => !excludedNames.has(String(item.name || "").trim()));
+    if (normalizedRidership != null) {
+      next.push({
+        name: "ridership",
+        value: String(normalizedRidership),
+      });
+    }
+    return next;
+  }
+
   function normalizeObservationArea(area) {
     const points = Array.isArray(area?.points)
       ? area.points
@@ -1520,6 +1583,10 @@
   function normalizeCustomPoint(point) {
     const lat = Number(point.lat);
     const lng = Number(point.lng);
+    const extendedData = normalizeExtendedData(point.extendedData);
+    const ridership = normalizeRidershipValue(
+      point.ridership != null ? point.ridership : getRidershipFromExtendedData(extendedData)
+    );
 
     return {
       id: String(point.id),
@@ -1538,12 +1605,22 @@
       lat,
       lng,
       altitude: point.altitude == null || point.altitude === "" ? null : Number(point.altitude),
-      extendedData: normalizeExtendedData(point.extendedData),
+      ridership,
+      extendedData: withRidershipExtendedData(extendedData, ridership),
     };
   }
 
   function normalizeUploadedPoint(point) {
     const override = pointOverrides[point.id] || {};
+    const extendedData = normalizeExtendedData(
+      Object.prototype.hasOwnProperty.call(override, "extendedData") ? override.extendedData : point.extendedData
+    );
+    const ridership = normalizeRidershipValue(
+      Object.prototype.hasOwnProperty.call(override, "ridership")
+        ? override.ridership
+        : (point.ridership != null ? point.ridership : getRidershipFromExtendedData(extendedData))
+    );
+
     return {
       ...point,
       ...override,
@@ -1552,7 +1629,8 @@
         ? Number(override.createdOrder)
         : (Number.isFinite(Number(point.createdOrder)) ? Number(point.createdOrder) : null),
       routeName: normalizeRouteName(override.routeName || point.routeName || point.fileName),
-      extendedData: normalizeExtendedData(override.extendedData || point.extendedData),
+      ridership,
+      extendedData: withRidershipExtendedData(extendedData, ridership),
     };
   }
 
@@ -2459,6 +2537,7 @@
         routeName,
         pointCount: routePoints.length,
         pathCount: routePaths.length,
+        totalRidership: routePoints.reduce((sum, point) => sum + (normalizeRidershipValue(point.ridership) || 0), 0),
         totalDistanceMeters,
         totalDurationSeconds,
       };
@@ -2466,6 +2545,7 @@
 
     const totalDistanceMeters = routeSummaries.reduce((sum, route) => sum + route.totalDistanceMeters, 0);
     const totalDurationSeconds = routeSummaries.reduce((sum, route) => sum + route.totalDurationSeconds, 0);
+    const totalRidership = routeSummaries.reduce((sum, route) => sum + route.totalRidership, 0);
     const local = summarizeLocalAnalysis(routeNames);
     const coverageAreaSquareKm = calculateCoverageAreaSquareKm(routeNames);
     const effectiveBusCount = Math.max(busCount, routeNames.length * minimumBusPerRoute);
@@ -2487,6 +2567,7 @@
       averageHeadwayMinutes,
       averageWaitMinutes: averageHeadwayMinutes / 2,
       coverageAreaSquareKm,
+      totalRidership,
       duplicatePointCount: local.duplicatePointCount,
       overlappingSegmentCount: local.overlappingSegmentCount,
       routeSummaries,
@@ -4471,12 +4552,15 @@
     const dataEntries = buildRouteMetadataEntries(point.routeName).concat([
       point.fileName ? `<Data name="fileName"><value>${escapeXml(point.fileName)}</value></Data>` : "",
       point.description ? `<Data name="description"><value>${escapeXml(point.description)}</value></Data>` : "",
+      normalizeRidershipValue(point.ridership) != null
+        ? `<Data name="ridership"><value>${escapeXml(String(normalizeRidershipValue(point.ridership)))}</value></Data>`
+        : "",
       Number.isFinite(Number(point.createdOrder))
         ? `<Data name="createdOrder"><value>${escapeXml(String(point.createdOrder))}</value></Data>`
         : "",
     ])
       .concat(
-        (point.extendedData || []).map(
+        withRidershipExtendedData(point.extendedData, null).map(
           (item) => `<Data name="${escapeXml(item.name)}"><value>${escapeXml(item.value)}</value></Data>`
         )
       )
@@ -5168,6 +5252,7 @@
           <li><strong>여러 KML 파일 드래그/선택:</strong> 파일을 불러와 지도와 리스트에 표시합니다.</li>
           <li><strong>KML 저장:</strong> 현재 작업 중인 노선, 정류장, 경로를 KML로 저장합니다.</li>
           <li><strong>저장후 초기화:</strong> 저장을 마친 뒤 현재 작업 공간을 비웁니다.</li>
+          <li><strong>정류장 CSV 다운로드/업로드:</strong> 현재 표시 중인 정류장 목록을 엑셀용 CSV로 내보내고 boarding_count 열을 채워 다시 올리면 서버에 탑승객 수가 저장됩니다.</li>
           <li><strong>전체노선 비교분석:</strong> 기존노선과 개선노선의 전후 비교표를 새 창 대시보드로 엽니다.</li>
           <li><strong>불러온 파일 목록의 x:</strong> 해당 파일에서 온 데이터와 연결된 목록을 작업 화면에서 제거합니다.</li>
         </ul>
@@ -5180,6 +5265,7 @@
           <li><strong>개선노선과 노선리스트:</strong> 병합으로 만든 개선 노선을 별도 묶음 카드에서 관리합니다.</li>
           <li><strong>노선 카드 총거리:</strong> 각 노선 카드에는 정류장 수, 경로 수와 함께 총 운행거리가 표시됩니다.</li>
           <li><strong>선택한 노선의 정류장:</strong> 현재 노선의 정류장 순서를 확인하고 이동할 수 있습니다.</li>
+          <li><strong>정류장 탑승객 표시:</strong> 정류장 행과 상세 패널에 입력된 탑승객 수가 함께 표시됩니다.</li>
         </ul>
       </article>
       <article class="help-card">
@@ -6165,6 +6251,7 @@
       createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
+      ridership: getRidershipFromExtendedData(extendedData),
       extendedData,
     };
   }
@@ -7596,6 +7683,13 @@
       }
       titleRow.appendChild(titleText);
       button.appendChild(titleRow);
+      const ridershipMeta = document.createElement("span");
+      ridershipMeta.className = "point-meta";
+      ridershipMeta.textContent =
+        normalizeRidershipValue(point.ridership) == null
+          ? "탑승객 미입력"
+          : `탑승객 ${formatRidershipValue(point.ridership)}명`;
+      button.appendChild(ridershipMeta);
       button.addEventListener("click", () => selectPointById(point.id));
       button.addEventListener("dragstart", (event) => {
         draggedRoutePointId = point.id;
@@ -8440,6 +8534,7 @@
       { label: "주소", value: point.address },
       { label: "전화번호", value: point.phoneNumber },
       { label: "스타일", value: point.styleUrl },
+      { label: "탑승객 수", value: normalizeRidershipValue(point.ridership) == null ? "" : `${formatRidershipValue(point.ridership)}명` },
       { label: "100m 예상 가구수", value: `${populationEstimate.estimatedHouseholds}가구` },
       { label: "100m 예상 인구수", value: `${populationEstimate.estimatedPopulation}명` },
       { label: "추정 근거", value: populationEstimate.basisText },
@@ -9426,8 +9521,244 @@
       address: basePoint.address || "",
       description: formEls.description.value.trim(),
       rawCoordinates: altitude == null ? `${lng},${lat}` : `${lng},${lat},${altitude}`,
-      extendedData: normalizeExtendedData(basePoint.extendedData),
+      ridership: normalizeRidershipValue(basePoint.ridership),
+      extendedData: withRidershipExtendedData(basePoint.extendedData, basePoint.ridership),
     };
+  }
+
+  function csvEscape(value) {
+    const text = String(value ?? "");
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function parseCsvRows(text) {
+    const rows = [];
+    let currentRow = [];
+    let currentValue = "";
+    let inQuotes = false;
+    const source = String(text || "").replace(/^\uFEFF/, "");
+
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      const nextChar = source[index + 1];
+
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          currentValue += '"';
+          index += 1;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+
+      if (!inQuotes && char === ",") {
+        currentRow.push(currentValue);
+        currentValue = "";
+        continue;
+      }
+
+      if (!inQuotes && (char === "\n" || char === "\r")) {
+        if (char === "\r" && nextChar === "\n") {
+          index += 1;
+        }
+        currentRow.push(currentValue);
+        rows.push(currentRow);
+        currentRow = [];
+        currentValue = "";
+        continue;
+      }
+
+      currentValue += char;
+    }
+
+    if (currentValue || currentRow.length) {
+      currentRow.push(currentValue);
+      rows.push(currentRow);
+    }
+
+    return rows.filter((row) => row.some((cell) => String(cell || "").trim()));
+  }
+
+  function buildRidershipCsv(points) {
+    const rows = [
+      ["stop_key", "route_name", "stop_name", "lat", "lng", "boarding_count"],
+      ...points.map((point) => [
+        getPointStopKey(point),
+        point.routeName,
+        point.name,
+        Number(point.lat).toFixed(6),
+        Number(point.lng).toFixed(6),
+        normalizeRidershipValue(point.ridership) == null ? "" : String(normalizeRidershipValue(point.ridership)),
+      ]),
+    ];
+
+    return `\uFEFF${rows.map((row) => row.map(csvEscape).join(",")).join("\r\n")}`;
+  }
+
+  function getVisiblePointsForRidershipExport() {
+    return getAllPoints()
+      .filter((point) => isRouteVisible(point.routeName))
+      .sort((left, right) => {
+        const leftRouteOrder = Number(getRouteSetting(left.routeName).routeOrder);
+        const rightRouteOrder = Number(getRouteSetting(right.routeName).routeOrder);
+        if (left.routeName !== right.routeName && Number.isFinite(leftRouteOrder) && Number.isFinite(rightRouteOrder)) {
+          return leftRouteOrder - rightRouteOrder;
+        }
+        if (left.routeName !== right.routeName) {
+          return String(left.routeName).localeCompare(String(right.routeName), "ko");
+        }
+        return comparePointsByOrder(left, right);
+      });
+  }
+
+  function downloadRidershipCsv() {
+    const points = getVisiblePointsForRidershipExport();
+    if (!points.length) {
+      setStatus("CSV로 내보낼 표시 중인 정류장이 없습니다.", true);
+      return;
+    }
+
+    const blob = new Blob([buildRidershipCsv(points)], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `stop-ridership-${formatAutoSaveTimestamp()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+    setStatus(`표시 중인 정류장 ${points.length}개의 CSV를 다운로드했습니다. boarding_count 열을 채운 뒤 다시 업로드하세요.`, false);
+  }
+
+  function parseRidershipCsv(text) {
+    const rows = parseCsvRows(text);
+    if (rows.length < 2) {
+      throw new Error("승객 CSV에 데이터 행이 없습니다.");
+    }
+
+    const headerMap = rows[0].reduce((acc, cell, index) => {
+      acc[String(cell || "").trim().toLowerCase()] = index;
+      return acc;
+    }, {});
+
+    if (!Object.prototype.hasOwnProperty.call(headerMap, "stop_key")) {
+      throw new Error("승객 CSV에 stop_key 열이 없습니다.");
+    }
+    if (!Object.prototype.hasOwnProperty.call(headerMap, "boarding_count")) {
+      throw new Error("승객 CSV에 boarding_count 열이 없습니다.");
+    }
+
+    return rows.slice(1).map((row) => ({
+      stopKey: String(row[headerMap.stop_key] || "").trim(),
+      routeName: String(row[headerMap.route_name] || "").trim(),
+      stopName: String(row[headerMap.stop_name] || "").trim(),
+      lat: row[headerMap.lat],
+      lng: row[headerMap.lng],
+      boardingCount: row[headerMap.boarding_count],
+    })).filter((record) => record.stopKey);
+  }
+
+  function applyRidershipRecordsToWorkspace(records) {
+    const recordMap = new Map(
+      (Array.isArray(records) ? records : [])
+        .map((record) => ({
+          ...record,
+          stopKey: String(record?.stopKey || "").trim(),
+          boardingCount: normalizeRidershipValue(record?.boardingCount),
+        }))
+        .filter((record) => record.stopKey)
+        .map((record) => [record.stopKey, record])
+    );
+
+    let customChanged = false;
+    let overrideChanged = false;
+    let appliedCount = 0;
+
+    customPoints = customPoints.map((point) => {
+      const record = recordMap.get(getPointStopKey(point));
+      if (!record) {
+        return point;
+      }
+      appliedCount += 1;
+      customChanged = true;
+      return normalizeCustomPoint({
+        ...point,
+        ridership: record.boardingCount,
+        extendedData: withRidershipExtendedData(point.extendedData, record.boardingCount),
+      });
+    });
+
+    getAllPoints()
+      .filter((point) => point.source === "uploaded")
+      .forEach((point) => {
+        const record = recordMap.get(getPointStopKey(point));
+        if (!record) {
+          return;
+        }
+        appliedCount += 1;
+        overrideChanged = true;
+        const currentOverride = pointOverrides[point.id] || {};
+        const baseExtendedData = Object.prototype.hasOwnProperty.call(currentOverride, "extendedData")
+          ? currentOverride.extendedData
+          : point.extendedData;
+        pointOverrides[point.id] = {
+          ...currentOverride,
+          ridership: record.boardingCount,
+          extendedData: withRidershipExtendedData(baseExtendedData, record.boardingCount),
+        };
+      });
+
+    if (customChanged) {
+      saveCustomPoints();
+    }
+    if (overrideChanged) {
+      saveOverrides();
+    }
+
+    return { appliedCount };
+  }
+
+  async function loadRidershipStoreFromServer() {
+    const response = await window.fetch("/api/stop-ridership");
+    if (!response.ok) {
+      throw new Error("정류장 탑승객 저장소를 불러오지 못했습니다.");
+    }
+    const payload = await response.json();
+    return applyRidershipRecordsToWorkspace(payload.records || []);
+  }
+
+  async function importRidershipCsvFile(file) {
+    if (!file) {
+      return;
+    }
+
+    const records = parseRidershipCsv(await file.text());
+    if (!records.length) {
+      throw new Error("승객 CSV에 반영할 정류장 행이 없습니다.");
+    }
+
+    const response = await window.fetch("/api/stop-ridership-import", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ records }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || "승객 CSV 업로드에 실패했습니다.");
+    }
+
+    const applied = applyRidershipRecordsToWorkspace(records);
+    refreshUI();
+    setStatus(
+      `승객 CSV ${records.length}행을 처리했습니다. 서버 저장 ${payload.savedCount || 0}건, 초기화 ${payload.clearedCount || 0}건, 현재 화면 반영 ${applied.appliedCount}건입니다.`,
+      false
+    );
   }
 
   function handleFormSubmit(event) {
@@ -9630,6 +9961,20 @@
         fileInput.value = "";
       }
     });
+
+    importRidershipCsvButtonEl?.addEventListener("click", () => {
+      ridershipFileInputEl?.click();
+    });
+
+    ridershipFileInputEl?.addEventListener("change", async (event) => {
+      try {
+        await importRidershipCsvFile(event.target.files?.[0]);
+      } catch (error) {
+        setStatus(error.message, true);
+      } finally {
+        event.target.value = "";
+      }
+    });
   }
 
   function bindFormEvents() {
@@ -9777,6 +10122,7 @@
     });
     saveKmlButtonEl.addEventListener("click", handleSaveKml);
     saveResetButtonEl.addEventListener("click", handleSaveAndReset);
+    exportRidershipCsvButtonEl?.addEventListener("click", downloadRidershipCsv);
     analyzeRoutesButtonEl.addEventListener("click", handleAnalyzeRoutesLocal);
     compareRouteGroupsButtonEl.addEventListener("click", handleCompareRouteGroups);
     if (OPTIMIZATION_FEATURE_ENABLED && optimizeRoutesButtonEl) {
@@ -9845,6 +10191,11 @@
       clearForm();
       fillPathForm(null);
       restoreWorkspaceFromStorage();
+      try {
+        await loadRidershipStoreFromServer();
+      } catch (error) {
+        console.warn(error);
+      }
       renderRouteList();
       renderRoutePointList();
       if (!uploadedFileSummaries.length) {

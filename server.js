@@ -3,12 +3,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const PORT = 8080;
+const PORT = Number(process.env.PORT) || 8080;
 const HOST = "0.0.0.0";
 const ROOT = __dirname;
 const EXPORTS_DIR = path.join(ROOT, "exports");
 const TEMP_EXPORTS_DIR = path.join(os.tmpdir(), "kml-kakao-map-autosaves");
 const DEBUG_RENAME_LOG = path.join(ROOT, "rename-debug.log");
+const RIDERSHIP_STORE_PATH = path.join(EXPORTS_DIR, "stop-ridership.json");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
 const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || "";
@@ -48,6 +49,91 @@ function readRequestBody(req) {
 
 function ensureDir(targetDir, callback) {
   fs.mkdir(targetDir, { recursive: true }, callback);
+}
+
+function readJsonFile(filePath, fallbackValue) {
+  return new Promise((resolve, reject) => {
+    fs.readFile(filePath, "utf8", (error, content) => {
+      if (error) {
+        if (error.code === "ENOENT") {
+          resolve(fallbackValue);
+          return;
+        }
+        reject(error);
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(content));
+      } catch (parseError) {
+        reject(parseError);
+      }
+    });
+  });
+}
+
+function writeJsonFile(filePath, data) {
+  return new Promise((resolve, reject) => {
+    ensureDir(path.dirname(filePath), (mkdirError) => {
+      if (mkdirError) {
+        reject(mkdirError);
+        return;
+      }
+
+      fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8", (writeError) => {
+        if (writeError) {
+          reject(writeError);
+          return;
+        }
+        resolve();
+      });
+    });
+  });
+}
+
+function normalizeRidershipCount(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const normalized = Number(String(value).trim().replace(/,/g, ""));
+  if (!Number.isFinite(normalized) || normalized < 0) {
+    return null;
+  }
+
+  return Math.round(normalized);
+}
+
+function normalizeRidershipRecord(record) {
+  const stopKey = String(record?.stopKey || "").trim();
+  if (!stopKey) {
+    return null;
+  }
+
+  const lat = Number(record?.lat);
+  const lng = Number(record?.lng);
+
+  return {
+    stopKey,
+    routeName: String(record?.routeName || "").trim(),
+    stopName: String(record?.stopName || "").trim(),
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    boardingCount: normalizeRidershipCount(record?.boardingCount),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function readRidershipStore() {
+  const parsed = await readJsonFile(RIDERSHIP_STORE_PATH, { updatedAt: null, records: [] });
+  const records = Array.isArray(parsed?.records)
+    ? parsed.records.map(normalizeRidershipRecord).filter((record) => record && record.boardingCount != null)
+    : [];
+
+  return {
+    updatedAt: parsed?.updatedAt || null,
+    records,
+  };
 }
 
 function normalizeDesignRouteOptions(value) {
@@ -271,6 +357,66 @@ http
         })
         .catch(() => {
           sendJson(res, 400, { error: "Invalid JSON payload" });
+        });
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/api/stop-ridership") {
+      readRidershipStore()
+        .then((store) => {
+          sendJson(res, 200, {
+            ok: true,
+            updatedAt: store.updatedAt,
+            records: store.records,
+          });
+        })
+        .catch((error) => {
+          sendJson(res, 500, { error: error.message || "Failed to read stop ridership store" });
+        });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/stop-ridership-import") {
+      readRequestBody(req)
+        .then(async (rawBody) => {
+          const payload = parseJsonBody(rawBody);
+          const incomingRecords = Array.isArray(payload.records) ? payload.records : [];
+          const parsedRecords = incomingRecords.map(normalizeRidershipRecord).filter(Boolean);
+          const existingStore = await readRidershipStore();
+          const recordMap = new Map(existingStore.records.map((record) => [record.stopKey, record]));
+          let savedCount = 0;
+          let clearedCount = 0;
+
+          parsedRecords.forEach((record) => {
+            if (record.boardingCount == null) {
+              if (recordMap.delete(record.stopKey)) {
+                clearedCount += 1;
+              }
+              return;
+            }
+
+            recordMap.set(record.stopKey, record);
+            savedCount += 1;
+          });
+
+          const nextStore = {
+            updatedAt: new Date().toISOString(),
+            records: Array.from(recordMap.values()).sort((left, right) =>
+              String(left.stopKey).localeCompare(String(right.stopKey), "ko")
+            ),
+          };
+
+          await writeJsonFile(RIDERSHIP_STORE_PATH, nextStore);
+          sendJson(res, 200, {
+            ok: true,
+            updatedAt: nextStore.updatedAt,
+            recordCount: nextStore.records.length,
+            savedCount,
+            clearedCount,
+          });
+        })
+        .catch((error) => {
+          sendJson(res, 400, { error: error.message || "Invalid ridership import payload" });
         });
       return;
     }
