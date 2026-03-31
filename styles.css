@@ -618,6 +618,14 @@ h1::before {
   white-space: nowrap;
 }
 
+.route-bundle-head .route-list-title-edit {
+  align-self: center;
+  min-width: 42px;
+  height: 30px;
+  padding: 0 8px;
+  margin-left: auto;
+}
+
 @media (max-width: 640px) {
   .route-bundle-head {
     flex-direction: column;
@@ -754,29 +762,26 @@ h1::before {
   overflow: auto;
 }
 
-.route-list-title-input {
-  width: 100%;
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid #d9e2ee;
-  border-radius: 6px 6px 0 0;
-  background: #edf4ff;
-  color: var(--text);
-  font: inherit;
-  font-weight: 700;
-}
-
 .route-list-title-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto auto;
   gap: 8px;
+  justify-content: end;
   align-items: stretch;
 }
 
-.route-list-title-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(221, 107, 32, 0.12);
+.route-list-title-edit {
+  align-self: stretch;
+  min-width: 48px;
+  padding: 0 10px;
+  border: 1px solid #d9e2ee;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .list-search-input {
@@ -804,19 +809,25 @@ h1::before {
   color: #2d74d6;
 }
 
+.list-ridership-button {
+  align-self: stretch;
+  min-width: 88px;
+  border-color: #f0d8a8;
+  background: #fff5df;
+  color: #a36200;
+}
+
 .route-list-title-row + .route-list {
-  margin-top: 0;
+  margin-top: 8px;
   padding: 8px;
   border: 1px solid #d9e2ee;
-  border-top: none;
-  border-radius: 0 0 6px 6px;
+  border-radius: 6px;
   background: #fff;
 }
 
 .route-list-title-row + .list-search-input {
-  margin-top: 0;
-  border-top: none;
-  border-radius: 0;
+  margin-top: 8px;
+  border-radius: 6px;
   background: #fff;
 }
 

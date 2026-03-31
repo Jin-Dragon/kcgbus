@@ -136,6 +136,7 @@
     merged: "",
   };
   const routeListAnalyzeButtons = {};
+  const routeListRidershipButtons = {};
   let pointListSearchQuery = "";
   let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
@@ -155,6 +156,8 @@
   let analysisPolylines = [];
   let analysisCircles = [];
   let analysisInfoWindows = [];
+  let ridershipFocusMarkers = [];
+  let ridershipFocusInfoWindows = [];
   let observationAreaPolygons = [];
   let observationAreaBorders = [];
   let observationAreaLabels = [];
@@ -168,6 +171,7 @@
   let mapSearchInfoWindow = null;
   let latestAnalysisReport = null;
   let latestOptimizationPlan = null;
+  let latestRidershipAnalysisReport = null;
   let analysisActive = false;
   let observationAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
   let observationAreaDrawMode = false;
@@ -196,6 +200,7 @@
   let shouldFitMapToData = true;
   let undoHistory = [];
   let isRestoringUndo = false;
+  let ridershipResultsWindowRef = null;
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -770,6 +775,57 @@
     window.localStorage.setItem(ROUTE_LIST_TITLES_KEY, JSON.stringify(routeListTitles));
   }
 
+  function getRouteListGroupElements(groupKey) {
+    const bundleSelector = groupKey === "merged" ? ".route-bundle-merged" : ".route-bundle-original";
+    const bundleEl = document.querySelector(bundleSelector);
+    return {
+      bundleEl,
+      headingEl: bundleEl?.querySelector(".section-title") || null,
+      toggleButtonEl: bundleEl?.querySelector(".route-bundle-toggle-button") || null,
+      headEl: bundleEl?.querySelector(".route-bundle-head") || null,
+    };
+  }
+
+  function ensureRouteListTitleEditButton(groupKey, fallbackTitle) {
+    const { headingEl, toggleButtonEl, headEl } = getRouteListGroupElements(groupKey);
+    if (headingEl) {
+      headingEl.textContent = routeListTitles[groupKey] || fallbackTitle;
+    }
+    if (!toggleButtonEl || !headEl) {
+      return;
+    }
+
+    let editButtonEl = headEl.querySelector(`.route-list-title-edit[data-group="${groupKey}"]`);
+    if (!editButtonEl) {
+      editButtonEl = document.createElement("button");
+      editButtonEl.type = "button";
+      editButtonEl.className = "route-list-title-edit";
+      editButtonEl.dataset.group = groupKey;
+      editButtonEl.title = "목록 제목 변경";
+      editButtonEl.setAttribute("aria-label", "목록 제목 변경");
+      editButtonEl.textContent = "이름";
+      editButtonEl.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const currentTitle = routeListTitles[groupKey] || fallbackTitle;
+        const nextTitle = window.prompt("목록 제목을 입력하세요.", currentTitle);
+        if (nextTitle == null) {
+          return;
+        }
+        const normalizedTitle = String(nextTitle || "").trim() || fallbackTitle;
+        if (normalizedTitle === currentTitle) {
+          return;
+        }
+        routeListTitles[groupKey] = normalizedTitle;
+        saveRouteListTitles();
+        if (headingEl) {
+          headingEl.textContent = normalizedTitle;
+        }
+        setStatus(`목록 제목을 "${normalizedTitle}" 로 변경했습니다.`, false);
+      });
+      headEl.insertBefore(editButtonEl, toggleButtonEl);
+    }
+  }
+
   function ensureRouteListTitleInput(listEl, groupKey, fallbackTitle) {
     if (!listEl?.parentElement) {
       return;
@@ -783,43 +839,7 @@
       titleRowEl.dataset.group = groupKey;
       sectionEl.insertBefore(titleRowEl, listEl);
     }
-
-    let inputEl = titleRowEl.querySelector(`.route-list-title-input[data-group="${groupKey}"]`);
-
-    if (!inputEl) {
-      inputEl = document.createElement("input");
-      inputEl.type = "text";
-      inputEl.className = "route-list-title-input";
-      inputEl.dataset.group = groupKey;
-      inputEl.placeholder = fallbackTitle;
-      inputEl.addEventListener("click", (event) => {
-        event.stopPropagation();
-      });
-      inputEl.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          inputEl.blur();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          inputEl.value = routeListTitles[groupKey] || fallbackTitle;
-          inputEl.blur();
-        }
-      });
-      inputEl.addEventListener("blur", () => {
-        const nextTitle = String(inputEl.value || "").trim() || fallbackTitle;
-        if (routeListTitles[groupKey] === nextTitle) {
-          inputEl.value = nextTitle;
-          return;
-        }
-        routeListTitles[groupKey] = nextTitle;
-        saveRouteListTitles();
-        inputEl.value = nextTitle;
-        setStatus(`목록 제목을 "${nextTitle}" 로 변경했습니다.`, false);
-      });
-      titleRowEl.appendChild(inputEl);
-    }
-
-    inputEl.value = routeListTitles[groupKey] || fallbackTitle;
+    ensureRouteListTitleEditButton(groupKey, fallbackTitle);
 
     let analyzeButtonEl = titleRowEl.querySelector(`.list-analyze-button[data-group="${groupKey}"]`);
     if (!analyzeButtonEl) {
@@ -827,7 +847,7 @@
       analyzeButtonEl.type = "button";
       analyzeButtonEl.className = "secondary-button list-analyze-button";
       analyzeButtonEl.dataset.group = groupKey;
-      analyzeButtonEl.textContent = "분석 시작";
+      analyzeButtonEl.textContent = "정류장 분석";
       analyzeButtonEl.addEventListener("click", () => {
         handleAnalyzeRouteGroup(groupKey, analyzeButtonEl);
       });
@@ -835,6 +855,21 @@
     }
 
     routeListAnalyzeButtons[groupKey] = analyzeButtonEl;
+
+    let ridershipButtonEl = titleRowEl.querySelector(`.list-ridership-button[data-group="${groupKey}"]`);
+    if (!ridershipButtonEl) {
+      ridershipButtonEl = document.createElement("button");
+      ridershipButtonEl.type = "button";
+      ridershipButtonEl.className = "secondary-button list-ridership-button";
+      ridershipButtonEl.dataset.group = groupKey;
+      ridershipButtonEl.textContent = "탑승객 분석";
+      ridershipButtonEl.addEventListener("click", () => {
+        openRidershipAnalysisSettingsWindow(groupKey);
+      });
+      titleRowEl.appendChild(ridershipButtonEl);
+    }
+
+    routeListRidershipButtons[groupKey] = ridershipButtonEl;
     updateAnalyzeButtonState();
   }
 
@@ -931,7 +966,7 @@
     if (!analyzeRoutesButtonEl) {
       return;
     }
-    analyzeRoutesButtonEl.textContent = analysisActive ? "분석 종료" : "분석 시작";
+    analyzeRoutesButtonEl.textContent = analysisActive ? "정류장 분석 종료" : "정류장 분석";
     analyzeRoutesButtonEl.hidden = true;
     analyzeRoutesButtonEl.setAttribute("aria-hidden", "true");
     Object.entries(routeListAnalyzeButtons).forEach(([groupKey, buttonEl]) => {
@@ -939,7 +974,7 @@
         return;
       }
       const isActiveGroup = analysisActive && activeAnalysisGroup === groupKey;
-      buttonEl.textContent = isActiveGroup ? "분석 종료" : "분석 시작";
+      buttonEl.textContent = isActiveGroup ? "정류장 분석 종료" : "정류장 분석";
       buttonEl.classList.toggle("is-active", isActiveGroup);
     });
   }
@@ -2395,11 +2430,541 @@
 
     return {
       analyzedAt: new Date().toISOString(),
+      routeNames: Array.isArray(routeNames) ? routeNames.slice() : [],
       duplicatePointCount: duplicatePoints.length,
       overlappingSegmentCount: overlappingSegments.length,
       duplicatePoints,
       overlappingSegments,
     };
+  }
+
+  function buildRidershipCandidateAnalysis(routeNames = getRoutes()) {
+    const routeList = Array.isArray(routeNames) && routeNames.length ? routeNames : getRoutes();
+    const routeNameSet = new Set(routeList);
+    const points = getAllPoints().filter((point) => routeNameSet.has(point.routeName));
+    const thresholds = {
+      maxRidership: 20,
+      maxUtilizationRate: 0.03,
+    };
+    const candidates = [];
+    let ridershipPointCount = 0;
+    let missingRidershipCount = 0;
+
+    points.forEach((point) => {
+      const ridership = normalizeRidershipValue(point.ridership);
+      if (ridership == null) {
+        missingRidershipCount += 1;
+        return;
+      }
+
+      ridershipPointCount += 1;
+      const populationEstimate = estimatePointPopulation(point, 100);
+      const estimatedPopulation = Math.max(1, Number(populationEstimate.estimatedPopulation) || 0);
+      const utilizationRate = estimatedPopulation > 0 ? ridership / estimatedPopulation : 0;
+      const boardingPerHundredResidents = utilizationRate * 100;
+      const isLowUtilization = ridership <= thresholds.maxRidership || utilizationRate <= thresholds.maxUtilizationRate;
+
+      candidates.push({
+        id: point.id,
+        routeName: point.routeName,
+        name: point.name,
+        ridership,
+        estimatedPopulation,
+        estimatedHouseholds: populationEstimate.estimatedHouseholds,
+        utilizationRate,
+        boardingPerHundredResidents,
+        nearbyStopCount: populationEstimate.nearbyStopCount,
+        residentialNearbyCount: populationEstimate.residentialNearbyCount,
+        basisText: populationEstimate.basisText,
+        isLowUtilization,
+      });
+    });
+
+    candidates.sort((left, right) => {
+      if (left.utilizationRate !== right.utilizationRate) {
+        return left.utilizationRate - right.utilizationRate;
+      }
+      if (left.ridership !== right.ridership) {
+        return left.ridership - right.ridership;
+      }
+      return right.estimatedPopulation - left.estimatedPopulation;
+    });
+
+    const lowUtilizationCandidates = candidates.filter((item) => item.isLowUtilization);
+    return {
+      analyzedPointCount: points.length,
+      ridershipPointCount,
+      missingRidershipCount,
+      candidateCount: lowUtilizationCandidates.length,
+      thresholds,
+      candidates: lowUtilizationCandidates.slice(0, 10),
+      rankedCandidates: candidates.slice(0, 10),
+    };
+  }
+
+  function normalizeRidershipAnalysisOptions(options = {}) {
+    const lowContributionPercent = Math.min(50, Math.max(5, Number(options.lowContributionPercent) || 20));
+    const highContributionPercent = Math.min(50, Math.max(5, Number(options.highContributionPercent) || 20));
+    const duplicateRadiusMeters = Math.min(100, Math.max(20, Number(options.duplicateRadiusMeters) || 40));
+    const consecutiveStopCount = Math.min(5, Math.max(2, Number(options.consecutiveStopCount) || 2));
+
+    return {
+      lowContributionPercent,
+      highContributionPercent,
+      duplicateRadiusMeters,
+      consecutiveStopCount,
+      useMedianGuard: options.useMedianGuard !== false,
+      discardRequiresDuplicate: options.discardRequiresDuplicate !== false,
+    };
+  }
+
+  function calculateMedian(values) {
+    const numbers = values
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b);
+    if (!numbers.length) {
+      return 0;
+    }
+    const middle = Math.floor(numbers.length / 2);
+    return numbers.length % 2 === 0 ? (numbers[middle - 1] + numbers[middle]) / 2 : numbers[middle];
+  }
+
+  function buildDuplicatePointIdSet(routeNames, duplicateRadiusMeters) {
+    const duplicateGroups = detectDuplicatePoints(duplicateRadiusMeters, routeNames);
+    const duplicatePointIds = new Set();
+    duplicateGroups.forEach((group) => {
+      group.points.forEach((point) => duplicatePointIds.add(point.id));
+    });
+    return duplicatePointIds;
+  }
+
+  function buildRidershipAnalysisReport(routeNames, rawOptions = {}) {
+    const options = normalizeRidershipAnalysisOptions(rawOptions);
+    const duplicatePointIds = buildDuplicatePointIdSet(routeNames, options.duplicateRadiusMeters);
+    const routes = routeNames
+      .map((routeName) => {
+        const routePoints = getAllPoints()
+          .filter((point) => point.routeName === routeName)
+          .sort(comparePointsByOrder)
+          .map((point) => ({
+            id: point.id,
+            routeName: point.routeName,
+            name: point.name,
+            lat: Number(point.lat),
+            lng: Number(point.lng),
+            ridership: normalizeRidershipValue(point.ridership),
+          }))
+          .filter((point) => point.ridership != null);
+
+        const totalRidership = routePoints.reduce((sum, point) => sum + point.ridership, 0);
+        const medianRidership = calculateMedian(routePoints.map((point) => point.ridership));
+        const sortedByRidership = routePoints.slice().sort((a, b) => a.ridership - b.ridership);
+        const rankIndexMap = new Map(sortedByRidership.map((point, index) => [point.id, index]));
+
+        const analyzedPoints = routePoints.map((point) => {
+          const rankIndex = rankIndexMap.get(point.id) || 0;
+          const rankPercent = routePoints.length ? ((rankIndex + 1) / routePoints.length) * 100 : 100;
+          const contributionPercent = totalRidership > 0 ? (point.ridership / totalRidership) * 100 : 0;
+          const lowContribution = rankPercent <= options.lowContributionPercent;
+          const highContribution = rankPercent > 100 - options.highContributionPercent;
+          const lowUsage = lowContribution && (!options.useMedianGuard || point.ridership <= medianRidership);
+          const highUsage = highContribution && point.ridership >= medianRidership;
+
+          return {
+            ...point,
+            rankPercent,
+            contributionPercent,
+            lowContribution,
+            highContribution,
+            lowUsage,
+            highUsage,
+            duplicateNearby: duplicatePointIds.has(point.id),
+            discardCandidate: false,
+            partOfConsecutiveLowRun: false,
+          };
+        });
+
+        let currentRun = [];
+        const flushRun = () => {
+          if (currentRun.length >= options.consecutiveStopCount) {
+            currentRun.forEach((item) => {
+              item.partOfConsecutiveLowRun = true;
+            });
+          }
+          currentRun = [];
+        };
+
+        analyzedPoints.forEach((point) => {
+          if (point.lowUsage) {
+            currentRun.push(point);
+          } else {
+            flushRun();
+          }
+        });
+        flushRun();
+
+        analyzedPoints.forEach((point) => {
+          point.discardCandidate = point.lowUsage && (
+            point.partOfConsecutiveLowRun || (!options.discardRequiresDuplicate || point.duplicateNearby)
+          );
+        });
+
+        return {
+          routeName,
+          pointCount: routePoints.length,
+          totalRidership,
+          medianRidership,
+          points: analyzedPoints,
+        };
+      })
+      .filter((route) => route.pointCount > 0);
+
+    const allPoints = routes.flatMap((route) => route.points);
+    const lowUsageLowContribution = allPoints.filter((point) => point.lowUsage);
+    const discardCandidates = allPoints.filter((point) => point.discardCandidate);
+    const highUsageHighContribution = allPoints.filter((point) => point.highUsage);
+
+    return {
+      id: `ridership-analysis-${Date.now()}`,
+      generatedAt: new Date().toISOString(),
+      routeNames: routeNames.slice(),
+      options,
+      routes,
+      summary: {
+        routeCount: routes.length,
+        analyzedStopCount: allPoints.length,
+        lowUsageLowContributionCount: lowUsageLowContribution.length,
+        discardCandidateCount: discardCandidates.length,
+        highUsageHighContributionCount: highUsageHighContribution.length,
+      },
+      lowUsageLowContribution,
+      discardCandidates,
+      highUsageHighContribution,
+    };
+  }
+
+  function getRidershipAnalysisCategoryItems(report, categoryKey) {
+    if (!report) {
+      return [];
+    }
+    if (categoryKey === "discard") {
+      return report.discardCandidates || [];
+    }
+    if (categoryKey === "high") {
+      return report.highUsageHighContribution || [];
+    }
+    return report.lowUsageLowContribution || [];
+  }
+
+  function getRidershipCategoryMeta(categoryKey) {
+    if (categoryKey === "discard") {
+      return {
+        label: "폐기 검토 후보",
+        color: "#d9485f",
+      };
+    }
+    if (categoryKey === "high") {
+      return {
+        label: "고이용 고기여",
+        color: "#138a5b",
+      };
+    }
+    return {
+      label: "저이용 저기여",
+      color: "#d78612",
+    };
+  }
+
+  function showRidershipAnalysisCategoryOnMap(report, categoryKey) {
+    clearRidershipFocusOverlays();
+    if (!mapReady || !report) {
+      return;
+    }
+
+    const items = getRidershipAnalysisCategoryItems(report, categoryKey);
+    const meta = getRidershipCategoryMeta(categoryKey);
+    if (!items.length) {
+      setStatus(`${meta.label}에 해당하는 정류장이 없습니다.`, true);
+      return;
+    }
+
+    const bounds = new window.kakao.maps.LatLngBounds();
+    items.forEach((item) => {
+      const position = new window.kakao.maps.LatLng(item.lat, item.lng);
+      const marker = new window.kakao.maps.Marker({
+        map,
+        position,
+        title: `${meta.label} ${item.routeName} / ${item.name}`,
+        image: createMarkerImage(meta.color, true),
+      });
+      const infoWindow = new window.kakao.maps.InfoWindow({
+        content: `
+          <div style="display:inline-block;padding:8px 10px;font-size:12px;line-height:1.5;white-space:nowrap;">
+            <strong>${escapeHtml(meta.label)}</strong><br>
+            ${escapeHtml(item.routeName)} / ${escapeHtml(item.name)}<br>
+            탑승객 ${escapeHtml(String(item.ridership))}명<br>
+            노선 내 비중 ${escapeHtml(item.contributionPercent.toFixed(2))}%<br>
+            하위 순위 ${escapeHtml(item.rankPercent.toFixed(1))}%
+          </div>
+        `,
+      });
+      window.kakao.maps.event.addListener(marker, "click", () => {
+        ridershipFocusInfoWindows.forEach((entry) => entry.close());
+        infoWindow.open(map, marker);
+      });
+      ridershipFocusMarkers.push(marker);
+      ridershipFocusInfoWindows.push(infoWindow);
+      bounds.extend(position);
+    });
+
+    if (!bounds.isEmpty()) {
+      map.setBounds(bounds, 40, 40, 40, 40);
+    }
+    setStatus(`${meta.label} ${items.length}개 정류장을 지도에 표시했습니다.`, false);
+  }
+
+  function clearRidershipAnalysisMapFocus() {
+    clearRidershipFocusOverlays();
+    setStatus("탑승객 분석 정류장 강조를 해제했습니다.", false);
+  }
+
+  function buildRidershipSettingsWindowHtml(groupKey, groupLabel, defaults) {
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(groupLabel)} 탑승객 분석</title>
+  <style>
+    :root { color-scheme: light; --bg:#f3f7fc; --card:#ffffff; --line:#d7e1ee; --text:#172033; --muted:#607088; --accent:#1f6feb; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:linear-gradient(180deg,#f9fbff 0%,#eef4fb 100%); color:var(--text); font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif; }
+    .wrap { max-width:840px; margin:0 auto; display:grid; gap:16px; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 12px 28px rgba(16,24,40,.06); }
+    h1 { margin:0 0 8px; font-size:28px; }
+    p { margin:0; color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:14px; }
+    label { display:grid; gap:6px; font-weight:600; }
+    input[type="number"] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
+    .check { display:flex; align-items:center; gap:8px; font-weight:600; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+    button { padding:11px 16px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
+    .primary { border-color:#bcd3ff; background:#eaf2ff; color:var(--accent); font-weight:700; }
+    .note { font-size:12px; color:var(--muted); margin-top:10px; }
+    @media (max-width: 720px) { body { padding:16px; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>${escapeHtml(groupLabel)} 탑승객 분석</h1>
+      <p>탑승객 기준과 중복/연속 조건을 직접 정한 뒤 최적화 분석을 실행합니다.</p>
+    </div>
+    <form id="ridership-analysis-form" class="card">
+      <div class="grid">
+        <label>저기여 하위 기준 (%)
+          <input name="lowContributionPercent" type="number" min="5" max="50" value="${escapeHtml(String(defaults.lowContributionPercent))}">
+        </label>
+        <label>고기여 상위 기준 (%)
+          <input name="highContributionPercent" type="number" min="5" max="50" value="${escapeHtml(String(defaults.highContributionPercent))}">
+        </label>
+        <label>중복 반경 (m)
+          <input name="duplicateRadiusMeters" type="number" min="20" max="100" value="${escapeHtml(String(defaults.duplicateRadiusMeters))}">
+        </label>
+        <label>연속 저수요 기준 (정류장 수)
+          <input name="consecutiveStopCount" type="number" min="2" max="5" value="${escapeHtml(String(defaults.consecutiveStopCount))}">
+        </label>
+      </div>
+      <div class="grid">
+        <label class="check"><input name="useMedianGuard" type="checkbox" ${defaults.useMedianGuard ? "checked" : ""}>노선 중앙값 이하일 때만 저이용으로 인정</label>
+        <label class="check"><input name="discardRequiresDuplicate" type="checkbox" ${defaults.discardRequiresDuplicate ? "checked" : ""}>폐기 검토 후보는 중복 조건 필수</label>
+      </div>
+      <div class="actions">
+        <button class="primary" type="submit">최적화 분석 실행</button>
+        <button type="button" id="close-window-button">닫기</button>
+      </div>
+      <div class="note">현재 그룹: ${escapeHtml(groupLabel)} / 결과는 새 창으로 열리고, 결과 창 버튼으로 메인 지도에 정류장만 강조 표시할 수 있습니다.</div>
+    </form>
+  </div>
+  <script>
+    const form = document.getElementById("ridership-analysis-form");
+    const closeButton = document.getElementById("close-window-button");
+    closeButton.addEventListener("click", () => window.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const options = {
+        lowContributionPercent: Number(data.get("lowContributionPercent")),
+        highContributionPercent: Number(data.get("highContributionPercent")),
+        duplicateRadiusMeters: Number(data.get("duplicateRadiusMeters")),
+        consecutiveStopCount: Number(data.get("consecutiveStopCount")),
+        useMedianGuard: data.get("useMedianGuard") === "on",
+        discardRequiresDuplicate: data.get("discardRequiresDuplicate") === "on",
+      };
+      if (window.opener && window.opener.__wonderLinxRidership) {
+        window.opener.__wonderLinxRidership.run(${JSON.stringify(groupKey)}, options);
+      }
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  function buildRidershipResultsRows(items) {
+    return items.slice(0, 60).map((item) => `
+      <tr>
+        <td>${escapeHtml(item.routeName)}</td>
+        <td>${escapeHtml(item.name)}</td>
+        <td>${escapeHtml(String(item.ridership))}</td>
+        <td>${escapeHtml(item.contributionPercent.toFixed(2))}%</td>
+        <td>${escapeHtml(item.rankPercent.toFixed(1))}%</td>
+        <td>${item.duplicateNearby ? "중복" : "-"}</td>
+        <td>${item.partOfConsecutiveLowRun ? "연속" : "-"}</td>
+      </tr>
+    `).join("");
+  }
+
+  function buildRidershipResultsWindowHtml(report) {
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>탑승객 분석 결과</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f7fb; --card:#ffffff; --line:#d8e1ec; --text:#172033; --muted:#64758d; --warn:#b26a00; --danger:#c24157; --good:#117a55; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%); color:var(--text); font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif; }
+    .wrap { max-width:1280px; margin:0 auto; display:grid; gap:16px; }
+    .hero, .card { padding:18px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 12px 28px rgba(16,24,40,.06); }
+    .hero h1 { margin:0 0 6px; font-size:28px; }
+    .hero p { margin:0; color:var(--muted); }
+    .cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .stat strong { display:block; font-size:30px; }
+    .stat p { margin:4px 0 0; color:var(--muted); }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button { padding:10px 14px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
+    .warn { background:#fff4dd; color:var(--warn); border-color:#efd6a8; }
+    .danger { background:#ffe9ee; color:var(--danger); border-color:#efc0ca; }
+    .good { background:#e8f8f0; color:var(--good); border-color:#bfe5d2; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    thead th { background:#f8fbff; position:sticky; top:0; }
+    .table-wrap { max-height:360px; overflow:auto; border:1px solid var(--line); border-radius:14px; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    h2 { margin:0 0 10px; font-size:18px; }
+    .meta { color:var(--muted); font-size:12px; }
+    @media (max-width: 900px) { body { padding:16px; } .cards, .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>탑승객 분석 결과</h1>
+      <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 정류장 ${escapeHtml(String(report.summary.analyzedStopCount))}개 분석</p>
+      <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
+    </div>
+    <div class="cards">
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.lowUsageLowContributionCount))}</strong><p>저이용 저기여 후보</p></div>
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.discardCandidateCount))}</strong><p>폐기 검토 후보</p></div>
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.highUsageHighContributionCount))}</strong><p>고이용 고기여 정류장</p></div>
+    </div>
+    <div class="card">
+      <h2>지도 보기</h2>
+      <div class="actions">
+        <button class="warn" type="button" data-map-category="low">저이용 저기여 보기</button>
+        <button class="danger" type="button" data-map-category="discard">폐기 검토 후보 보기</button>
+        <button class="good" type="button" data-map-category="high">고이용 고기여 보기</button>
+        <button type="button" id="clear-map-focus-button">지도 강조 해제</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2>저이용 저기여</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>노선</th><th>정류장</th><th>탑승객</th><th>비중</th><th>하위순위</th><th>중복</th><th>연속</th></tr></thead>
+            <tbody>${buildRidershipResultsRows(report.lowUsageLowContribution) || "<tr><td colspan=\"7\">없음</td></tr>"}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>폐기 검토 후보</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>노선</th><th>정류장</th><th>탑승객</th><th>비중</th><th>하위순위</th><th>중복</th><th>연속</th></tr></thead>
+            <tbody>${buildRidershipResultsRows(report.discardCandidates) || "<tr><td colspan=\"7\">없음</td></tr>"}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>고이용 고기여</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>노선</th><th>정류장</th><th>탑승객</th><th>비중</th><th>하위순위</th><th>중복</th><th>연속</th></tr></thead>
+            <tbody>${buildRidershipResultsRows(report.highUsageHighContribution) || "<tr><td colspan=\"7\">없음</td></tr>"}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.querySelectorAll("[data-map-category]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (window.opener && window.opener.__wonderLinxRidership) {
+          window.opener.__wonderLinxRidership.showMap(${JSON.stringify(report.id)}, button.dataset.mapCategory);
+        }
+      });
+    });
+    document.getElementById("clear-map-focus-button").addEventListener("click", () => {
+      if (window.opener && window.opener.__wonderLinxRidership) {
+        window.opener.__wonderLinxRidership.clearMap();
+      }
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  function openRidershipAnalysisSettingsWindow(groupKey) {
+    const defaults = normalizeRidershipAnalysisOptions();
+    const groupLabel = groupKey === "merged" ? "개선 노선 리스트" : "기존 노선 리스트";
+    const settingsWindow = window.open("", `ridership-analysis-settings-${groupKey}`, "width=920,height=760,resizable=yes,scrollbars=yes");
+    if (!settingsWindow) {
+      setStatus("팝업이 차단되었습니다. 탑승객 분석 설정 창을 허용해 주세요.", true);
+      return;
+    }
+    settingsWindow.document.open();
+    settingsWindow.document.write(buildRidershipSettingsWindowHtml(groupKey, groupLabel, defaults));
+    settingsWindow.document.close();
+    settingsWindow.focus();
+  }
+
+  function openRidershipResultsWindow(report) {
+    const resultsWindow = window.open("", "ridership-analysis-results", "width=1520,height=980,resizable=yes,scrollbars=yes");
+    if (!resultsWindow) {
+      setStatus("팝업이 차단되었습니다. 탑승객 분석 결과 창을 허용해 주세요.", true);
+      return false;
+    }
+    ridershipResultsWindowRef = resultsWindow;
+    resultsWindow.document.open();
+    resultsWindow.document.write(buildRidershipResultsWindowHtml(report));
+    resultsWindow.document.close();
+    resultsWindow.focus();
+    return true;
+  }
+
+  function runRidershipGroupAnalysis(groupKey, options = {}) {
+    const routeNames = getRouteNamesByGroup(groupKey);
+    if (!routeNames.length) {
+      setStatus("탑승객 분석을 할 노선이 없습니다.", true);
+      return null;
+    }
+    const report = buildRidershipAnalysisReport(routeNames, options);
+    latestRidershipAnalysisReport = report;
+    openRidershipResultsWindow(report);
+    return report;
   }
 
   function estimateRouteDurationSeconds(distanceMeters) {
@@ -4879,11 +5444,19 @@
     analysisInfoWindows = [];
   }
 
+  function clearRidershipFocusOverlays() {
+    ridershipFocusMarkers.forEach((item) => item.setMap(null));
+    ridershipFocusInfoWindows.forEach((item) => item.close());
+    ridershipFocusMarkers = [];
+    ridershipFocusInfoWindows = [];
+  }
+
   function stopAnalysisView() {
     latestAnalysisReport = null;
     analysisActive = false;
     activeAnalysisGroup = null;
     clearAnalysisOverlays();
+    clearRidershipFocusOverlays();
     closeAnalysisModal();
     updateAnalyzeButtonState();
     refreshUI();
@@ -4970,12 +5543,16 @@
 
   function buildLocalOptimizationActions(localReport) {
     const actions = [];
+    const ridershipAnalysis = buildRidershipCandidateAnalysis(localReport.routeNames);
 
     if (localReport.duplicatePointCount > 0) {
       actions.push(`반경 30m 내 중복 정류장 ${localReport.duplicatePointCount}건을 우선 검토하세요.`);
     }
     if (localReport.overlappingSegmentCount > 0) {
       actions.push(`노선 간 겹치는 경로 구간 ${localReport.overlappingSegmentCount}건을 통합 가능 구간으로 검토하세요.`);
+    }
+    if (ridershipAnalysis.candidateCount > 0) {
+      actions.push(`탑승객 수 기준 저이용 후보 ${ridershipAnalysis.candidateCount}건을 우선 검토하세요.`);
     }
     if (!actions.length) {
       actions.push("현재 기준에서는 중복 정류장이나 중복 경로 구간이 뚜렷하지 않습니다.");
@@ -4998,6 +5575,47 @@
     }
 
     return risks;
+  }
+
+  function buildRidershipCandidateCardHtml(routeNames = getRoutes()) {
+    const ridershipAnalysis = buildRidershipCandidateAnalysis(routeNames);
+    const thresholdDescription = `탑승객 ${ridershipAnalysis.thresholds.maxRidership}명 이하 또는 예상 인구 대비 이용률 ${Math.round(
+      ridershipAnalysis.thresholds.maxUtilizationRate * 100
+    )}% 이하`;
+
+    const candidateItems = ridershipAnalysis.candidates
+      .map((item) => {
+        const utilizationPercent = formatPercent(item.utilizationRate);
+        return `
+          <li>
+            <strong>${escapeHtml(item.routeName)} / ${escapeHtml(item.name)}</strong><br>
+            탑승객 ${escapeHtml(String(item.ridership))}명, 예상인구 ${escapeHtml(String(item.estimatedPopulation))}명,
+            이용률 ${escapeHtml(utilizationPercent)} (${escapeHtml(String(item.boardingPerHundredResidents.toFixed(1)))}명 / 100명)
+            <div class="analysis-inline-meta">${escapeHtml(item.basisText)}</div>
+          </li>
+        `;
+      })
+      .join("");
+
+    const candidateBody = candidateItems
+      || (ridershipAnalysis.ridershipPointCount === 0
+        ? "<li>탑승객 수가 입력된 정류장이 없습니다.</li>"
+        : "<li>조건에 맞는 저이용 후보가 없습니다.</li>");
+
+    return `
+      <div class="analysis-list-card">
+        <h3>저이용 정류장 후보</h3>
+        <p class="analysis-inline-meta">
+          대상 ${escapeHtml(String(ridershipAnalysis.analyzedPointCount))}개 중 탑승객 입력 ${escapeHtml(
+            String(ridershipAnalysis.ridershipPointCount)
+          )}개,
+          누락 ${escapeHtml(String(ridershipAnalysis.missingRidershipCount))}개,
+          후보 ${escapeHtml(String(ridershipAnalysis.candidateCount))}개.
+          기준: ${escapeHtml(thresholdDescription)}
+        </p>
+        <ul>${candidateBody}</ul>
+      </div>
+    `;
   }
 
   function duplicateGroupLabel(item) {
@@ -5104,11 +5722,16 @@
           <span>중복 경로 구간</span>
           <strong>${escapeHtml(String(report.local.overlappingSegmentCount))}건</strong>
         </div>
+        <div class="analysis-stat">
+          <span>저이용 후보</span>
+          <strong>${escapeHtml(String(buildRidershipCandidateAnalysis(report.local.routeNames).candidateCount))}건</strong>
+        </div>
       </div>
       <div class="analysis-list-card">
         <h3>GPT 요약</h3>
         <p>${escapeHtml(gpt.summary || report.message || "로컬 분석 결과만 생성했습니다.")}</p>
       </div>
+      ${buildRidershipCandidateCardHtml(report.local.routeNames)}
       <div class="analysis-list-card">
         <h3>중복 정류장 목록</h3>
         <ul>${duplicateItems || "<li>중복 정류장이 없습니다.</li>"}</ul>
@@ -5299,7 +5922,8 @@
           <li><strong>숨김/보기/삭제:</strong> 각 구역별로 지도 표시를 끄거나, 해당 위치로 이동하거나, 구역을 지울 수 있습니다.</li>
           <li><strong>구역 이동/수정:</strong> 이동 모드에서는 구역 자체를 드래그해 옮길 수 있고, 수정 모드에서는 꼭짓점을 드래그하거나 우클릭으로 포인트 추가/삭제가 가능합니다.</li>
           <li><strong>패널 열기/닫기:</strong> 관찰 구역 패널도 기본은 접혀 있으며, 텍스트형 열기/닫기로 펼칩니다.</li>
-          <li><strong>분석 시작:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
+          <li><strong>정류장 분석:</strong> 노선 중복, 겹침 구간, 운영상 주의 지점을 분석합니다.</li>
+          <li><strong>저이용 정류장 후보:</strong> 탑승객 수와 100m 예상 인구수를 함께 보고, 이용률이 낮은 정류장을 분석 모달에서 확인합니다.</li>
           <li><strong>Esc:</strong> 경로 편집, 정류장 추가, 일부 선택 상태를 빠르게 취소합니다.</li>
           <li><strong>지도 빈 공간 클릭:</strong> 현재 선택한 노선, 정류장, 경로 선택을 해제합니다.</li>
         </ul>
@@ -5395,11 +6019,16 @@
           <span>중복 경로 구간</span>
           <strong>${escapeHtml(String(report.local.overlappingSegmentCount))}건</strong>
         </div>
+        <div class="analysis-stat">
+          <span>저이용 후보</span>
+          <strong>${escapeHtml(String(buildRidershipCandidateAnalysis(report.local.routeNames).candidateCount))}건</strong>
+        </div>
       </div>
       <div class="analysis-list-card">
         <h3>분석 요약</h3>
         <p>${escapeHtml(report.message || "로컬 분석 결과를 생성했습니다.")}</p>
       </div>
+      ${buildRidershipCandidateCardHtml(report.local.routeNames)}
       <div class="analysis-list-card">
         <h3>중복 정류장 목록</h3>
         <ul>${duplicateItems || "<li>중복 정류장이 없습니다.</li>"}</ul>
@@ -9580,6 +10209,36 @@
     return rows.filter((row) => row.some((cell) => String(cell || "").trim()));
   }
 
+  function scoreDecodedCsvText(text) {
+    const value = String(text || "");
+    const replacementPenalty = (value.match(/\uFFFD/g) || []).length * 10;
+    const mojibakePenalty = (value.match(/占/g) || []).length * 6;
+    const hangulScore = (value.match(/[가-힣]/g) || []).length;
+    const headerBonus = value.toLowerCase().includes("stop_key") && value.toLowerCase().includes("boarding_count") ? 20 : 0;
+    return hangulScore + headerBonus - replacementPenalty - mojibakePenalty;
+  }
+
+  async function readRidershipCsvText(file) {
+    const buffer = await file.arrayBuffer();
+    const utf8Text = new TextDecoder("utf-8").decode(buffer);
+
+    let bestText = utf8Text;
+    let bestScore = scoreDecodedCsvText(utf8Text);
+
+    try {
+      const eucKrText = new TextDecoder("euc-kr").decode(buffer);
+      const eucKrScore = scoreDecodedCsvText(eucKrText);
+      if (eucKrScore > bestScore) {
+        bestText = eucKrText;
+        bestScore = eucKrScore;
+      }
+    } catch (error) {
+      console.warn("EUC-KR decode is not available in this browser.", error);
+    }
+
+    return bestText;
+  }
+
   function buildRidershipCsv(points) {
     const rows = [
       ["stop_key", "route_name", "stop_name", "lat", "lng", "boarding_count"],
@@ -9735,7 +10394,7 @@
       return;
     }
 
-    const records = parseRidershipCsv(await file.text());
+    const records = parseRidershipCsv(await readRidershipCsvText(file));
     if (!records.length) {
       throw new Error("승객 CSV에 반영할 정류장 행이 없습니다.");
     }
@@ -10179,6 +10838,26 @@
     document.addEventListener("mouseup", finishObservationAreaDrag);
     window.addEventListener("keydown", handleKeydown);
   }
+
+  window.__wonderLinxRidership = {
+    run(groupKey, options) {
+      try {
+        runRidershipGroupAnalysis(groupKey, options);
+      } catch (error) {
+        setStatus(error.message || "탑승객 분석 실행 중 오류가 발생했습니다.", true);
+      }
+    },
+    showMap(reportId, categoryKey) {
+      if (!latestRidershipAnalysisReport || latestRidershipAnalysisReport.id !== reportId) {
+        setStatus("표시할 탑승객 분석 결과를 찾지 못했습니다. 다시 분석을 실행해 주세요.", true);
+        return;
+      }
+      showRidershipAnalysisCategoryOnMap(latestRidershipAnalysisReport, categoryKey);
+    },
+    clearMap() {
+      clearRidershipAnalysisMapFocus();
+    },
+  };
 
   async function bootstrap() {
     try {
