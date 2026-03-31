@@ -151,6 +151,7 @@
   let pathPreviewPolyline = null;
   let pathPreviewDirectionOverlays = [];
   let pathContextMenuOverlay = null;
+  let pointListContextMenuEl = null;
   let draftMarker = null;
   let analysisMarkers = [];
   let analysisPolylines = [];
@@ -982,6 +983,8 @@
   function updatePointModeButtons() {
     addPointButtonEl.classList.toggle("is-active", addPointMode);
     editPointButtonEl.classList.toggle("is-active", Boolean(relocatePointId));
+    editPointButtonEl.hidden = true;
+    editPointButtonEl.setAttribute("aria-hidden", "true");
     addPointButtonEl.textContent = addPointMode
       ? "\uC815\uB958\uC7A5 \uCD94\uAC00 \uC885\uB8CC"
       : "\uC815\uB958\uC7A5 \uCD94\uAC00";
@@ -6782,6 +6785,13 @@
     }
   }
 
+  function hidePointListContextMenu() {
+    if (pointListContextMenuEl) {
+      pointListContextMenuEl.remove();
+      pointListContextMenuEl = null;
+    }
+  }
+
   function clearDraftMarker() {
     if (draftMarker) {
       draftMarker.setMap(null);
@@ -8320,6 +8330,28 @@
           : `탑승객 ${formatRidershipValue(point.ridership)}명`;
       button.appendChild(ridershipMeta);
       button.addEventListener("click", () => selectPointById(point.id));
+      button.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        selectedPointId = point.id;
+        refreshUI();
+        showPointListContextMenu(event.clientX, event.clientY, [
+          {
+            label: "편집",
+            onClick: () => {
+              startPointEditForPoint(point);
+            },
+          },
+          {
+            label: "삭제",
+            danger: true,
+            onClick: () => {
+              selectedPointId = point.id;
+              handleDeletePoint();
+            },
+          },
+        ]);
+      });
       button.addEventListener("dragstart", (event) => {
         draggedRoutePointId = point.id;
         button.classList.add("is-dragging");
@@ -8779,6 +8811,46 @@
     });
   }
 
+  function showPointListContextMenu(clientX, clientY, actions) {
+    hidePointListContextMenu();
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "point-list-context-menu";
+    wrapper.style.left = `${clientX}px`;
+    wrapper.style.top = `${clientY}px`;
+
+    const stopMenuEvent = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    ["mousedown", "mouseup", "click", "dblclick", "contextmenu"].forEach((eventName) => {
+      wrapper.addEventListener(eventName, stopMenuEvent);
+    });
+
+    actions.forEach((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `point-list-context-button${action.danger ? " danger" : ""}`;
+      button.textContent = action.label;
+      button.addEventListener("click", (event) => {
+        stopMenuEvent(event);
+        hidePointListContextMenu();
+        action.onClick();
+      });
+      wrapper.appendChild(button);
+    });
+
+    document.body.appendChild(wrapper);
+    pointListContextMenuEl = wrapper;
+
+    const rect = wrapper.getBoundingClientRect();
+    const nextLeft = Math.min(clientX, window.innerWidth - rect.width - 12);
+    const nextTop = Math.min(clientY, window.innerHeight - rect.height - 12);
+    wrapper.style.left = `${Math.max(12, nextLeft)}px`;
+    wrapper.style.top = `${Math.max(12, nextTop)}px`;
+  }
+
   function syncPathPreview() {
     clearPathEditorOverlay();
     if (!mapReady || workingPathCoordinates.length === 0) {
@@ -9148,21 +9220,27 @@
     }
 
     const populationEstimate = estimatePointPopulation(point, 100);
+    const hiddenExtendedDataNames = new Set([
+      "routegroup",
+      "routeorder",
+      "filename",
+      "createdorder",
+      "ridership",
+      "boardingcount",
+      "passengercount",
+      "탑승객 수",
+      "탑승객수",
+    ]);
     openPointDetailsSection();
     pointDetailsEl.classList.remove("empty");
     const rows = [
       { label: "노선", value: point.routeName },
-      { label: "구분", value: point.source === "custom" ? "직접 추가" : "KML 불러오기" },
       { label: "이름", value: point.name },
-      { label: "파일", value: point.fileName },
       { label: "위도", value: String(point.lat) },
       { label: "경도", value: String(point.lng) },
-      { label: "고도", value: point.altitude == null ? "" : String(point.altitude) },
-      { label: "원본 좌표", value: point.rawCoordinates },
       { label: "설명", value: point.description },
       { label: "주소", value: point.address },
       { label: "전화번호", value: point.phoneNumber },
-      { label: "스타일", value: point.styleUrl },
       { label: "탑승객 수", value: normalizeRidershipValue(point.ridership) == null ? "" : `${formatRidershipValue(point.ridership)}명` },
       { label: "100m 예상 가구수", value: `${populationEstimate.estimatedHouseholds}가구` },
       { label: "100m 예상 인구수", value: `${populationEstimate.estimatedPopulation}명` },
@@ -9175,12 +9253,13 @@
     const extendedRows = (point.extendedData || [])
       .filter((item) => {
         if (!isRenamedUploadedPoint) {
-          return true;
+          const itemName = String(item?.name || "").trim().toLowerCase();
+          return !hiddenExtendedDataNames.has(itemName);
         }
         const itemName = String(item?.name || "").trim().toLowerCase();
         const itemValue = String(item?.value || "").trim();
         const looksLikeNameField = itemName === "name" || itemName === "이름";
-        return !(looksLikeNameField && itemValue === originalPointName);
+        return !hiddenExtendedDataNames.has(itemName) && !(looksLikeNameField && itemValue === originalPointName);
       })
       .map(
         (item) => `
@@ -9403,6 +9482,13 @@
       return;
     }
 
+    startPointEditForPoint(point);
+  }
+
+  function startPointEditForPoint(point) {
+    if (!point) {
+      return;
+    }
     openPointFormSection();
     stopObservationAreaDrawMode();
     setAddPointMode(false);
@@ -9448,6 +9534,7 @@
     const lat = Number(mouseEvent.latLng.getLat().toFixed(7));
     const lng = Number(mouseEvent.latLng.getLng().toFixed(7));
     hidePathContextMenu();
+    hidePointListContextMenu();
     infoWindows.forEach((item) => item.close());
     analysisInfoWindows.forEach((item) => item.close());
     designedRouteInfoWindows.forEach((item) => item.close());
@@ -10543,6 +10630,8 @@
       return;
     }
 
+    hidePointListContextMenu();
+
     if (!analysisModalEl.classList.contains("is-hidden")) {
       closeAnalysisModal();
       return;
@@ -10835,6 +10924,12 @@
       }
     });
     helpButtonEl?.addEventListener("click", openHelpWindow);
+    document.addEventListener("click", hidePointListContextMenu);
+    document.addEventListener("contextmenu", (event) => {
+      if (!event.target.closest(".point-item") && !event.target.closest(".point-list-context-menu")) {
+        hidePointListContextMenu();
+      }
+    });
     document.addEventListener("mouseup", finishObservationAreaDrag);
     window.addEventListener("keydown", handleKeydown);
   }
