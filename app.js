@@ -17,6 +17,7 @@
   const AUTO_SAVE_INTERVAL_MS = 10 * 60 * 1000;
   const UNDO_HISTORY_LIMIT = 10;
   const OPTIMIZATION_FEATURE_ENABLED = false;
+  const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 5;
 
   const config = window.KAKAO_MAP_CONFIG || {};
   const dropzone = document.getElementById("dropzone");
@@ -137,6 +138,7 @@
   };
   const routeListAnalyzeButtons = {};
   const routeListRidershipButtons = {};
+  const routeListTimeSimulationButtons = {};
   let pointListSearchQuery = "";
   let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
@@ -173,6 +175,7 @@
   let latestAnalysisReport = null;
   let latestOptimizationPlan = null;
   let latestRidershipAnalysisReport = null;
+  let latestRouteTimeSimulationReport = null;
   let analysisActive = false;
   let observationAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
   let observationAreaDrawMode = false;
@@ -202,6 +205,8 @@
   let undoHistory = [];
   let isRestoringUndo = false;
   let ridershipResultsWindowRef = null;
+  let routeTimeResultsWindowRef = null;
+  let routeTimeSettingsWindowRef = null;
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -871,6 +876,21 @@
     }
 
     routeListRidershipButtons[groupKey] = ridershipButtonEl;
+
+    let timeSimulationButtonEl = titleRowEl.querySelector(`.list-time-simulation-button[data-group="${groupKey}"]`);
+    if (!timeSimulationButtonEl) {
+      timeSimulationButtonEl = document.createElement("button");
+      timeSimulationButtonEl.type = "button";
+      timeSimulationButtonEl.className = "secondary-button list-time-simulation-button";
+      timeSimulationButtonEl.dataset.group = groupKey;
+      timeSimulationButtonEl.textContent = "운행시간 시뮬레이션";
+      timeSimulationButtonEl.addEventListener("click", () => {
+        openRouteTimeSimulationSettingsWindow(groupKey);
+      });
+      titleRowEl.appendChild(timeSimulationButtonEl);
+    }
+
+    routeListTimeSimulationButtons[groupKey] = timeSimulationButtonEl;
     updateAnalyzeButtonState();
   }
 
@@ -1785,6 +1805,13 @@
     }
 
     return getAllPoints().filter((point) => point.routeName === routeName).sort(comparePointsByOrder);
+  }
+
+  function getPathsInRoute(routeName) {
+    if (!routeName) {
+      return [];
+    }
+    return getAllPaths().filter((pathItem) => pathItem.routeName === routeName);
   }
 
   function isMergedRouteName(routeName) {
@@ -2967,6 +2994,630 @@
     const report = buildRidershipAnalysisReport(routeNames, options);
     latestRidershipAnalysisReport = report;
     openRidershipResultsWindow(report);
+    return report;
+  }
+
+  function formatDateTimeLocalValue(date) {
+    const current = date instanceof Date ? date : new Date(date);
+    const year = current.getFullYear();
+    const month = String(current.getMonth() + 1).padStart(2, "0");
+    const day = String(current.getDate()).padStart(2, "0");
+    const hour = String(current.getHours()).padStart(2, "0");
+    const minute = String(current.getMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day}T${hour}:${minute}`;
+  }
+
+  function formatKakaoDepartureTimeValue(date) {
+    const current = date instanceof Date ? date : new Date(date);
+    const year = current.getFullYear();
+    const month = String(current.getMonth() + 1).padStart(2, "0");
+    const day = String(current.getDate()).padStart(2, "0");
+    const hour = String(current.getHours()).padStart(2, "0");
+    const minute = String(current.getMinutes()).padStart(2, "0");
+    return `${year}${month}${day}${hour}${minute}`;
+  }
+
+  function formatSimulationDurationLabel(seconds) {
+    const normalized = Math.max(0, Math.round(Number(seconds || 0)));
+    const hours = Math.floor(normalized / 3600);
+    const minutes = Math.floor((normalized % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}시간 ${minutes}분`;
+    }
+    return `${Math.max(0, minutes)}분`;
+  }
+
+  function normalizeRouteTimeSimulationOptions(value = {}) {
+    const current = value && typeof value === "object" ? value : {};
+    const startHour = Number.isFinite(Number(current.startHour))
+      ? Math.min(23, Math.max(0, Math.round(Number(current.startHour))))
+      : 6;
+    const endHour = Number.isFinite(Number(current.endHour))
+      ? Math.min(23, Math.max(0, Math.round(Number(current.endHour))))
+      : 22;
+    const intervalMinutes = Number.isFinite(Number(current.intervalMinutes))
+      ? Math.min(240, Math.max(15, Math.round(Number(current.intervalMinutes))))
+      : 60;
+    const stopDwellSeconds = Number.isFinite(Number(current.stopDwellSeconds))
+      ? Math.min(1800, Math.max(0, Math.round(Number(current.stopDwellSeconds))))
+      : 0;
+
+    return {
+      startHour,
+      endHour: Math.max(startHour, endHour),
+      intervalMinutes,
+      stopDwellSeconds,
+      carTypeLabel: "버스",
+    };
+  }
+
+  function getRouteSimulationCandidates(groupKey) {
+    return getRouteNamesByGroup(groupKey)
+      .map((routeName) => {
+        const points = getPointsInRoute(routeName);
+        return {
+          routeName,
+          stopCount: points.length,
+          chunkCount: points.length >= 2
+            ? Math.max(1, Math.ceil((points.length - 1) / (ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1)))
+            : 0,
+          disabled: points.length < 2,
+        };
+      });
+  }
+
+  function buildRouteTimeSimulationSettingsWindowHtml(groupKey, groupLabel, routeItems, defaults) {
+    const routeItemsHtml = routeItems.map((item) => `
+      <label class="route-item${item.disabled ? " is-disabled" : ""}">
+        <input name="routeNames" type="checkbox" value="${escapeHtml(item.routeName)}" ${item.disabled ? "disabled" : "checked"}>
+        <span>
+          <strong>${escapeHtml(item.routeName)}</strong>
+          <small>정류장 ${escapeHtml(String(item.stopCount))}개 / 예상 청크 ${escapeHtml(String(item.chunkCount))}개${item.disabled ? " / 시뮬레이션 불가" : ""}</small>
+        </span>
+      </label>
+    `).join("");
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(groupLabel)} 운행시간 시뮬레이션</title>
+  <style>
+    :root { color-scheme: light; --bg:#f3f7fc; --card:#ffffff; --line:#d7e1ee; --text:#172033; --muted:#607088; --accent:#1f6feb; --soft:#eef4ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:linear-gradient(180deg,#f9fbff 0%,#eef4fb 100%); color:var(--text); font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif; }
+    .wrap { max-width:960px; margin:0 auto; display:grid; gap:16px; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 12px 28px rgba(16,24,40,.06); }
+    h1 { margin:0 0 8px; font-size:28px; }
+    h2 { margin:0 0 12px; font-size:18px; }
+    p { margin:0; color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    label.field { display:grid; gap:6px; font-weight:600; }
+    input[type="number"] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
+    .readonly { padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#f8fbff; color:var(--muted); }
+    .route-actions { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .route-items { display:grid; gap:10px; max-height:360px; overflow:auto; padding-right:4px; }
+    .route-item { display:flex; align-items:flex-start; gap:10px; padding:12px 14px; border:1px solid var(--line); border-radius:14px; background:#fcfdff; }
+    .route-item strong { display:block; }
+    .route-item small { color:var(--muted); }
+    .route-item.is-disabled { opacity:.55; background:#f5f7fa; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+    button { padding:11px 16px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
+    .primary { border-color:#bcd3ff; background:#eaf2ff; color:var(--accent); font-weight:700; }
+    .note { font-size:12px; color:var(--muted); margin-top:10px; }
+    .log-box { margin-top:16px; border:1px solid var(--line); border-radius:14px; background:#f8fbff; padding:12px; min-height:120px; max-height:220px; overflow:auto; font:12px/1.5 Consolas,"Malgun Gothic",monospace; white-space:pre-wrap; }
+    .log-line { color:var(--text); }
+    .log-line.error { color:#b42318; }
+    code { background:var(--soft); padding:2px 6px; border-radius:8px; }
+    @media (max-width: 720px) { body { padding:16px; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>${escapeHtml(groupLabel)} 운행시간 시뮬레이션</h1>
+      <p>선택한 노선을 정류장 기준 청크로 나눠 카카오 길찾기 API의 미래 운행 정보로 시간대별 예상 주행시간을 계산합니다.</p>
+    </div>
+    <form id="route-time-simulation-form" class="card">
+      <div class="card" style="padding:0; border:none; box-shadow:none; background:transparent;">
+        <h2>노선 선택</h2>
+        <div class="route-actions">
+          <button type="button" id="select-all-routes-button">전체선택</button>
+          <button type="button" id="clear-all-routes-button">전체해제</button>
+        </div>
+        <div class="route-items">${routeItemsHtml || "<p>선택 가능한 노선이 없습니다.</p>"}</div>
+      </div>
+      <div class="grid" style="margin-top:16px;">
+        <label class="field">정류장당 기본 정차시간(초)
+          <input name="stopDwellSeconds" type="number" min="0" max="1800" step="1" value="${escapeHtml(String(defaults.stopDwellSeconds))}">
+        </label>
+        <label class="field">차종
+          <div class="readonly">버스(고정)</div>
+        </label>
+      </div>
+      <div class="grid" style="margin-top:14px;">
+        <label class="field">시작 시각(시)
+          <input name="startHour" type="number" min="0" max="23" step="1" value="${escapeHtml(String(defaults.startHour))}">
+        </label>
+        <label class="field">종료 시각(시)
+          <input name="endHour" type="number" min="0" max="23" step="1" value="${escapeHtml(String(defaults.endHour))}">
+        </label>
+      </div>
+      <div class="grid" style="margin-top:14px;">
+        <label class="field">시뮬레이션 간격(분)
+          <input name="intervalMinutes" type="number" min="15" max="240" step="15" value="${escapeHtml(String(defaults.intervalMinutes))}">
+        </label>
+      </div>
+      <div class="actions">
+        <button class="primary" type="submit">시뮬레이션 실행</button>
+        <button type="button" id="close-window-button">닫기</button>
+      </div>
+      <div class="note">기본 청크 크기는 정류장 5개이며, 긴 노선은 마지막 정류장을 겹치게 이어 붙여 계산합니다. 결과는 표와 엑셀용 CSV 다운로드로 제공합니다.</div>
+      <div id="route-time-log" class="log-box"></div>
+    </form>
+  </div>
+  <script>
+    const form = document.getElementById("route-time-simulation-form");
+    const closeButton = document.getElementById("close-window-button");
+    const selectAllButton = document.getElementById("select-all-routes-button");
+    const clearAllButton = document.getElementById("clear-all-routes-button");
+    const routeCheckboxes = Array.from(document.querySelectorAll('input[name="routeNames"]'));
+    const logBox = document.getElementById("route-time-log");
+
+    function appendLog(message, isError = false, replace = false) {
+      if (!logBox) {
+        return;
+      }
+      if (replace) {
+        logBox.innerHTML = "";
+      }
+      const line = document.createElement("div");
+      line.className = "log-line" + (isError ? " error" : "");
+      line.textContent = "[" + new Date().toLocaleTimeString("ko-KR", { hour12: false }) + "] " + message;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    window.__setRouteTimeLog = appendLog;
+    appendLog("운행시간 시뮬레이션 설정을 준비했습니다.", false, true);
+
+    function setRoutesChecked(checked) {
+      routeCheckboxes.forEach((checkbox) => {
+        if (!checkbox.disabled) {
+          checkbox.checked = checked;
+        }
+      });
+    }
+
+    selectAllButton?.addEventListener("click", () => setRoutesChecked(true));
+    clearAllButton?.addEventListener("click", () => setRoutesChecked(false));
+    closeButton?.addEventListener("click", () => window.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const selectedRouteNames = routeCheckboxes
+        .filter((checkbox) => checkbox.checked && !checkbox.disabled)
+        .map((checkbox) => checkbox.value);
+      const options = {
+        selectedRouteNames,
+        stopDwellSeconds: Number(data.get("stopDwellSeconds") || 0),
+        startHour: Number(data.get("startHour")),
+        endHour: Number(data.get("endHour")),
+        intervalMinutes: Number(data.get("intervalMinutes") || 60),
+      };
+      appendLog("시뮬레이션 실행을 요청했습니다.");
+      if (window.opener && window.opener.__wonderLinxRouteTime) {
+        window.opener.__wonderLinxRouteTime.run(${JSON.stringify(groupKey)}, options);
+      }
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  function buildSimulationDepartureSlots(options) {
+    const slots = [];
+    const base = new Date();
+    base.setSeconds(0, 0);
+    let current = new Date(base.getFullYear(), base.getMonth(), base.getDate(), options.startHour, 0, 0, 0);
+    let end = new Date(base.getFullYear(), base.getMonth(), base.getDate(), options.endHour, 0, 0, 0);
+    if (end < current) {
+      end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    }
+    if (current <= base) {
+      current = new Date(current.getTime() + 24 * 60 * 60 * 1000);
+      end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    }
+    while (current <= end) {
+      slots.push({
+        label: `${String(current.getHours()).padStart(2, "0")}:${String(current.getMinutes()).padStart(2, "0")}`,
+        departureTime: formatKakaoDepartureTimeValue(current),
+      });
+      current = new Date(current.getTime() + options.intervalMinutes * 60 * 1000);
+    }
+    return slots;
+  }
+
+  function buildRouteSimulationAnchorCoordinates(routeName) {
+    const coordinates = [];
+    getPathsInRoute(routeName).forEach((pathItem) => {
+      appendUniqueCoordinates(coordinates, Array.isArray(pathItem.coordinates) ? pathItem.coordinates : []);
+    });
+    return coordinates;
+  }
+
+  function snapPointToRoutePathCoordinate(routeName, point) {
+    const anchorCoordinates = buildRouteSimulationAnchorCoordinates(routeName);
+    if (!anchorCoordinates.length) {
+      return {
+        ...point,
+        snappedToPath: false,
+        snapDistanceMeters: null,
+        pathIndex: -1,
+        candidateCoordinates: [{ lat: point.lat, lng: point.lng }],
+      };
+    }
+
+    const nearest = findNearestCoordinateIndex(anchorCoordinates, point);
+    if (nearest.index < 0 || !Number.isFinite(nearest.distanceMeters)) {
+      return {
+        ...point,
+        snappedToPath: false,
+        snapDistanceMeters: null,
+        pathIndex: -1,
+        candidateCoordinates: [{ lat: point.lat, lng: point.lng }],
+      };
+    }
+
+    const coordinate = anchorCoordinates[nearest.index];
+    const candidateCoordinates = [];
+    for (let offset = 0; offset <= 10; offset += 1) {
+      const candidateIndexes = offset === 0 ? [nearest.index] : [nearest.index + offset, nearest.index - offset];
+      candidateIndexes.forEach((candidateIndex) => {
+        const candidate = anchorCoordinates[candidateIndex];
+        if (!candidate) {
+          return;
+        }
+        const exists = candidateCoordinates.some((item) => (
+          Math.abs(item.lat - Number(candidate.lat)) < 0.000001
+          && Math.abs(item.lng - Number(candidate.lng)) < 0.000001
+        ));
+        if (!exists) {
+          candidateCoordinates.push({
+            lat: Number(candidate.lat),
+            lng: Number(candidate.lng),
+          });
+        }
+      });
+      if (candidateCoordinates.length >= 12) {
+        break;
+      }
+    }
+    if (!candidateCoordinates.length) {
+      candidateCoordinates.push({ lat: point.lat, lng: point.lng });
+    }
+    return {
+      ...point,
+      lat: Number(coordinate.lat),
+      lng: Number(coordinate.lng),
+      snappedToPath: nearest.distanceMeters <= 120,
+      snapDistanceMeters: Number(nearest.distanceMeters.toFixed(1)),
+      originalLat: point.lat,
+      originalLng: point.lng,
+      pathIndex: nearest.index,
+      candidateCoordinates,
+    };
+  }
+
+  function buildRouteTimeSimulationSegments(routeName) {
+    const points = getPointsInRoute(routeName);
+    const normalizedPoints = [];
+    points.forEach((point) => {
+      const lat = Number(point.lat);
+      const lng = Number(point.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return;
+      }
+      const previous = normalizedPoints[normalizedPoints.length - 1];
+      if (previous && Math.abs(previous.lat - lat) < 0.000001 && Math.abs(previous.lng - lng) < 0.000001) {
+        return;
+      }
+      normalizedPoints.push({
+        name: point.name,
+        lat,
+        lng,
+      });
+    });
+
+    if (normalizedPoints.length < 2) {
+      throw new Error(`노선 "${routeName}" 은(는) 시뮬레이션할 정류장이 부족합니다.`);
+    }
+
+    const snappedPoints = normalizedPoints.map((point) => snapPointToRoutePathCoordinate(routeName, point));
+
+    const segments = [];
+    const step = Math.max(1, ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1);
+    for (let startIndex = 0; startIndex < snappedPoints.length - 1; startIndex += step) {
+      const segmentPoints = snappedPoints.slice(startIndex, startIndex + ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT);
+      if (segmentPoints.length >= 2) {
+        segments.push(segmentPoints);
+      }
+    }
+    if (!segments.length) {
+      segments.push(snappedPoints);
+    }
+    return {
+      routeName,
+      stopCount: snappedPoints.length,
+      segmentCount: segments.length,
+      segments,
+      snappedPointCount: snappedPoints.filter((point) => point.snappedToPath).length,
+    };
+  }
+
+  function buildRouteTimeSimulationReport(responsePayload, options) {
+    const routes = Array.isArray(responsePayload?.routes) ? responsePayload.routes : [];
+    const rows = [];
+    routes.forEach((route) => {
+      (route.simulations || []).forEach((item) => {
+        rows.push({
+          routeName: route.routeName,
+          stopCount: route.stopCount,
+          segmentCount: route.segmentCount,
+          timeLabel: item.label,
+          departureTime: item.departureTime,
+          driveSeconds: item.driveSeconds,
+          dwellSecondsTotal: item.dwellSecondsTotal,
+          totalSeconds: item.totalSeconds,
+          distanceMeters: item.distanceMeters,
+        });
+      });
+    });
+
+    return {
+      id: `route-time-simulation-${Date.now()}`,
+      generatedAt: new Date().toISOString(),
+      options,
+      summary: {
+        routeCount: routes.length,
+        simulationRowCount: rows.length,
+        timeSlotCount: Array.isArray(responsePayload?.departureSlots) ? responsePayload.departureSlots.length : 0,
+      },
+      departureSlots: responsePayload?.departureSlots || [],
+      routes,
+      rows,
+    };
+  }
+
+  function buildRouteTimeSimulationCsv(report) {
+    const lines = [
+      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "drive_minutes", "dwell_minutes", "total_minutes", "distance_km"],
+    ];
+    report.rows.forEach((row) => {
+      lines.push([
+        row.routeName,
+        row.timeLabel,
+        row.departureTime,
+        String(row.stopCount),
+        String(row.segmentCount),
+        (Number(row.driveSeconds || 0) / 60).toFixed(1),
+        (Number(row.dwellSecondsTotal || 0) / 60).toFixed(1),
+        (Number(row.totalSeconds || 0) / 60).toFixed(1),
+        (Number(row.distanceMeters || 0) / 1000).toFixed(2),
+      ]);
+    });
+    return lines
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, "\"\"")}"`).join(","))
+      .join("\r\n");
+  }
+
+  function downloadRouteTimeSimulationCsv(report = latestRouteTimeSimulationReport) {
+    if (!report || !report.rows?.length) {
+      setStatus("다운로드할 운행시간 시뮬레이션 결과가 없습니다.", true);
+      return;
+    }
+    const blob = new Blob(["\uFEFF", buildRouteTimeSimulationCsv(report)], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `route-time-simulation-${formatAutoSaveTimestamp()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatus(`운행시간 시뮬레이션 결과 ${report.rows.length}행을 CSV로 다운로드했습니다.`, false);
+  }
+
+  function buildRouteTimeSimulationRowsHtml(route) {
+    return (route.simulations || []).map((item) => `
+      <tr>
+        <td>${escapeHtml(item.label)}</td>
+        <td>${escapeHtml(item.departureTime)}</td>
+        <td>${escapeHtml(formatSimulationDurationLabel(item.driveSeconds))}</td>
+        <td>${escapeHtml(formatSimulationDurationLabel(item.dwellSecondsTotal))}</td>
+        <td><strong>${escapeHtml(formatSimulationDurationLabel(item.totalSeconds))}</strong></td>
+        <td>${escapeHtml((Number(item.distanceMeters || 0) / 1000).toFixed(2))}km</td>
+      </tr>
+    `).join("");
+  }
+
+  function buildRouteTimeSimulationResultsWindowHtml(report) {
+    const routeCards = (report.routes || []).map((route) => `
+      <div class="card">
+        <h2>${escapeHtml(route.routeName)}</h2>
+        <p class="meta">정류장 ${escapeHtml(String(route.stopCount))}개 / 청크 ${escapeHtml(String(route.segmentCount))}개</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>시간대</th><th>출발시각</th><th>예상 주행시간</th><th>정차 보정</th><th>예상 총 운행시간</th><th>거리</th></tr></thead>
+            <tbody>${buildRouteTimeSimulationRowsHtml(route) || "<tr><td colspan=\"6\">결과 없음</td></tr>"}</tbody>
+          </table>
+        </div>
+      </div>
+    `).join("");
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>운행시간 시뮬레이션 결과</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f7fb; --card:#ffffff; --line:#d8e1ec; --text:#172033; --muted:#64758d; --accent:#1f6feb; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%); color:var(--text); font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif; }
+    .wrap { max-width:1440px; margin:0 auto; display:grid; gap:16px; }
+    .hero, .card { padding:18px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 12px 28px rgba(16,24,40,.06); }
+    .hero h1 { margin:0 0 6px; font-size:28px; }
+    .hero p, .meta { margin:0; color:var(--muted); }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button { padding:10px 14px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
+    .primary { border-color:#bcd3ff; background:#eaf2ff; color:var(--accent); font-weight:700; }
+    .cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .stat strong { display:block; font-size:30px; }
+    .stat p { margin:4px 0 0; color:var(--muted); }
+    .results { display:grid; gap:14px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    thead th { background:#f8fbff; position:sticky; top:0; }
+    .table-wrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:14px; margin-top:12px; }
+    .note { color:var(--muted); font-size:12px; }
+    @media (max-width: 900px) { body { padding:16px; } .cards { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>운행시간 시뮬레이션 결과</h1>
+      <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 시간대 ${escapeHtml(String(report.summary.timeSlotCount))}개 / 결과 ${escapeHtml(String(report.summary.simulationRowCount))}행</p>
+      <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
+    </div>
+    <div class="cards">
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.routeCount))}</strong><p>분석 노선</p></div>
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.timeSlotCount))}</strong><p>시간대 개수</p></div>
+      <div class="card stat"><strong>${escapeHtml(String(report.summary.simulationRowCount))}</strong><p>결과 행 수</p></div>
+    </div>
+    <div class="card">
+      <div class="actions">
+        <button class="primary" type="button" id="download-simulation-csv-button">엑셀용 CSV 다운로드</button>
+        <button type="button" id="close-window-button">닫기</button>
+      </div>
+      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 기반 예상 주행시간에 정류장당 기본 정차시간을 더한 값입니다. 실제 운행 상황과는 차이가 날 수 있습니다.</p>
+    </div>
+    <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
+  </div>
+  <script>
+    document.getElementById("download-simulation-csv-button")?.addEventListener("click", () => {
+      if (window.opener && window.opener.__wonderLinxRouteTime) {
+        window.opener.__wonderLinxRouteTime.download(${JSON.stringify(report.id)});
+      }
+    });
+    document.getElementById("close-window-button")?.addEventListener("click", () => window.close());
+  </script>
+</body>
+</html>`;
+  }
+
+  function openRouteTimeSimulationSettingsWindow(groupKey) {
+    const routeItems = getRouteSimulationCandidates(groupKey);
+    const groupLabel = groupKey === "merged" ? "개선 노선 리스트" : "기존 노선 리스트";
+    const settingsWindow = window.open("", `route-time-simulation-settings-${groupKey}`, "width=980,height=860,resizable=yes,scrollbars=yes");
+    if (!settingsWindow) {
+      setStatus("팝업이 차단되었습니다. 운행시간 시뮬레이션 설정 창을 허용해 주세요.", true);
+      return;
+    }
+    routeTimeSettingsWindowRef = settingsWindow;
+    settingsWindow.document.open();
+    settingsWindow.document.write(buildRouteTimeSimulationSettingsWindowHtml(groupKey, groupLabel, routeItems, normalizeRouteTimeSimulationOptions()));
+    settingsWindow.document.close();
+    settingsWindow.focus();
+  }
+
+  function appendRouteTimeSimulationLog(message, isError = false, replace = false) {
+    if (
+      routeTimeSettingsWindowRef
+      && !routeTimeSettingsWindowRef.closed
+      && typeof routeTimeSettingsWindowRef.__setRouteTimeLog === "function"
+    ) {
+      routeTimeSettingsWindowRef.__setRouteTimeLog(String(message || ""), Boolean(isError), Boolean(replace));
+    }
+  }
+
+  function openRouteTimeSimulationResultsWindow(report) {
+    const resultsWindow = window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
+    if (!resultsWindow) {
+      setStatus("팝업이 차단되었습니다. 운행시간 시뮬레이션 결과 창을 허용해 주세요.", true);
+      return false;
+    }
+    routeTimeResultsWindowRef = resultsWindow;
+    resultsWindow.document.open();
+    resultsWindow.document.write(buildRouteTimeSimulationResultsWindowHtml(report));
+    resultsWindow.document.close();
+    resultsWindow.focus();
+    return true;
+  }
+
+  async function requestRouteTimeSimulation(payload) {
+    const response = await window.fetch("/api/simulate-route-times", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || "운행시간 시뮬레이션 요청에 실패했습니다.");
+    }
+    return result;
+  }
+
+  async function runRouteTimeSimulation(groupKey, options = {}) {
+    const normalizedOptions = normalizeRouteTimeSimulationOptions(options);
+    const selectedRouteNames = Array.isArray(options.selectedRouteNames)
+      ? options.selectedRouteNames.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (!selectedRouteNames.length) {
+      throw new Error("운행시간 시뮬레이션할 노선을 하나 이상 선택하세요.");
+    }
+    const routePayload = selectedRouteNames.map(buildRouteTimeSimulationSegments);
+    const departureSlots = buildSimulationDepartureSlots(normalizedOptions);
+    if (!departureSlots.length) {
+      throw new Error("시뮬레이션 시간대를 만들지 못했습니다. 시작 시각과 종료 시각을 확인하세요.");
+    }
+
+    appendRouteTimeSimulationLog("시뮬레이션을 시작합니다.", false, true);
+    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`);
+    if (routePayload[0]) {
+      appendRouteTimeSimulationLog(
+        `첫 노선 스냅 보정: ${routePayload[0].snappedPointCount || 0}/${routePayload[0].stopCount}개 정류장`
+      );
+    }
+    if (routePayload[0]?.segments?.[0]?.length >= 2) {
+      const firstSegment = routePayload[0].segments[0];
+      const firstOrigin = firstSegment[0];
+      const firstDestination = firstSegment[firstSegment.length - 1];
+      appendRouteTimeSimulationLog(
+        `첫 구간 확인: ${routePayload[0].routeName} / origin=${firstOrigin.lng},${firstOrigin.lat} / destination=${firstDestination.lng},${firstDestination.lat}`
+      );
+      if (firstOrigin.originalLat != null && firstOrigin.originalLng != null && firstOrigin.snapDistanceMeters != null) {
+        appendRouteTimeSimulationLog(
+          `첫 출발점 보정: 원본=${firstOrigin.originalLng},${firstOrigin.originalLat} / 보정=${firstOrigin.lng},${firstOrigin.lat} / 거리=${firstOrigin.snapDistanceMeters}m`
+        );
+      }
+    }
+    setStatus(`운행시간 시뮬레이션을 시작합니다. 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`, false);
+    const responsePayload = await requestRouteTimeSimulation({
+      groupKey,
+      options: normalizedOptions,
+      departureSlots,
+      routes: routePayload,
+    });
+    const report = buildRouteTimeSimulationReport(responsePayload, normalizedOptions);
+    latestRouteTimeSimulationReport = report;
+    openRouteTimeSimulationResultsWindow(report);
+    appendRouteTimeSimulationLog(`시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`);
+    setStatus(`운행시간 시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`, false);
     return report;
   }
 
@@ -10951,6 +11602,24 @@
     },
     clearMap() {
       clearRidershipAnalysisMapFocus();
+    },
+  };
+
+  window.__wonderLinxRouteTime = {
+    async run(groupKey, options) {
+      try {
+        await runRouteTimeSimulation(groupKey, options);
+      } catch (error) {
+        appendRouteTimeSimulationLog(error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.", true);
+        setStatus(error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.", true);
+      }
+    },
+    download(reportId) {
+      if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+        setStatus("다운로드할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
+        return;
+      }
+      downloadRouteTimeSimulationCsv(latestRouteTimeSimulationReport);
     },
   };
 

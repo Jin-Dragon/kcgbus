@@ -9,10 +9,13 @@ const ROOT = __dirname;
 const EXPORTS_DIR = path.join(ROOT, "exports");
 const TEMP_EXPORTS_DIR = path.join(os.tmpdir(), "kml-kakao-map-autosaves");
 const DEBUG_RENAME_LOG = path.join(ROOT, "rename-debug.log");
+const LOCAL_SERVER_ENV_PATH = path.join(ROOT, "server.local.env");
 const RIDERSHIP_STORE_PATH = path.join(EXPORTS_DIR, "stop-ridership.json");
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const LOCAL_SERVER_ENV = readLocalServerEnv(LOCAL_SERVER_ENV_PATH);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || LOCAL_SERVER_ENV.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
-const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || "";
+const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY || "";
+const SERVER_BUILD_TAG = "2026-04-01-route-time-debug-3";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -21,6 +24,34 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".kml": "application/vnd.google-earth.kml+xml; charset=utf-8",
 };
+
+function readLocalServerEnv(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return {};
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    return raw.split(/\r?\n/).reduce((accumulator, line) => {
+      const trimmed = String(line || "").trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        return accumulator;
+      }
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) {
+        return accumulator;
+      }
+      const key = trimmed.slice(0, separatorIndex).trim();
+      const value = trimmed.slice(separatorIndex + 1).trim();
+      if (key) {
+        accumulator[key] = value;
+      }
+      return accumulator;
+    }, {});
+  } catch (error) {
+    console.warn(`Failed to read local server env: ${error.message}`);
+    return {};
+  }
+}
 
 function send(res, statusCode, body, contentType, extraHeaders = {}) {
   res.writeHead(statusCode, {
@@ -152,6 +183,244 @@ function normalizeDesignRouteOptions(value) {
   }
 
   return options;
+}
+
+function normalizeSimulationPoint(point) {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  return {
+    name: String(point?.name || "정류장").trim() || "정류장",
+    lat,
+    lng,
+  };
+}
+
+function normalizeDepartureSlot(slot) {
+  const label = String(slot?.label || "").trim();
+  const departureTime = String(slot?.departureTime || "").trim();
+  if (!label || !departureTime) {
+    return null;
+  }
+  return {
+    label,
+    departureTime,
+  };
+}
+
+function normalizeSimulationPointWithCandidates(point) {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  const candidateCoordinates = Array.isArray(point?.candidateCoordinates)
+    ? point.candidateCoordinates
+      .map((item) => {
+        const candidateLat = Number(item?.lat);
+        const candidateLng = Number(item?.lng);
+        if (!Number.isFinite(candidateLat) || !Number.isFinite(candidateLng)) {
+          return null;
+        }
+        return {
+          lat: candidateLat,
+          lng: candidateLng,
+        };
+      })
+      .filter(Boolean)
+    : [];
+  return {
+    name: String(point?.name || "정류장").trim() || "정류장",
+    lat,
+    lng,
+    candidateCoordinates: candidateCoordinates.length ? candidateCoordinates : [{ lat, lng }],
+  };
+}
+
+function normalizeRouteTimeSimulationPayload(payload) {
+  const options = payload?.options && typeof payload.options === "object" ? payload.options : {};
+  const routes = Array.isArray(payload?.routes)
+    ? payload.routes.map((route) => {
+      const routeName = String(route?.routeName || "").trim();
+      const segments = Array.isArray(route?.segments)
+        ? route.segments
+          .map((segment) => Array.isArray(segment) ? segment.map(normalizeSimulationPointWithCandidates).filter(Boolean) : [])
+          .filter((segment) => segment.length >= 2)
+        : [];
+      return {
+        routeName,
+        stopCount: Number(route?.stopCount) || 0,
+        segmentCount: Number(route?.segmentCount) || segments.length,
+        segments,
+      };
+    }).filter((route) => route.routeName && route.segments.length)
+    : [];
+  const departureSlots = Array.isArray(payload?.departureSlots)
+    ? payload.departureSlots.map(normalizeDepartureSlot).filter(Boolean)
+    : [];
+
+  return {
+    options: {
+      stopDwellSeconds: Number.isFinite(Number(options.stopDwellSeconds))
+        ? Math.max(0, Math.round(Number(options.stopDwellSeconds)))
+        : 0,
+    },
+    routes,
+    departureSlots,
+  };
+}
+
+async function requestKakaoFutureDirections(segment, departureTime) {
+  const origin = segment[0];
+  const destination = segment[segment.length - 1];
+  const waypoints = segment.slice(1, -1);
+  const formatLocationParam = (point) => `${point.lng},${point.lat}`;
+  const originCandidates = Array.isArray(origin.candidateCoordinates) && origin.candidateCoordinates.length
+    ? origin.candidateCoordinates
+    : [{ lat: origin.lat, lng: origin.lng }];
+  const destinationCandidates = Array.isArray(destination.candidateCoordinates) && destination.candidateCoordinates.length
+    ? destination.candidateCoordinates
+    : [{ lat: destination.lat, lng: destination.lng }];
+  const waypointsParam = waypoints.length ? waypoints.map(formatLocationParam).join("|") : "";
+  let lastErrorText = "";
+  let lastOriginParam = "";
+  let lastDestinationParam = "";
+  let attempts = 0;
+
+  for (const originCandidate of originCandidates.slice(0, 10)) {
+    const originParam = formatLocationParam(originCandidate);
+    lastOriginParam = originParam;
+    for (const destinationCandidate of destinationCandidates.slice(0, 10)) {
+      const destinationParam = formatLocationParam(destinationCandidate);
+      lastDestinationParam = destinationParam;
+      attempts += 1;
+
+      const query = new URLSearchParams({
+        origin: originParam,
+        destination: destinationParam,
+        departure_time: departureTime,
+        priority: "RECOMMEND",
+        car_type: "3",
+        car_fuel: "DIESEL",
+        summary: "false",
+      });
+
+      if (waypointsParam) {
+        query.set("waypoints", waypointsParam);
+      }
+
+      const kakaoResponse = await fetch(`https://apis-navi.kakaomobility.com/v1/future/directions?${query.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `KakaoAK ${KAKAO_MOBILITY_REST_API_KEY}`,
+        },
+      });
+
+      if (!kakaoResponse.ok) {
+        lastErrorText = await kakaoResponse.text();
+        if (lastErrorText.includes("출발지가 유효하지 않습니다.") || lastErrorText.includes("목적지가 유효하지 않습니다.")) {
+          continue;
+        }
+        throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText} / origin=${originParam} / destination=${destinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime}`);
+      }
+
+      const result = await kakaoResponse.json();
+      const route = Array.isArray(result?.routes) ? result.routes[0] : null;
+      if (!route) {
+        throw new Error("카카오 미래 길찾기 결과가 비어 있습니다.");
+      }
+
+      const sections = Array.isArray(route.sections) ? route.sections : [];
+      const driveSeconds = sections.reduce((sum, section) => sum + (Number(section?.duration) || 0), 0);
+      const distanceMeters = sections.reduce((sum, section) => sum + (Number(section?.distance) || 0), 0);
+
+      return {
+        driveSeconds,
+        distanceMeters,
+        attempts,
+        originParam,
+        destinationParam,
+      };
+    }
+  }
+
+  throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText || "유효한 출발지/목적지 좌표를 찾지 못했습니다."} / origin=${lastOriginParam} / destination=${lastDestinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime} / attempts=${attempts}`);
+}
+
+async function requestKakaoFutureDirectionsSafe(segment, departureTime) {
+  const origin = segment[0];
+  const destination = segment[segment.length - 1];
+  const waypoints = segment.slice(1, -1);
+  const formatLocationParam = (point) => `${point.lng},${point.lat}`;
+  const originCandidates = Array.isArray(origin.candidateCoordinates) && origin.candidateCoordinates.length
+    ? origin.candidateCoordinates
+    : [{ lat: origin.lat, lng: origin.lng }];
+  const destinationCandidates = Array.isArray(destination.candidateCoordinates) && destination.candidateCoordinates.length
+    ? destination.candidateCoordinates
+    : [{ lat: destination.lat, lng: destination.lng }];
+  const waypointsParam = waypoints.length ? waypoints.map(formatLocationParam).join("|") : "";
+  let lastErrorText = "";
+  let lastOriginParam = "";
+  let lastDestinationParam = "";
+  let attempts = 0;
+
+  for (const originCandidate of originCandidates.slice(0, 10)) {
+    const originParam = formatLocationParam(originCandidate);
+    lastOriginParam = originParam;
+    for (const destinationCandidate of destinationCandidates.slice(0, 10)) {
+      const destinationParam = formatLocationParam(destinationCandidate);
+      lastDestinationParam = destinationParam;
+      attempts += 1;
+
+      const query = new URLSearchParams({
+        origin: originParam,
+        destination: destinationParam,
+        departure_time: departureTime,
+        priority: "RECOMMEND",
+        car_type: "3",
+        car_fuel: "DIESEL",
+        summary: "false",
+      });
+
+      if (waypointsParam) {
+        query.set("waypoints", waypointsParam);
+      }
+
+      const kakaoResponse = await fetch(`https://apis-navi.kakaomobility.com/v1/future/directions?${query.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `KakaoAK ${KAKAO_MOBILITY_REST_API_KEY}`,
+        },
+      });
+
+      if (!kakaoResponse.ok) {
+        lastErrorText = await kakaoResponse.text();
+        continue;
+      }
+
+      const result = await kakaoResponse.json();
+      const route = Array.isArray(result?.routes) ? result.routes[0] : null;
+      if (!route) {
+        throw new Error("카카오 미래 길찾기 결과가 비어 있습니다.");
+      }
+
+      const sections = Array.isArray(route.sections) ? route.sections : [];
+      const driveSeconds = sections.reduce((sum, section) => sum + (Number(section?.duration) || 0), 0);
+      const distanceMeters = sections.reduce((sum, section) => sum + (Number(section?.distance) || 0), 0);
+
+      return {
+        driveSeconds,
+        distanceMeters,
+        attempts,
+        originParam,
+        destinationParam,
+      };
+    }
+  }
+
+  throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText || "유효한 출발지/목적지 좌표를 찾지 못했습니다."} / origin=${lastOriginParam} / destination=${lastDestinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime} / attempts=${attempts}`);
 }
 
 function saveExportFile(fileName, content, res, successPayloadBuilder, targetDir = EXPORTS_DIR) {
@@ -313,8 +582,10 @@ http
       sendJson(res, 200, {
         ok: true,
         port: PORT,
+        build: SERVER_BUILD_TAG,
         openAiConfigured: Boolean(OPENAI_API_KEY),
         kakaoMobilityConfigured: Boolean(KAKAO_MOBILITY_REST_API_KEY),
+        kakaoMobilityKeySource: process.env.KAKAO_MOBILITY_REST_API_KEY ? "env" : (LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY ? "server.local.env" : "missing"),
       });
       return;
     }
@@ -518,6 +789,68 @@ http
       return;
     }
 
+    if (req.method === "POST" && req.url === "/api/simulate-route-times") {
+      readRequestBody(req)
+        .then(async (rawBody) => {
+          if (!KAKAO_MOBILITY_REST_API_KEY) {
+            sendJson(res, 500, { error: "KAKAO_MOBILITY_REST_API_KEY 환경변수가 설정되지 않았습니다." });
+            return;
+          }
+
+          const payload = normalizeRouteTimeSimulationPayload(parseJsonBody(rawBody));
+          if (!payload.routes.length) {
+            sendJson(res, 400, { error: "시뮬레이션할 노선 정보가 없습니다." });
+            return;
+          }
+          if (!payload.departureSlots.length) {
+            sendJson(res, 400, { error: "시뮬레이션할 시간대 정보가 없습니다." });
+            return;
+          }
+
+          const routes = [];
+          for (const route of payload.routes) {
+            const simulations = [];
+            for (const slot of payload.departureSlots) {
+              let driveSeconds = 0;
+              let distanceMeters = 0;
+              for (const segment of route.segments) {
+                const segmentResult = await requestKakaoFutureDirectionsSafe(segment, slot.departureTime);
+                driveSeconds += Number(segmentResult.driveSeconds || 0);
+                distanceMeters += Number(segmentResult.distanceMeters || 0);
+              }
+
+              const dwellSecondsTotal = Math.max(0, route.stopCount - 1) * payload.options.stopDwellSeconds;
+              simulations.push({
+                label: slot.label,
+                departureTime: slot.departureTime,
+                driveSeconds: Math.round(driveSeconds),
+                dwellSecondsTotal: Math.round(dwellSecondsTotal),
+                totalSeconds: Math.round(driveSeconds + dwellSecondsTotal),
+                distanceMeters: Number(distanceMeters.toFixed(1)),
+              });
+            }
+
+            routes.push({
+              routeName: route.routeName,
+              stopCount: route.stopCount,
+              segmentCount: route.segmentCount,
+              simulations,
+            });
+          }
+
+          sendJson(res, 200, {
+            ok: true,
+            generatedAt: new Date().toISOString(),
+            departureSlots: payload.departureSlots,
+            routes,
+          });
+        })
+        .catch((error) => {
+          sendJson(res, 500, { error: `[${SERVER_BUILD_TAG}] ${error.message || "Route time simulation request failed"}` });
+        });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/debug-rename-route") {
       readRequestBody(req)
         .then((rawBody) => {
@@ -561,4 +894,6 @@ http
   })
   .listen(PORT, HOST, () => {
     console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Server build: ${SERVER_BUILD_TAG}`);
+    console.log(`Kakao Mobility configured: ${Boolean(KAKAO_MOBILITY_REST_API_KEY)} (source: ${process.env.KAKAO_MOBILITY_REST_API_KEY ? "env" : (LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY ? LOCAL_SERVER_ENV_PATH : "missing")})`);
   });
