@@ -132,3 +132,31 @@ SESSION_NOTES.md 기준으로 최근 작업 맥락 복원하고,
 - Resume guidance:
   - the old March UI changes remain deployed in source form and do not need to be reconstructed
   - current newer work after those UI changes is still centered on `hyodo` passenger data preparation/documentation
+
+## 2026-04-02 Route-Time Simulation Update
+
+- Local route-time simulation work was carried forward into deploy prep:
+  - route-time simulation settings/results popup flow is active
+  - route popup now supports per-section `강제 포인트 추가`, `경로 재설정`, `포인트 초기화`
+  - forced-point order is edited by number only; base 4 stops stay fixed
+  - popup left panel scroll is separated from the map view
+  - analysis path now shows direction arrows
+  - stop markers are back on actual KML stop positions and base API call order follows KML stop order
+- Current local Kakao keys updated:
+  - `KAKAO_MOBILITY_REST_API_KEY=51a377d1bc39d0398212c122ff31532d`
+  - `config.js appKey=e5c44a3738e9c68eeebfe7457b5d138e`
+- Render deploy follow-up still required outside git:
+  - set Render env `KAKAO_MOBILITY_REST_API_KEY`
+  - verify Kakao Developers web platform includes `https://kcgbus-1.onrender.com`
+
+## Next Resume Prompt
+
+Use this next time:
+
+```text
+C:\Users\wls29\Desktop\my-map-app\kml-kakao-map 프로젝트와
+C:\Users\wls29\Desktop\kcgbus-render 배포 저장소를 불러와서
+SESSION_NOTES.md 기준으로 최근 작업 맥락 복원하고,
+운행시간 시뮬레이션/강제포인트/경로보기 팝업 상태를 이어서 점검해줘.
+특히 KML 실제 정류장 좌표/순서 기준 API 호출과 경로보기 지도 표시가 일치하는지부터 확인해줘.
+```

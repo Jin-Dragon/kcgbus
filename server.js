@@ -3,7 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const PORT = Number(process.env.PORT) || 8080;
+const PORT = 8080;
 const HOST = "0.0.0.0";
 const ROOT = __dirname;
 const EXPORTS_DIR = path.join(ROOT, "exports");
@@ -236,7 +236,41 @@ function normalizeSimulationPointWithCandidates(point) {
     lat,
     lng,
     candidateCoordinates: candidateCoordinates.length ? candidateCoordinates : [{ lat, lng }],
+    originalLat: Number.isFinite(Number(point?.originalLat)) ? Number(point.originalLat) : lat,
+    originalLng: Number.isFinite(Number(point?.originalLng)) ? Number(point.originalLng) : lng,
+    snappedToPath: point?.snappedToPath === true,
+    snapDistanceMeters: Number.isFinite(Number(point?.snapDistanceMeters)) ? Number(point.snapDistanceMeters) : null,
+    isSimulationCorrection: point?.isSimulationCorrection === true,
+    pathIndex: Number.isFinite(Number(point?.pathIndex)) ? Number(point.pathIndex) : null,
+    requestedOrder: Number.isFinite(Number(point?.requestedOrder)) ? Math.round(Number(point.requestedOrder)) : null,
   };
+}
+
+function convertVertexesToCoordinates(vertexes) {
+  const coordinates = [];
+  for (let index = 0; index < vertexes.length - 1; index += 2) {
+    const lng = Number(vertexes[index]);
+    const lat = Number(vertexes[index + 1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      coordinates.push({ lat, lng });
+    }
+  }
+  return coordinates;
+}
+
+function extractRouteCoordinatesFromSections(sections) {
+  const coordinates = [];
+  (Array.isArray(sections) ? sections : []).forEach((section) => {
+    (section?.roads || []).forEach((road) => {
+      convertVertexesToCoordinates(road.vertexes || []).forEach((coordinate) => {
+        const last = coordinates[coordinates.length - 1];
+        if (!last || last.lat !== coordinate.lat || last.lng !== coordinate.lng) {
+          coordinates.push(coordinate);
+        }
+      });
+    });
+  });
+  return coordinates;
 }
 
 function normalizeRouteTimeSimulationPayload(payload) {
@@ -335,10 +369,12 @@ async function requestKakaoFutureDirections(segment, departureTime) {
       const sections = Array.isArray(route.sections) ? route.sections : [];
       const driveSeconds = sections.reduce((sum, section) => sum + (Number(section?.duration) || 0), 0);
       const distanceMeters = sections.reduce((sum, section) => sum + (Number(section?.distance) || 0), 0);
+      const routeCoordinates = extractRouteCoordinatesFromSections(sections);
 
       return {
         driveSeconds,
         distanceMeters,
+        routeCoordinates,
         attempts,
         originParam,
         destinationParam,
@@ -409,18 +445,50 @@ async function requestKakaoFutureDirectionsSafe(segment, departureTime) {
       const sections = Array.isArray(route.sections) ? route.sections : [];
       const driveSeconds = sections.reduce((sum, section) => sum + (Number(section?.duration) || 0), 0);
       const distanceMeters = sections.reduce((sum, section) => sum + (Number(section?.distance) || 0), 0);
+      const routeCoordinates = extractRouteCoordinatesFromSections(sections);
 
       return {
         driveSeconds,
         distanceMeters,
+        routeCoordinates,
         attempts,
         originParam,
         destinationParam,
+        waypointsParam,
+        sectionCount: sections.length,
       };
     }
   }
 
   throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText || "유효한 출발지/목적지 좌표를 찾지 못했습니다."} / origin=${lastOriginParam} / destination=${lastDestinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime} / attempts=${attempts}`);
+}
+
+function buildSimulationChunkPayload(segment, segmentIndex, segmentResult) {
+  return {
+    chunkIndex: Number(segmentIndex || 1),
+    originParam: segmentResult.originParam,
+    destinationParam: segmentResult.destinationParam,
+    waypointsParam: segmentResult.waypointsParam || "",
+    attempts: Number(segmentResult.attempts || 0),
+    distanceMeters: Number(segmentResult.distanceMeters || 0),
+    driveSeconds: Number(segmentResult.driveSeconds || 0),
+    sectionCount: Number(segmentResult.sectionCount || 0),
+    coordinates: Array.isArray(segmentResult.routeCoordinates) ? segmentResult.routeCoordinates : [],
+    stops: (Array.isArray(segment) ? segment : []).map((point) => ({
+      name: point.name,
+      lat: point.lat,
+      lng: point.lng,
+      originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
+      originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
+      snappedLat: point.lat,
+      snappedLng: point.lng,
+      snappedToPath: Boolean(point.snappedToPath),
+      snapDistanceMeters: point.snapDistanceMeters == null ? null : Number(point.snapDistanceMeters),
+      isSimulationCorrection: point.isSimulationCorrection === true,
+      pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+      requestedOrder: Number.isFinite(point.requestedOrder) ? Number(point.requestedOrder) : null,
+    })),
+  };
 }
 
 function saveExportFile(fileName, content, res, successPayloadBuilder, targetDir = EXPORTS_DIR) {
@@ -813,10 +881,14 @@ http
             for (const slot of payload.departureSlots) {
               let driveSeconds = 0;
               let distanceMeters = 0;
+              const chunks = [];
+              let chunkIndex = 0;
               for (const segment of route.segments) {
                 const segmentResult = await requestKakaoFutureDirectionsSafe(segment, slot.departureTime);
                 driveSeconds += Number(segmentResult.driveSeconds || 0);
                 distanceMeters += Number(segmentResult.distanceMeters || 0);
+                chunkIndex += 1;
+                chunks.push(buildSimulationChunkPayload(segment, chunkIndex, segmentResult));
               }
 
               const dwellSecondsTotal = Math.max(0, route.stopCount - 1) * payload.options.stopDwellSeconds;
@@ -827,6 +899,7 @@ http
                 dwellSecondsTotal: Math.round(dwellSecondsTotal),
                 totalSeconds: Math.round(driveSeconds + dwellSecondsTotal),
                 distanceMeters: Number(distanceMeters.toFixed(1)),
+                chunks,
               });
             }
 
@@ -847,6 +920,39 @@ http
         })
         .catch((error) => {
           sendJson(res, 500, { error: `[${SERVER_BUILD_TAG}] ${error.message || "Route time simulation request failed"}` });
+        });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/recalculate-route-time-segment") {
+      readRequestBody(req)
+        .then(async (rawBody) => {
+          if (!KAKAO_MOBILITY_REST_API_KEY) {
+            sendJson(res, 500, { error: "KAKAO_MOBILITY_REST_API_KEY ?섍꼍蹂?섍? ?ㅼ젙?섏? ?딆븯?듬땲??" });
+            return;
+          }
+          const payload = parseJsonBody(rawBody);
+          const routeName = String(payload?.routeName || "").trim();
+          const departureTime = String(payload?.departureTime || "").trim();
+          const segmentIndex = Math.max(1, Math.round(Number(payload?.segmentIndex || 1)));
+          const segment = Array.isArray(payload?.segment)
+            ? payload.segment.map(normalizeSimulationPointWithCandidates).filter(Boolean)
+            : [];
+          if (!routeName || !departureTime || segment.length < 2) {
+            sendJson(res, 400, { error: "구간 재계산 요청 정보가 올바르지 않습니다." });
+            return;
+          }
+          const segmentResult = await requestKakaoFutureDirectionsSafe(segment, departureTime);
+          sendJson(res, 200, {
+            ok: true,
+            routeName,
+            departureTime,
+            segmentIndex,
+            chunk: buildSimulationChunkPayload(segment, segmentIndex, segmentResult),
+          });
+        })
+        .catch((error) => {
+          sendJson(res, 500, { error: `[${SERVER_BUILD_TAG}] ${error.message || "Segment recalculation failed"}` });
         });
       return;
     }

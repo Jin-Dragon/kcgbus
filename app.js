@@ -17,7 +17,7 @@
   const AUTO_SAVE_INTERVAL_MS = 10 * 60 * 1000;
   const UNDO_HISTORY_LIMIT = 10;
   const OPTIMIZATION_FEATURE_ENABLED = false;
-  const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 5;
+  const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 4;
 
   const config = window.KAKAO_MAP_CONFIG || {};
   const dropzone = document.getElementById("dropzone");
@@ -1512,6 +1512,78 @@
     return next;
   }
 
+  function normalizeSimulationCorrectionWaypoint(point) {
+    const lat = Number(point?.lat);
+    const lng = Number(point?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return null;
+    }
+    const order = Number.isFinite(Number(point?.order)) ? Math.round(Number(point.order)) : null;
+    return {
+      lat,
+      lng,
+      ...(order != null ? { order } : {}),
+    };
+  }
+
+  function normalizeSimulationCorrectionOrder(value, min = 2, max = Number.MAX_SAFE_INTEGER) {
+    const order = Math.round(Number(value));
+    if (!Number.isFinite(order)) {
+      return null;
+    }
+    return Math.min(Math.max(order, min), max);
+  }
+
+  function normalizeSimulationCorrections(value, routeName = "") {
+    const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const segmentCorrections = {};
+    const sourceSegments = raw.segmentCorrections && typeof raw.segmentCorrections === "object" && !Array.isArray(raw.segmentCorrections)
+      ? raw.segmentCorrections
+      : {};
+    Object.keys(sourceSegments).forEach((segmentKey) => {
+      const normalizedKey = String(segmentKey || "").trim();
+      if (!/^\d+$/.test(normalizedKey)) {
+        return;
+      }
+      const entry = sourceSegments[segmentKey];
+      const normalizedWaypoints = (Array.isArray(entry?.waypoints) ? entry.waypoints : [])
+        .map(normalizeSimulationCorrectionWaypoint)
+        .filter(Boolean);
+      if (!normalizedWaypoints.length && entry?.enabled !== true) {
+        return;
+      }
+      segmentCorrections[normalizedKey] = {
+        enabled: entry?.enabled !== false,
+        waypoints: normalizedWaypoints,
+        note: String(entry?.note || "").trim(),
+      };
+    });
+    return {
+      version: Number.isFinite(Number(raw.version)) ? Number(raw.version) : 1,
+      routeName: normalizeRouteName(raw.routeName || routeName || DEFAULT_ROUTE_NAME),
+      updatedAt: typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt : "",
+      segmentCorrections,
+    };
+  }
+
+  function hasSimulationCorrections(value) {
+    const normalized = normalizeSimulationCorrections(value);
+    return Object.keys(normalized.segmentCorrections).length > 0;
+  }
+
+  function getSimulationCorrectionsFromExtendedData(value, routeName = "") {
+    const extendedData = normalizeExtendedData(value);
+    const raw = getExtendedDataValue(extendedData, "simulationCorrections");
+    if (!raw) {
+      return normalizeSimulationCorrections(null, routeName);
+    }
+    try {
+      return normalizeSimulationCorrections(JSON.parse(raw), routeName);
+    } catch (error) {
+      return normalizeSimulationCorrections(null, routeName);
+    }
+  }
+
   function normalizeObservationArea(area) {
     const points = Array.isArray(area?.points)
       ? area.points
@@ -1606,6 +1678,7 @@
       routeGroup,
       routeOrder: Number.isFinite(Number(current.routeOrder)) ? Number(current.routeOrder) : null,
       villageBusDesign: normalizeVillageBusDesignSettings(current.villageBusDesign),
+      simulationCorrections: normalizeSimulationCorrections(current.simulationCorrections, normalizedRouteName),
     };
   }
 
@@ -3207,6 +3280,14 @@
         intervalMinutes: Number(data.get("intervalMinutes") || 60),
       };
       appendLog("시뮬레이션 실행을 요청했습니다.");
+      const resultsWindow = window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
+      if (!resultsWindow) {
+        appendLog("팝업이 차단되었습니다. 결과 창을 허용해 주세요.", true);
+        return;
+      }
+      resultsWindow.document.open();
+      resultsWindow.document.write('<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>운행시간 시뮬레이션 준비중</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f7fb;color:#172033;font:16px/1.6 "Segoe UI","Malgun Gothic",sans-serif;} .card{padding:24px 28px;border:1px solid #d8e1ec;border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);} strong{display:block;font-size:20px;margin-bottom:8px;} p{margin:0;color:#64758d;}</style></head><body><div class="card"><strong>운행시간 시뮬레이션 실행 중</strong><p>계산이 끝나면 이 창에 결과를 표시합니다.</p></div></body></html>');
+      resultsWindow.document.close();
       if (window.opener && window.opener.__wonderLinxRouteTime) {
         window.opener.__wonderLinxRouteTime.run(${JSON.stringify(groupKey)}, options);
       }
@@ -3245,6 +3326,40 @@
       appendUniqueCoordinates(coordinates, Array.isArray(pathItem.coordinates) ? pathItem.coordinates : []);
     });
     return coordinates;
+  }
+
+  function buildOriginalChunkPathGroups(routeCoordinates, stops) {
+    if (!Array.isArray(routeCoordinates) || routeCoordinates.length < 2) {
+      return [];
+    }
+    const normalizedStops = (Array.isArray(stops) ? stops : [])
+      .map((stop) => ({
+        ...stop,
+        lat: Number.isFinite(stop?.originalLat) ? Number(stop.originalLat) : Number(stop?.lat),
+        lng: Number.isFinite(stop?.originalLng) ? Number(stop.originalLng) : Number(stop?.lng),
+      }))
+      .filter((stop) => Number.isFinite(stop?.lat) && Number.isFinite(stop?.lng));
+    if (normalizedStops.length < 2) {
+      return [];
+    }
+
+    const groups = [];
+    let searchIndex = 0;
+    for (let index = 0; index < normalizedStops.length - 1; index += 1) {
+      const startStop = normalizedStops[index];
+      const endStop = normalizedStops[index + 1];
+      const forwardSlice = sliceCoordinatesBetweenPointsForward(routeCoordinates, startStop, endStop, searchIndex, 280);
+      if (forwardSlice.coordinates.length >= 2) {
+        groups.push(forwardSlice.coordinates);
+        searchIndex = Math.max(searchIndex, forwardSlice.endIndex);
+        continue;
+      }
+      const slicedCoordinates = sliceCoordinatesBetweenPoints(routeCoordinates, startStop, endStop, 220);
+      if (slicedCoordinates.length >= 2) {
+        groups.push(slicedCoordinates);
+      }
+    }
+    return groups;
   }
 
   function snapPointToRoutePathCoordinate(routeName, point) {
@@ -3310,6 +3425,98 @@
     };
   }
 
+  function getRouteSimulationCorrection(routeName, segmentIndex) {
+    const corrections = getRouteSetting(routeName).simulationCorrections;
+    const entry = corrections?.segmentCorrections?.[String(segmentIndex)] || null;
+    if (!entry || entry.enabled === false || !Array.isArray(entry.waypoints) || !entry.waypoints.length) {
+      return null;
+    }
+    return entry;
+  }
+
+  function buildCorrectionSimulationPoint(routeName, segmentIndex, point, correctionIndex, totalPointCount) {
+    const normalized = normalizeSimulationCorrectionWaypoint(point);
+    if (!normalized) {
+      return null;
+    }
+    const snappedPoint = snapPointToRoutePathCoordinate(routeName, {
+      name: `강제포인트 ${segmentIndex}-${correctionIndex + 1}`,
+      lat: Number(normalized.lat),
+      lng: Number(normalized.lng),
+      originalLat: Number(normalized.lat),
+      originalLng: Number(normalized.lng),
+      isSimulationCorrection: true,
+    });
+    return {
+      name: `강제포인트 ${segmentIndex}-${correctionIndex + 1}`,
+      lat: Number(normalized.lat),
+      lng: Number(normalized.lng),
+      originalLat: Number(normalized.lat),
+      originalLng: Number(normalized.lng),
+      candidateCoordinates: [{ lat: Number(normalized.lat), lng: Number(normalized.lng) }],
+      snappedToPath: snappedPoint.snappedToPath === true,
+      snapDistanceMeters: snappedPoint.snapDistanceMeters,
+      isSimulationCorrection: true,
+      pathIndex: Number.isFinite(snappedPoint.pathIndex) ? Number(snappedPoint.pathIndex) : Number.MAX_SAFE_INTEGER,
+      requestedOrder: normalizeSimulationCorrectionOrder(
+        normalized.order,
+        2,
+        Math.max(2, Number(totalPointCount || 2))
+      ) ?? Math.max(2, Number(totalPointCount || 2)),
+    };
+  }
+
+  function mergeSegmentPointsWithCorrections(baseStops, correctionPoints) {
+    const normalizedBaseStops = Array.isArray(baseStops) ? baseStops.slice() : [];
+    const normalizedCorrectionPoints = Array.isArray(correctionPoints) ? correctionPoints.filter(Boolean) : [];
+    if (!normalizedCorrectionPoints.length) {
+      return normalizedBaseStops;
+    }
+    const totalPointCount = normalizedBaseStops.length + normalizedCorrectionPoints.length;
+    return normalizedBaseStops
+      .map((point, index) => ({
+        ...point,
+        __sortKey: (index + 1) * 2,
+      }))
+      .concat(normalizedCorrectionPoints.map((point, index) => ({
+        ...point,
+        requestedOrder: normalizeSimulationCorrectionOrder(point.requestedOrder, 2, totalPointCount) ?? totalPointCount,
+        __sortKey: ((normalizeSimulationCorrectionOrder(point.requestedOrder, 2, totalPointCount) ?? totalPointCount) * 2) - 1 + (index / 1000),
+      })))
+      .sort((left, right) => left.__sortKey - right.__sortKey)
+      .map((point) => {
+        const next = { ...point };
+        delete next.__sortKey;
+        return next;
+      });
+  }
+
+  function applyRouteSimulationCorrection(routeName, segmentPoints, segmentIndex) {
+    const correction = getRouteSimulationCorrection(routeName, segmentIndex);
+    if (!correction || !Array.isArray(segmentPoints) || segmentPoints.length < 2) {
+      return segmentPoints;
+    }
+    const availableCorrectionSlots = Math.max(0, 5 - segmentPoints.length);
+    if (availableCorrectionSlots <= 0) {
+      return segmentPoints;
+    }
+
+    const correctionPoints = correction.waypoints
+      .slice(0, availableCorrectionSlots)
+      .map((point, correctionIndex) => buildCorrectionSimulationPoint(
+        routeName,
+        segmentIndex,
+        point,
+        correctionIndex,
+        segmentPoints.length
+      ))
+      .filter((point) => Number.isFinite(point?.lat) && Number.isFinite(point?.lng));
+    if (!correctionPoints.length) {
+      return segmentPoints;
+    }
+    return mergeSegmentPointsWithCorrections(segmentPoints, correctionPoints);
+  }
+
   function buildRouteTimeSimulationSegments(routeName) {
     const points = getPointsInRoute(routeName);
     const normalizedPoints = [];
@@ -3327,6 +3534,8 @@
         name: point.name,
         lat,
         lng,
+        originalLat: lat,
+        originalLng: lng,
       });
     });
 
@@ -3334,25 +3543,267 @@
       throw new Error(`노선 "${routeName}" 은(는) 시뮬레이션할 정류장이 부족합니다.`);
     }
 
-    const snappedPoints = normalizedPoints.map((point) => snapPointToRoutePathCoordinate(routeName, point));
+    const preparedPoints = normalizedPoints.map((point) => {
+      const snapped = snapPointToRoutePathCoordinate(routeName, point);
+      return {
+        ...point,
+        candidateCoordinates: Array.isArray(snapped.candidateCoordinates) ? snapped.candidateCoordinates : [{ lat: point.lat, lng: point.lng }],
+        snappedToPath: snapped.snappedToPath === true,
+        snapDistanceMeters: snapped.snapDistanceMeters,
+        pathIndex: Number.isFinite(snapped.pathIndex) ? Number(snapped.pathIndex) : -1,
+      };
+    });
 
     const segments = [];
     const step = Math.max(1, ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1);
-    for (let startIndex = 0; startIndex < snappedPoints.length - 1; startIndex += step) {
-      const segmentPoints = snappedPoints.slice(startIndex, startIndex + ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT);
+    for (let startIndex = 0; startIndex < preparedPoints.length - 1; startIndex += step) {
+      const segmentPoints = preparedPoints.slice(startIndex, startIndex + ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT);
       if (segmentPoints.length >= 2) {
-        segments.push(segmentPoints);
+        segments.push(applyRouteSimulationCorrection(routeName, segmentPoints, segments.length + 1));
       }
     }
     if (!segments.length) {
-      segments.push(snappedPoints);
+      segments.push(applyRouteSimulationCorrection(routeName, preparedPoints, 1));
     }
     return {
       routeName,
-      stopCount: snappedPoints.length,
+      stopCount: preparedPoints.length,
       segmentCount: segments.length,
       segments,
-      snappedPointCount: snappedPoints.filter((point) => point.snappedToPath).length,
+      snappedPointCount: preparedPoints.filter((point) => point.snappedToPath).length,
+    };
+  }
+
+  function flattenCoordinateGroups(groups) {
+    const coordinates = [];
+    (Array.isArray(groups) ? groups : []).forEach((group) => {
+      appendUniqueCoordinates(coordinates, Array.isArray(group) ? group : []);
+    });
+    return coordinates;
+  }
+
+  function getChunkOriginalCoordinates(chunk) {
+    const grouped = flattenCoordinateGroups(chunk?.originalChunkCoordinateGroups);
+    if (grouped.length >= 2) {
+      return grouped;
+    }
+    return Array.isArray(chunk?.originalChunkCoordinates) ? chunk.originalChunkCoordinates : [];
+  }
+
+  function getChunkAnalysisCoordinates(chunk) {
+    return Array.isArray(chunk?.coordinates) ? chunk.coordinates : [];
+  }
+
+  function distanceFromPointToPath(point, coordinates) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return findNearestCoordinateIndex(coordinates, point).distanceMeters;
+  }
+
+  async function requestRouteTimeSegmentRecalculation(payload) {
+    const response = await window.fetch("/api/recalculate-route-time-segment", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || "구간 경로 재설정 요청에 실패했습니다.");
+    }
+    return result;
+  }
+
+  function updateRouteSimulationCorrection(routeName, segmentIndex, waypoints, note = "") {
+    const routeNameKey = normalizeRouteName(routeName);
+    const currentSetting = getRouteSetting(routeNameKey);
+    const currentCorrections = normalizeSimulationCorrections(currentSetting.simulationCorrections, routeNameKey);
+    const nextSegmentCorrections = {
+      ...currentCorrections.segmentCorrections,
+      [String(segmentIndex)]: {
+        enabled: true,
+        waypoints: (Array.isArray(waypoints) ? waypoints : []).map(normalizeSimulationCorrectionWaypoint).filter(Boolean),
+        note: String(note || "").trim(),
+      },
+    };
+    routeSettings[routeNameKey] = {
+      ...currentSetting,
+      simulationCorrections: normalizeSimulationCorrections({
+        ...currentCorrections,
+        routeName: routeNameKey,
+        updatedAt: new Date().toISOString(),
+        segmentCorrections: nextSegmentCorrections,
+      }, routeNameKey),
+    };
+    saveRouteSettings();
+  }
+
+  function clearRouteSimulationCorrection(routeName, segmentIndex) {
+    const routeNameKey = normalizeRouteName(routeName);
+    const currentSetting = getRouteSetting(routeNameKey);
+    const currentCorrections = normalizeSimulationCorrections(currentSetting.simulationCorrections, routeNameKey);
+    if (!currentCorrections.segmentCorrections[String(segmentIndex)]) {
+      return;
+    }
+    const nextSegmentCorrections = {
+      ...currentCorrections.segmentCorrections,
+    };
+    delete nextSegmentCorrections[String(segmentIndex)];
+    routeSettings[routeNameKey] = {
+      ...currentSetting,
+      simulationCorrections: normalizeSimulationCorrections({
+        ...currentCorrections,
+        routeName: routeNameKey,
+        updatedAt: new Date().toISOString(),
+        segmentCorrections: nextSegmentCorrections,
+      }, routeNameKey),
+    };
+    saveRouteSettings();
+  }
+
+  function syncUpdatedSimulationToReport(simulation) {
+    if (!latestRouteTimeSimulationReport || !simulation) {
+      return;
+    }
+    latestRouteTimeSimulationReport.routes.forEach((route) => {
+      if (route.routeName !== simulation.routeName) {
+        return;
+      }
+      (route.simulations || []).forEach((item) => {
+        if (item.departureTime === simulation.departureTime) {
+          item.driveSeconds = simulation.driveSeconds;
+          item.distanceMeters = simulation.distanceMeters;
+          item.totalSeconds = simulation.totalSeconds;
+          item.chunks = simulation.chunks;
+        }
+      });
+    });
+  }
+
+  async function recalculateRouteTimeSegment(reportId, routeName, departureTime, segmentIndex, forcedWaypoint = null, forcedWaypointOrder = null) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      throw new Error("최신 운행시간 시뮬레이션 결과를 찾지 못했습니다.");
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      throw new Error("재설정할 분석구간 결과를 찾지 못했습니다.");
+    }
+    const chunk = simulation.chunks?.[segmentIndex - 1];
+    if (!chunk) {
+      throw new Error("재설정할 분석구간을 찾지 못했습니다.");
+    }
+    const manualWaypoint = forcedWaypoint
+      ? normalizeSimulationCorrectionWaypoint({
+        ...forcedWaypoint,
+        order: forcedWaypointOrder ?? forcedWaypoint?.order,
+      })
+      : null;
+    const savedCorrection = getRouteSimulationCorrection(routeName, segmentIndex);
+    const correctionWaypoints = manualWaypoint
+      ? [manualWaypoint]
+      : (Array.isArray(savedCorrection?.waypoints) ? savedCorrection.waypoints.map(normalizeSimulationCorrectionWaypoint).filter(Boolean) : []);
+    if (!correctionWaypoints.length) {
+      throw new Error("먼저 강제 포인트를 추가하세요.");
+    }
+    const baseStops = (Array.isArray(chunk.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true);
+    const allPoints = mergeSegmentPointsWithCorrections(
+      baseStops,
+      correctionWaypoints.map((point, index) => buildCorrectionSimulationPoint(
+        routeName,
+        segmentIndex,
+        point,
+        index,
+        baseStops.length + correctionWaypoints.length
+      ))
+    );
+    const payloadSegment = allPoints.map((point) => ({
+      name: point.name,
+      lat: point.lat,
+      lng: point.lng,
+      originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
+      originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
+      candidateCoordinates: Array.isArray(point.candidateCoordinates) ? point.candidateCoordinates : [{ lat: point.lat, lng: point.lng }],
+      snappedToPath: point.snappedToPath === true,
+      snapDistanceMeters: point.snapDistanceMeters,
+      isSimulationCorrection: point.isSimulationCorrection === true,
+      pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+      requestedOrder: Number.isFinite(point.requestedOrder) ? Number(point.requestedOrder) : null,
+    }));
+    const result = await requestRouteTimeSegmentRecalculation({
+      routeName,
+      departureTime,
+      segmentIndex,
+      segment: payloadSegment,
+    });
+    const updatedChunk = result.chunk;
+    const originalChunkCoordinateGroups = buildOriginalChunkPathGroups(simulation.originalPathCoordinates, updatedChunk.stops);
+    const originalChunkCoordinates = flattenCoordinateGroups(originalChunkCoordinateGroups);
+    updatedChunk.originalChunkCoordinateGroups = originalChunkCoordinateGroups;
+    updatedChunk.originalChunkCoordinates = originalChunkCoordinates;
+    simulation.chunks[segmentIndex - 1] = updatedChunk;
+    simulation.driveSeconds = Math.round(simulation.chunks.reduce((sum, item) => sum + Number(item.driveSeconds || 0), 0));
+    simulation.distanceMeters = Number(simulation.chunks.reduce((sum, item) => sum + Number(item.distanceMeters || 0), 0).toFixed(1));
+    simulation.totalSeconds = Math.round(simulation.driveSeconds + Number(simulation.dwellSecondsTotal || 0));
+    updateRouteSimulationCorrection(routeName, segmentIndex, correctionWaypoints, "사용자 강제 포인트");
+    syncUpdatedSimulationToReport(simulation);
+    return {
+      simulation,
+      updatedChunk,
+      correctionWaypoints,
+    };
+  }
+
+  async function clearRouteTimeSegmentCorrection(reportId, routeName, departureTime, segmentIndex) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      throw new Error("최신 운행시간 시뮬레이션 결과를 찾지 못했습니다.");
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      throw new Error("초기화할 분석구간 결과를 찾지 못했습니다.");
+    }
+    const chunk = simulation.chunks?.[segmentIndex - 1];
+    if (!chunk) {
+      throw new Error("초기화할 분석구간을 찾지 못했습니다.");
+    }
+    const baseStops = (Array.isArray(chunk.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true);
+    if (baseStops.length < 2) {
+      throw new Error("기본 정류장 정보가 부족해 포인트를 초기화할 수 없습니다.");
+    }
+    const payloadSegment = baseStops.map((point) => ({
+      name: point.name,
+      lat: point.lat,
+      lng: point.lng,
+      originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
+      originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
+      candidateCoordinates: Array.isArray(point.candidateCoordinates) ? point.candidateCoordinates : [{ lat: point.lat, lng: point.lng }],
+      snappedToPath: point.snappedToPath === true,
+      snapDistanceMeters: point.snapDistanceMeters,
+      isSimulationCorrection: false,
+      pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+      requestedOrder: null,
+    }));
+    const result = await requestRouteTimeSegmentRecalculation({
+      routeName,
+      departureTime,
+      segmentIndex,
+      segment: payloadSegment,
+    });
+    const updatedChunk = result.chunk;
+    const originalChunkCoordinateGroups = buildOriginalChunkPathGroups(simulation.originalPathCoordinates, updatedChunk.stops);
+    const originalChunkCoordinates = flattenCoordinateGroups(originalChunkCoordinateGroups);
+    updatedChunk.originalChunkCoordinateGroups = originalChunkCoordinateGroups;
+    updatedChunk.originalChunkCoordinates = originalChunkCoordinates;
+    simulation.chunks[segmentIndex - 1] = updatedChunk;
+    simulation.driveSeconds = Math.round(simulation.chunks.reduce((sum, item) => sum + Number(item.driveSeconds || 0), 0));
+    simulation.distanceMeters = Number(simulation.chunks.reduce((sum, item) => sum + Number(item.distanceMeters || 0), 0).toFixed(1));
+    simulation.totalSeconds = Math.round(simulation.driveSeconds + Number(simulation.dwellSecondsTotal || 0));
+    clearRouteSimulationCorrection(routeName, segmentIndex);
+    syncUpdatedSimulationToReport(simulation);
+    return {
+      simulation,
+      updatedChunk,
     };
   }
 
@@ -3360,7 +3811,20 @@
     const routes = Array.isArray(responsePayload?.routes) ? responsePayload.routes : [];
     const rows = [];
     routes.forEach((route) => {
+      const originalPathCoordinates = buildRouteSimulationAnchorCoordinates(route.routeName);
       (route.simulations || []).forEach((item) => {
+        const chunks = (Array.isArray(item.chunks) ? item.chunks : []).map((chunk, index) => {
+          const stops = Array.isArray(chunk?.stops) ? chunk.stops : [];
+          const originalChunkCoordinateGroups = buildOriginalChunkPathGroups(originalPathCoordinates, stops);
+          const originalChunkCoordinates = [];
+          originalChunkCoordinateGroups.forEach((group) => appendUniqueCoordinates(originalChunkCoordinates, group));
+          return {
+            ...chunk,
+            chunkIndex: Number(chunk?.chunkIndex || index + 1),
+            originalChunkCoordinateGroups,
+            originalChunkCoordinates,
+          };
+        });
         rows.push({
           routeName: route.routeName,
           stopCount: route.stopCount,
@@ -3371,8 +3835,11 @@
           dwellSecondsTotal: item.dwellSecondsTotal,
           totalSeconds: item.totalSeconds,
           distanceMeters: item.distanceMeters,
+          chunks,
+          originalPathCoordinates,
         });
       });
+      route.originalPathCoordinates = originalPathCoordinates;
     });
 
     return {
@@ -3438,19 +3905,99 @@
         <td>${escapeHtml(formatSimulationDurationLabel(item.dwellSecondsTotal))}</td>
         <td><strong>${escapeHtml(formatSimulationDurationLabel(item.totalSeconds))}</strong></td>
         <td>${escapeHtml((Number(item.distanceMeters || 0) / 1000).toFixed(2))}km</td>
+        <td style="white-space:nowrap;display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" data-route-map="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}">경로보기</button>
+          <button type="button" data-route-log="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}">계산로그</button>
+        </td>
       </tr>
     `).join("");
+  }
+
+  function buildRouteTimeSimulationLogText(simulation) {
+    if (!simulation) {
+      return "계산 로그를 찾지 못했습니다.";
+    }
+    const lines = [
+      `노선: ${simulation.routeName || "-"}`,
+      `시간대: ${simulation.timeLabel || "-"}`,
+      `출발시각: ${simulation.departureTime || "-"}`,
+      `정류장 수: ${simulation.stopCount || 0}`,
+      `구간 수: ${simulation.segmentCount || 0}`,
+      `총 주행시간: ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
+      `총 정차 보정: ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
+      `총 운행시간: ${formatSimulationDurationLabel(simulation.totalSeconds || 0)}`,
+      `총 거리: ${(Number(simulation.distanceMeters || 0) / 1000).toFixed(2)}km`,
+      "",
+      "[구간별 계산 로그]",
+    ];
+    (simulation.chunks || []).forEach((chunk, index) => {
+      const stopLines = (chunk.stops || []).map((stop, stopIndex) => (
+        `  ${stopIndex + 1}. ${stop.name || "-"}${stop.isSimulationCorrection ? " [보정포인트]" : ""}`
+        + ` / 원본=(${Number((Number.isFinite(stop.originalLng) ? stop.originalLng : stop.lng) || 0).toFixed(7)}, ${Number((Number.isFinite(stop.originalLat) ? stop.originalLat : stop.lat) || 0).toFixed(7)})`
+        + ` / 스냅=(${Number((Number.isFinite(stop.snappedLng) ? stop.snappedLng : stop.lng) || 0).toFixed(7)}, ${Number((Number.isFinite(stop.snappedLat) ? stop.snappedLat : stop.lat) || 0).toFixed(7)})`
+        + ` / 스냅거리=${stop.snapDistanceMeters == null ? "-" : `${stop.snapDistanceMeters}m`}`
+      ));
+      lines.push(
+        `구간 ${index + 1}`,
+        `- 포함 정류장: ${(chunk.stops || []).length}개`,
+        `- origin: ${chunk.originParam || "-"}`,
+        `- destination: ${chunk.destinationParam || "-"}`,
+        `- waypoints: ${chunk.waypointsParam || "-"}`,
+        `- attempts: ${chunk.attempts || 0}`,
+        `- sections: ${chunk.sectionCount || 0}`,
+        `- drive: ${formatSimulationDurationLabel(chunk.driveSeconds || 0)}`,
+        `- distance: ${(Number(chunk.distanceMeters || 0) / 1000).toFixed(2)}km`,
+        `- 최종 요청 순서:`,
+        ...((chunk.stops || []).map((stop, orderIndex) => {
+          const pointType = stop.isSimulationCorrection ? "강제포인트" : "정류장";
+          const pathOrder = Number.isFinite(Number(stop.pathIndex)) ? String(stop.pathIndex) : "-";
+          const requestedOrder = Number.isFinite(Number(stop.requestedOrder)) ? String(stop.requestedOrder) : "-";
+          return `  ${orderIndex + 1}. [${pointType}] ${stop.name || "-"} / pathIndex=${pathOrder} / requestedOrder=${requestedOrder}`;
+        })),
+        `- 정류장 목록:`,
+        ...stopLines,
+        ""
+      );
+    });
+    return lines.join("\n");
+  }
+
+  function openRouteTimeSimulationLogWindow(reportId, routeName, departureTime) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      setStatus("표시할 운행시간 시뮬레이션 로그를 찾지 못했습니다. 다시 실행해 주세요.", true);
+      return;
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      setStatus("표시할 계산 로그 결과를 찾지 못했습니다.", true);
+      return;
+    }
+    const logWindow = window.open("", `route-time-log-${routeName}-${departureTime}`, "width=980,height=860,resizable=yes,scrollbars=yes");
+    if (!logWindow) {
+      setStatus("팝업이 차단되었습니다. 계산 로그 창을 허용해 주세요.", true);
+      return;
+    }
+    const logText = buildRouteTimeSimulationLogText(simulation);
+    logWindow.document.open();
+    logWindow.document.write(`<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${escapeHtml(routeName)} 계산 로그</title><style>body{margin:0;padding:20px;background:#0f172a;color:#e2e8f0;font:13px/1.6 Consolas,'Courier New',monospace;} pre{white-space:pre-wrap;word-break:break-word;} button{margin-bottom:12px;padding:8px 12px;border:0;border-radius:999px;background:#1d4ed8;color:#fff;cursor:pointer;font:inherit;}</style></head><body><button type="button" onclick="window.close()">닫기</button><pre>${escapeHtml(logText)}</pre></body></html>`);
+    logWindow.document.close();
+    logWindow.focus();
   }
 
   function buildRouteTimeSimulationResultsWindowHtml(report) {
     const routeCards = (report.routes || []).map((route) => `
       <div class="card">
-        <h2>${escapeHtml(route.routeName)}</h2>
-        <p class="meta">정류장 ${escapeHtml(String(route.stopCount))}개 / 청크 ${escapeHtml(String(route.segmentCount))}개</p>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div>
+            <h2>${escapeHtml(route.routeName)}</h2>
+            <p class="meta">정류장 ${escapeHtml(String(route.stopCount))}개 / 청크 ${escapeHtml(String(route.segmentCount))}개</p>
+          </div>
+          <button type="button" data-route-map="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(route.simulations?.[0]?.departureTime || "")}">경로보기</button>
+        </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>시간대</th><th>출발시각</th><th>예상 주행시간</th><th>정차 보정</th><th>예상 총 운행시간</th><th>거리</th></tr></thead>
-            <tbody>${buildRouteTimeSimulationRowsHtml(route) || "<tr><td colspan=\"6\">결과 없음</td></tr>"}</tbody>
+            <thead><tr><th>시간대</th><th>출발시각</th><th>예상 주행시간</th><th>정차 보정</th><th>예상 총 운행시간</th><th>거리</th><th>지도</th></tr></thead>
+            <tbody>${buildRouteTimeSimulationRowsHtml(route) || "<tr><td colspan=\"7\">결과 없음</td></tr>"}</tbody>
           </table>
         </div>
       </div>
@@ -3512,6 +4059,20 @@
         window.opener.__wonderLinxRouteTime.download(${JSON.stringify(report.id)});
       }
     });
+    document.querySelectorAll("[data-route-map]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (window.opener && window.opener.__wonderLinxRouteTime) {
+          window.opener.__wonderLinxRouteTime.showMap(${JSON.stringify(report.id)}, button.dataset.routeMap, button.dataset.routeTime);
+        }
+      });
+    });
+    document.querySelectorAll("[data-route-log]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (window.opener && window.opener.__wonderLinxRouteTime) {
+          window.opener.__wonderLinxRouteTime.showLog(${JSON.stringify(report.id)}, button.dataset.routeLog, button.dataset.routeTime);
+        }
+      });
+    });
     document.getElementById("close-window-button")?.addEventListener("click", () => window.close());
   </script>
 </body>
@@ -3555,6 +4116,842 @@
     resultsWindow.document.close();
     resultsWindow.focus();
     return true;
+  }
+
+  function buildRouteTimeSimulationMapWindowHtml(reportId, routeName, simulation) {
+    const appKey = String(config.appKey || "");
+    const payload = getRouteTimeSimulationMapWindowPayload(reportId, routeName, simulation?.departureTime || "") || {
+      reportId,
+      routeName,
+      departureTime: simulation?.departureTime || "",
+      originalPath: [],
+      analysisPath: [],
+      sections: [],
+    };
+    const sectionColors = ["#e11d48","#2563eb","#16a34a","#f59e0b","#7c3aed","#0f766e"];
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(routeName)} 경로보기</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f7fb; --card:#ffffff; --line:#d8e1ec; --text:#172033; --muted:#64758d; --accent:#1d4ed8; --accent-soft:#dbeafe; }
+    * { box-sizing:border-box; }
+    html, body { height:100%; overflow:hidden; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif; }
+    .layout { display:grid; grid-template-columns:380px 1fr; height:100vh; overflow:hidden; }
+    .side { height:100vh; padding:18px; border-right:1px solid var(--line); background:#fff; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; }
+    .map-wrap { position:relative; height:100vh; overflow:hidden; }
+    #route-time-map { width:100%; height:100vh; }
+    h1 { margin:0 0 6px; font-size:24px; }
+    p { margin:0 0 14px; color:var(--muted); }
+    .legend { display:grid; gap:10px; margin-top:16px; }
+    .legend-item { display:flex; align-items:center; gap:10px; }
+    .line { width:40px; height:0; border-top:5px solid #999; border-radius:999px; }
+    .line.dashed { border-top-style:dashed; }
+    .line.soft { border-top-style:dotted; }
+    .swatch { width:16px; height:16px; border-radius:999px; border:2px solid rgba(15,23,42,.18); flex:0 0 auto; }
+    .toggle-list { display:grid; gap:8px; margin-top:18px; }
+    .toggle-item { display:flex; align-items:center; gap:10px; }
+    .section-list { display:grid; gap:12px; margin-top:18px; }
+    .section-card { padding:14px; border:1px solid var(--line); border-radius:16px; background:#fbfdff; cursor:pointer; transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease,opacity .16s ease; }
+    .section-card:hover { transform:translateY(-1px); border-color:#b9c8de; box-shadow:0 8px 18px rgba(15,23,42,.08); }
+    .section-card.active { border-color:var(--accent); box-shadow:0 12px 24px rgba(29,78,216,.18); background:#f7faff; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+    .section-title { display:flex; align-items:center; gap:8px; }
+    .section-title strong { margin:0; }
+    .badge { display:inline-flex; align-items:center; height:24px; padding:0 9px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; }
+    .mini-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+    .mini { padding:10px; border:1px solid var(--line); border-radius:12px; background:#fff; cursor:pointer; transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+    .mini b { display:block; margin-bottom:4px; font-size:12px; color:var(--muted); }
+    .mini:hover { transform:translateY(-1px); }
+    .mini.original { border-color:rgba(37,99,235,.22); }
+    .mini.analysis { border-color:rgba(17,24,39,.18); }
+    .mini.active-original { border-color:#2563eb; box-shadow:0 10px 20px rgba(37,99,235,.16); background:#f5f9ff; }
+    .mini.active-analysis { border-color:#111827; box-shadow:0 10px 20px rgba(17,24,39,.16); background:#f8fafc; }
+    .order-editor { margin-top:10px; padding:10px; border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .order-editor-title { margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:700; }
+    .order-list { display:grid; gap:6px; }
+    .order-row { display:grid; grid-template-columns:28px 1fr auto; align-items:center; gap:8px; min-height:28px; font-size:12px; }
+    .order-row .order-index { color:var(--muted); font-weight:700; text-align:right; }
+    .order-row .order-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .order-row .order-type { color:var(--muted); }
+    .order-row.forced { padding:6px 8px; border-radius:10px; background:#f8fafc; border:1px solid #dbe4f0; }
+    .order-row.forced input { width:54px; padding:4px 6px; border:1px solid var(--line); border-radius:8px; font:inherit; text-align:center; }
+    .order-empty { color:var(--muted); font-size:12px; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    button { padding:9px 13px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
+    .primary { border-color:#bcd3ff; background:#eaf2ff; color:var(--accent); font-weight:700; }
+    .status { margin-top:12px; padding:10px 12px; border-radius:12px; background:#f8fbff; border:1px solid var(--line); color:var(--muted); font-size:13px; }
+    .status.error { border-color:#fecaca; background:#fef2f2; color:#b91c1c; }
+    .debug-panel { position:fixed; right:14px; bottom:14px; width:360px; max-height:240px; overflow:auto; padding:12px; border-radius:14px; background:rgba(15,23,42,.92); color:#e5eefb; font:12px/1.55 Consolas,"Courier New",monospace; box-shadow:0 16px 32px rgba(15,23,42,.28); z-index:9999; }
+    .debug-panel strong { display:block; margin-bottom:6px; color:#93c5fd; font-size:12px; }
+    .debug-line { white-space:pre-wrap; word-break:break-word; opacity:.95; }
+    .dir-arrow { width:18px; height:18px; display:grid; place-items:center; border-radius:999px; background:rgba(17,24,39,.78); color:#fff; font:700 11px/1 Segoe UI,Malgun Gothic,sans-serif; box-shadow:0 4px 10px rgba(15,23,42,.18); }
+    .stop-pin { min-width:22px; height:22px; padding:0 6px; display:grid; place-items:center; border-radius:999px; background:#ffffff; border:2px solid #111827; color:#111827; font:700 11px/1 Segoe UI,Malgun Gothic,sans-serif; box-shadow:0 4px 10px rgba(15,23,42,.16); }
+    @media (max-width: 980px) { .layout { grid-template-columns:1fr; grid-template-rows:auto 1fr; } .side { height:auto; max-height:35vh; border-right:0; border-bottom:1px solid var(--line); } .map-wrap { height:65vh; } #route-time-map { height:65vh; } }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="side">
+      <h1>${escapeHtml(routeName)}</h1>
+      <p>출발시각 ${escapeHtml(simulation?.departureTime || "-")} 기준입니다. 각 구간 카드에서 원본구간과 분석구간을 비교하고, 차이가 큰 구간만 재설정할 수 있습니다.</p>
+      <div class="legend">
+        <div class="legend-item"><span class="line dashed" style="border-top-color:#94a3b8;"></span><span>원본 전체 경로</span></div>
+        <div class="legend-item"><span class="line" style="border-top-color:#111827;"></span><span>분석 전체 경로</span></div>
+        <div class="legend-item"><span class="line" style="border-top-color:#2563eb;"></span><span>원본구간</span></div>
+        <div class="legend-item"><span class="line" style="border-top-color:#111827;border-top-width:7px;opacity:.55;"></span><span>분석구간</span></div>
+      </div>
+      <div class="toggle-list">
+        <label class="toggle-item"><input id="toggle-original-path" type="checkbox" checked><span class="swatch" style="background:#94a3b8;"></span>원본 전체 경로</label>
+        <label class="toggle-item"><input id="toggle-analysis-path" type="checkbox" checked><span class="swatch" style="background:#111827;"></span>분석 전체 경로</label>
+        <label class="toggle-item"><input id="toggle-sections" type="checkbox" checked><span class="swatch" style="background:#2563eb;"></span>구간별 경로</label>
+      </div>
+      <div id="section-status" class="status">문제가 있는 분석구간에 <strong>강제 포인트 추가</strong>로 점을 찍고, 숫자를 조정한 뒤 <strong>경로 재설정</strong>을 누르세요.</div>
+      <div class="section-list">
+        ${payload.sections.map((section, index) => `
+          <div class="section-card" data-section-card="${index}">
+            <div class="section-head">
+              <div class="section-title">
+                <input type="checkbox" data-section-toggle="${index}" checked>
+                <span class="swatch" style="background:${escapeHtml(sectionColors[index % sectionColors.length])};"></span>
+                <strong>구간 ${index + 1}</strong>
+              </div>
+              ${section.correctionCount > 0 ? `<span class="badge">보정 ${escapeHtml(String(section.correctionCount))}</span>` : ""}
+            </div>
+            <div>${escapeHtml(section.stops[0]?.name || `${index + 1} 시작`)} → ${escapeHtml(section.stops[section.stops.length - 1]?.name || `${index + 1} 종료`)}</div>
+            <div style="margin-top:6px;color:var(--muted);">정류장 ${escapeHtml(String(section.stops.length))}개</div>
+            <div class="mini-grid">
+              <div class="mini original" data-section-view="original" data-section-view-index="${index}">
+                <b>원본구간</b>
+                <div>${escapeHtml((Number(section.originalDistanceMeters || 0) / 1000).toFixed(2))}km</div>
+              </div>
+              <div class="mini analysis" data-section-view="analysis" data-section-view-index="${index}">
+                <b>분석구간</b>
+                <div>${escapeHtml(formatSimulationDurationLabel(section.analysisDriveSeconds || 0))} / ${escapeHtml((Number(section.analysisDistanceMeters || 0) / 1000).toFixed(2))}km</div>
+              </div>
+            </div>
+            <div class="order-editor" data-order-editor="${index}"></div>
+            <div class="actions">
+              <button type="button" data-force-point-section="${index}">강제 포인트 추가</button>
+              <button class="primary" type="button" data-recalc-section="${index}">경로 재설정</button>
+              <button type="button" data-clear-point-section="${index}">포인트 초기화</button>
+              <button type="button" data-focus-section="${index}">이 구간만 보기</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </aside>
+    <main class="map-wrap">
+      <div id="route-time-map"></div>
+    </main>
+  </div>
+  <div class="debug-panel" id="route-time-debug"><strong>경로보기 디버그</strong><div id="route-time-debug-lines"></div></div>
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${escapeHtml(appKey)}"></script>
+  <script>
+    const debugLinesEl = document.getElementById("route-time-debug-lines");
+    function debugLog(message) {
+      if (!debugLinesEl) return;
+      const line = document.createElement("div");
+      line.className = "debug-line";
+      line.textContent = '[' + new Date().toLocaleTimeString('ko-KR', { hour12: false }) + '] ' + String(message || '');
+      debugLinesEl.appendChild(line);
+      debugLinesEl.scrollTop = debugLinesEl.scrollHeight;
+    }
+    function escapePopupHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+    window.addEventListener("error", (event) => {
+      debugLog('window.error: ' + (event.message || 'unknown error'));
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason || 'unknown rejection');
+      debugLog('unhandledrejection: ' + reason);
+    });
+    debugLog('map window html loaded');
+    let payload = ${JSON.stringify(payload)};
+    debugLog('payload sections=' + String((payload.sections || []).length) + ', originalPath=' + String((payload.originalPath || []).length) + ', analysisPath=' + String((payload.analysisPath || []).length));
+    const colors = ${JSON.stringify(sectionColors)};
+    let map = null;
+    let bounds = null;
+    let originalPolyline = null;
+    let analysisPolyline = null;
+    let originalSectionPolylines = [];
+    let analysisSectionPolylines = [];
+    let sectionLabels = [];
+    let analysisDirectionOverlays = [];
+    let stopMarkers = [];
+    let forcedPointMarker = null;
+    const sectionVisible = payload.sections.map(() => true);
+    const pendingForcedPoints = {};
+    let activeSectionIndex = -1;
+    let activeSectionView = "both";
+    let forcePointPickIndex = -1;
+
+    function setStatus(message, isError) {
+      const statusEl = document.getElementById("section-status");
+      if (!statusEl) return;
+      statusEl.textContent = message || "";
+      statusEl.classList.toggle("error", Boolean(isError));
+    }
+
+    function toLatLngPath(coordinates) {
+      return (Array.isArray(coordinates) ? coordinates : []).map((coordinate) => {
+        bounds.extend(new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng));
+        return new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng);
+      });
+    }
+
+    function clearMapObjects() {
+      if (originalPolyline) originalPolyline.setMap(null);
+      if (analysisPolyline) analysisPolyline.setMap(null);
+      originalSectionPolylines.forEach((items) => (items || []).forEach((polyline) => polyline.setMap(null)));
+      analysisSectionPolylines.forEach((items) => (items || []).forEach((polyline) => polyline.setMap(null)));
+      sectionLabels.forEach((label) => label && label.setMap(null));
+      analysisDirectionOverlays.forEach((items) => (items || []).forEach((overlay) => overlay.setMap(null)));
+      stopMarkers.forEach((items) => (items || []).forEach((overlay) => overlay.setMap(null)));
+      originalPolyline = null;
+      analysisPolyline = null;
+      originalSectionPolylines = [];
+      analysisSectionPolylines = [];
+      sectionLabels = [];
+      analysisDirectionOverlays = [];
+      stopMarkers = [];
+      if (forcedPointMarker) {
+        forcedPointMarker.setMap(null);
+        forcedPointMarker = null;
+      }
+    }
+
+    function buildDirectionArrowOverlays(coordinates) {
+      const overlays = [];
+      if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        return overlays;
+      }
+      const step = Math.max(12, Math.floor(coordinates.length / 3));
+      for (let index = step; index < coordinates.length; index += step) {
+        const from = coordinates[Math.max(0, index - 1)];
+        const to = coordinates[index];
+        if (!from || !to) continue;
+        const angle = Math.atan2(to.lat - from.lat, to.lng - from.lng) * (180 / Math.PI);
+        overlays.push(new window.kakao.maps.CustomOverlay({
+          position: new window.kakao.maps.LatLng(to.lat, to.lng),
+          yAnchor: 0.5,
+          xAnchor: 0.5,
+          content: '<div class="dir-arrow" style="transform:rotate(' + angle + 'deg);">▲</div>',
+        }));
+      }
+      return overlays;
+    }
+
+    function buildStopMarkerOverlay(stop, stopIndex, color) {
+      if (!stop) {
+        return null;
+      }
+      return new window.kakao.maps.CustomOverlay({
+        position: new window.kakao.maps.LatLng(stop.lat, stop.lng),
+        yAnchor: 0.5,
+        xAnchor: 0.5,
+        content: '<div class="stop-pin" style="border-color:' + color + ';color:' + color + ';">' + String(stopIndex + 1) + '</div>',
+      });
+    }
+
+    function buildOrderedStopMarkerOverlays(section, color) {
+      const overlays = [];
+      const stops = Array.isArray(section?.stops) ? section.stops : [];
+      stops.forEach((stop, stopIndex) => {
+        const markerPoint = {
+          lat: Number.isFinite(Number(stop?.originalLat)) ? Number(stop.originalLat) : Number(stop?.lat),
+          lng: Number.isFinite(Number(stop?.originalLng)) ? Number(stop.originalLng) : Number(stop?.lng),
+        };
+        const overlay = buildStopMarkerOverlay(markerPoint, stopIndex, color);
+        if (overlay) {
+          overlays.push(overlay);
+        }
+      });
+      return overlays;
+    }
+
+    function getSectionBaseStops(section) {
+      const source = Array.isArray(section?.baseStops) && section.baseStops.length
+        ? section.baseStops
+        : (Array.isArray(section?.stops) ? section.stops.filter((stop) => stop?.isSimulationCorrection !== true) : []);
+      return source.slice(0, 4);
+    }
+
+    function getStoredForcedPoint(section) {
+      const source = Array.isArray(section?.forcedStops) && section.forcedStops.length
+        ? section.forcedStops
+        : (Array.isArray(section?.stops) ? section.stops.filter((stop) => stop?.isSimulationCorrection === true) : []);
+      const item = source[0];
+      if (!item) {
+        return null;
+      }
+      return {
+        name: item.name || "강제포인트",
+        lat: Number(item.originalLat ?? item.lat),
+        lng: Number(item.originalLng ?? item.lng),
+        order: Number.isFinite(Number(item.requestedOrder)) ? Number(item.requestedOrder) : (getSectionBaseStops(section).length + 1),
+      };
+    }
+
+    function normalizePendingForcedPoint(sectionIndex, point) {
+      const section = payload.sections[sectionIndex];
+      const baseCount = Math.max(1, getSectionBaseStops(section).length);
+      if (!point) {
+        return null;
+      }
+      const lat = Number(point.lat);
+      const lng = Number(point.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+      }
+      const maxOrder = baseCount + 1;
+      const order = Math.min(Math.max(Math.round(Number(point.order || maxOrder)), 2), maxOrder);
+      return {
+        name: point.name || "강제포인트",
+        lat,
+        lng,
+        order,
+      };
+    }
+
+    function syncPendingForcedPointsFromPayload() {
+      Object.keys(pendingForcedPoints).forEach((key) => delete pendingForcedPoints[key]);
+      payload.sections.forEach((section, index) => {
+        const forcedPoint = normalizePendingForcedPoint(index, getStoredForcedPoint(section));
+        if (forcedPoint) {
+          pendingForcedPoints[index] = forcedPoint;
+        }
+      });
+    }
+
+    function getSectionForcedPoint(index) {
+      return normalizePendingForcedPoint(index, pendingForcedPoints[index]);
+    }
+
+    function buildSectionOrderItems(index) {
+      const section = payload.sections[index];
+      const baseStops = getSectionBaseStops(section);
+      const forcedPoint = getSectionForcedPoint(index);
+      const items = baseStops.map((stop, stopIndex) => ({
+        type: "stop",
+        displayOrder: stopIndex + 1,
+        name: stop?.name || ("정류장 " + String(stopIndex + 1)),
+      }));
+      if (!forcedPoint) {
+        return items;
+      }
+      const totalCount = baseStops.length + 1;
+      const requestedOrder = Math.min(Math.max(Math.round(Number(forcedPoint.order || totalCount)), 2), totalCount);
+      const nextItems = [];
+      let stopOffset = 0;
+      for (let order = 1; order <= totalCount; order += 1) {
+        if (order === requestedOrder) {
+          nextItems.push({
+            type: "forced",
+            displayOrder: order,
+            name: forcedPoint.name || "강제포인트",
+            order: requestedOrder,
+          });
+        } else {
+          const stop = baseStops[stopOffset];
+          stopOffset += 1;
+          nextItems.push({
+            type: "stop",
+            displayOrder: order,
+            name: stop?.name || ("정류장 " + String(order)),
+          });
+        }
+      }
+      return nextItems;
+    }
+
+    function renderSectionOrderEditors() {
+      payload.sections.forEach((section, index) => {
+        const editor = document.querySelector('[data-order-editor="' + index + '"]');
+        if (!editor) return;
+        const baseStops = getSectionBaseStops(section);
+        const forcedPoint = getSectionForcedPoint(index);
+        const items = buildSectionOrderItems(index);
+        editor.innerHTML =
+          '<div class="order-editor-title">정류장 순서</div>'
+          + '<div class="order-list">'
+          + items.map((item) => item.type === "forced"
+            ? '<div class="order-row forced"><span class="order-index">' + item.displayOrder + '</span><span class="order-name">강제포인트</span><input type="number" min="2" max="' + (baseStops.length + 1) + '" value="' + item.order + '" data-force-order-input="' + index + '"></div>'
+            : '<div class="order-row"><span class="order-index">' + item.displayOrder + '</span><span class="order-name">' + escapePopupHtml(item.name) + '</span><span class="order-type">정류장</span></div>'
+          ).join("")
+          + (forcedPoint ? '' : '<div class="order-empty">강제포인트 없음</div>')
+          + '</div>';
+      });
+      document.querySelectorAll("[data-force-order-input]").forEach((input) => {
+        input.addEventListener("click", (event) => event.stopPropagation());
+        input.addEventListener("input", (event) => {
+          const index = Number(event.target.getAttribute("data-force-order-input"));
+          if (!Number.isFinite(index) || !pendingForcedPoints[index]) {
+            return;
+          }
+          pendingForcedPoints[index] = normalizePendingForcedPoint(index, {
+            ...pendingForcedPoints[index],
+            order: event.target.value,
+          });
+          renderSectionOrderEditors();
+        });
+      });
+    }
+
+    function renderMap() {
+      debugLog('creating kakao map');
+      const container = document.getElementById("route-time-map");
+      if (!container) {
+        debugLog('route-time-map container missing');
+        return;
+      }
+      container.innerHTML = '';
+      bounds = new window.kakao.maps.LatLngBounds();
+      map = new window.kakao.maps.Map(container, {
+        center: new window.kakao.maps.LatLng(37.5665, 126.9780),
+        level: 6,
+      });
+      debugLog('kakao map created');
+
+      if (payload.originalPath.length >= 2) {
+        debugLog('drawing original full path');
+        originalPolyline = new window.kakao.maps.Polyline({
+          map,
+          path: toLatLngPath(payload.originalPath),
+          strokeWeight: 4,
+          strokeColor: "#94a3b8",
+          strokeOpacity: 0.78,
+          strokeStyle: "dash",
+        });
+      }
+
+      if (payload.analysisPath.length >= 2) {
+        debugLog('drawing analysis full path');
+        analysisPolyline = new window.kakao.maps.Polyline({
+          map,
+          path: toLatLngPath(payload.analysisPath),
+          strokeWeight: 7,
+          strokeColor: "#111827",
+          strokeOpacity: 0.92,
+          strokeStyle: "solid",
+        });
+      }
+
+      payload.sections.forEach((section, index) => {
+        debugLog('drawing section ' + String(index + 1) + ' / original=' + String((section.originalCoordinates || []).length) + ' / analysis=' + String((section.analysisCoordinates || []).length));
+        originalSectionPolylines[index] = [];
+        analysisSectionPolylines[index] = [];
+        const originalGroups = Array.isArray(section.originalCoordinateGroups) && section.originalCoordinateGroups.length
+          ? section.originalCoordinateGroups
+          : (Array.isArray(section.originalCoordinates) && section.originalCoordinates.length >= 2 ? [section.originalCoordinates] : []);
+        originalGroups.forEach((group) => {
+          if (!Array.isArray(group) || group.length < 2) return;
+          originalSectionPolylines[index].push(new window.kakao.maps.Polyline({
+            map,
+            path: toLatLngPath(group),
+            strokeWeight: 6,
+            strokeColor: colors[index % colors.length],
+            strokeOpacity: 0.96,
+            strokeStyle: "solid",
+          }));
+        });
+        if (Array.isArray(section.analysisCoordinates) && section.analysisCoordinates.length >= 2) {
+          analysisSectionPolylines[index].push(new window.kakao.maps.Polyline({
+            map,
+            path: toLatLngPath(section.analysisCoordinates),
+            strokeWeight: 7,
+            strokeColor: "#111827",
+            strokeOpacity: 0.46,
+            strokeStyle: "solid",
+          }));
+          analysisDirectionOverlays[index] = buildDirectionArrowOverlays(section.analysisCoordinates);
+          analysisDirectionOverlays[index].forEach((overlay) => overlay.setMap(map));
+        }
+        stopMarkers[index] = buildOrderedStopMarkerOverlays(section, colors[index % colors.length]);
+        stopMarkers[index].forEach((overlay) => overlay.setMap(map));
+        const labelPoint = section.stops[0] || section.stops[section.stops.length - 1];
+        if (labelPoint) {
+          const position = new window.kakao.maps.LatLng(labelPoint.lat, labelPoint.lng);
+          bounds.extend(position);
+          const label = new window.kakao.maps.CustomOverlay({
+            position,
+            yAnchor: 1.8,
+            content: '<div style="min-width:26px;height:26px;padding:0 8px;border-radius:999px;background:' + colors[index % colors.length] + ';color:#fff;font:700 12px/26px Segoe UI,Malgun Gothic,sans-serif;text-align:center;box-shadow:0 4px 10px rgba(15,23,42,.18);">구간 ' + String(index + 1) + '</div>',
+          });
+          label.setMap(map);
+          sectionLabels[index] = label;
+        }
+      });
+
+      applySectionState();
+      debugLog('section state applied');
+      if (!bounds.isEmpty()) {
+        map.setBounds(bounds, 40, 40, 40, 40);
+        debugLog('bounds applied');
+      } else {
+        debugLog('bounds empty');
+      }
+      window.kakao.maps.event.addListener(map, 'click', (mouseEvent) => {
+        if (forcePointPickIndex < 0) {
+          return;
+        }
+        const latlng = mouseEvent.latLng;
+        const forcedPoint = {
+          lat: latlng.getLat(),
+          lng: latlng.getLng(),
+        };
+        if (forcedPointMarker) {
+          forcedPointMarker.setMap(null);
+        }
+        forcedPointMarker = new window.kakao.maps.Marker({
+          map,
+          position: latlng,
+          title: '강제 포인트',
+        });
+        const pathMeta = window.opener && window.opener.__wonderLinxRouteTime && typeof window.opener.__wonderLinxRouteTime.getForcedPointDebugMeta === "function"
+          ? window.opener.__wonderLinxRouteTime.getForcedPointDebugMeta(payload.routeName, forcedPoint)
+          : null;
+        debugLog(
+          'force point picked for section ' + String(forcePointPickIndex + 1)
+          + ': raw=' + forcedPoint.lng + ',' + forcedPoint.lat
+          + (pathMeta ? ' / nearestPath=' + pathMeta.pathLng + ',' + pathMeta.pathLat + ' / gap=' + pathMeta.snapDistanceMeters + 'm' : '')
+        );
+        pendingForcedPoints[forcePointPickIndex] = normalizePendingForcedPoint(forcePointPickIndex, {
+          ...forcedPoint,
+          name: '강제포인트',
+          order: getSectionBaseStops(payload.sections[forcePointPickIndex]).length + 1,
+        });
+        renderSectionOrderEditors();
+        setStatus('강제포인트를 저장했습니다. 숫자를 조정한 뒤 경로 재설정을 누르세요.', false);
+        stopForcePointMode();
+      });
+    }
+
+    function refreshPayload(nextPayload) {
+      if (!nextPayload) {
+        debugLog('refreshPayload: next payload missing');
+        return;
+      }
+      payload = nextPayload;
+      while (sectionVisible.length < payload.sections.length) {
+        sectionVisible.push(true);
+      }
+      clearMapObjects();
+      syncPendingForcedPointsFromPayload();
+      renderSectionOrderEditors();
+      renderMap();
+    }
+
+    function stopForcePointMode() {
+      forcePointPickIndex = -1;
+      if (forcedPointMarker) {
+        forcedPointMarker.setMap(null);
+        forcedPointMarker = null;
+      }
+    }
+
+    function startForcePointMode(index) {
+      forcePointPickIndex = index;
+      setStatus('구간 ' + String(index + 1) + '의 강제 포인트를 지도에서 한 번 클릭하세요.', false);
+      debugLog('force point mode started for section ' + String(index + 1));
+    }
+
+    function applySectionState() {
+      const sectionsEnabled = document.getElementById("toggle-sections")?.checked !== false;
+      payload.sections.forEach((section, index) => {
+        const originalPolylines = originalSectionPolylines[index] || [];
+        const analysisPolylines = analysisSectionPolylines[index] || [];
+        const label = sectionLabels[index];
+        const directionOverlays = analysisDirectionOverlays[index] || [];
+        const markers = stopMarkers[index] || [];
+        const card = document.querySelector('[data-section-card="' + index + '"]');
+        const toggle = document.querySelector('[data-section-toggle="' + index + '"]');
+        const originalViewEl = document.querySelector('[data-section-view="original"][data-section-view-index="' + index + '"]');
+        const analysisViewEl = document.querySelector('[data-section-view="analysis"][data-section-view-index="' + index + '"]');
+        const isVisible = sectionsEnabled && sectionVisible[index] !== false;
+        const isActive = isVisible && activeSectionIndex === index;
+        const isHiddenByFocus = activeSectionIndex >= 0 && activeSectionIndex !== index;
+        const shouldShow = isVisible && !isHiddenByFocus;
+        const showOriginal = shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "original");
+        const showAnalysis = shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "analysis");
+        originalPolylines.forEach((polyline) => {
+          polyline.setMap(showOriginal ? map : null);
+          polyline.setOptions({
+            strokeWeight: isActive && activeSectionView === "original" ? 9 : 6,
+            strokeOpacity: showOriginal ? (isActive && activeSectionView === "original" ? 1 : 0.96) : 0,
+            zIndex: isActive ? 30 : 16,
+          });
+        });
+        analysisPolylines.forEach((polyline) => {
+          polyline.setMap(showAnalysis ? map : null);
+          polyline.setOptions({
+            strokeWeight: isActive && activeSectionView === "analysis" ? 9 : 7,
+            strokeOpacity: showAnalysis ? (isActive && activeSectionView === "analysis" ? 0.62 : 0.46) : 0,
+            zIndex: isActive ? 34 : 18,
+          });
+        });
+        directionOverlays.forEach((overlay) => overlay.setMap(showAnalysis ? map : null));
+        markers.forEach((overlay) => overlay.setMap(shouldShow ? map : null));
+        if (label) {
+          label.setMap(shouldShow ? map : null);
+        }
+        if (card) {
+          card.style.opacity = sectionsEnabled ? (isVisible ? (isHiddenByFocus ? "0.42" : "1") : "0.32") : "0.32";
+          card.classList.toggle("active", isActive);
+        }
+        if (originalViewEl) {
+          originalViewEl.classList.toggle("active-original", isActive && activeSectionView === "original");
+        }
+        if (analysisViewEl) {
+          analysisViewEl.classList.toggle("active-analysis", isActive && activeSectionView === "analysis");
+        }
+        if (toggle) {
+          toggle.checked = sectionVisible[index] !== false;
+        }
+      });
+    }
+
+    function focusSection(index, view = "both") {
+      if (activeSectionIndex === index && activeSectionView === view) {
+        activeSectionIndex = -1;
+        activeSectionView = "both";
+      } else {
+        activeSectionIndex = index;
+        activeSectionView = view;
+      }
+      applySectionState();
+    }
+
+    async function recalcSection(index) {
+      if (!window.opener || !window.opener.__wonderLinxRouteTime) {
+        setStatus("메인 창과 연결되지 않아 구간을 재설정할 수 없습니다.", true);
+        return;
+      }
+      const forcedPoint = getSectionForcedPoint(index);
+      if (!forcedPoint) {
+        setStatus("먼저 강제 포인트를 추가하세요.", true);
+        return;
+      }
+      setStatus('구간 ' + String(index + 1) + ' 분석경로를 재설정하는 중입니다...', false);
+      try {
+        await window.opener.__wonderLinxRouteTime.recalculateSegment(
+          payload.reportId,
+          payload.routeName,
+          payload.departureTime,
+          index + 1,
+          forcedPoint,
+          forcedPoint.order
+        );
+        window.alert('변경 적용');
+        const nextPayload = window.opener.__wonderLinxRouteTime.getMapWindowPayload(payload.reportId, payload.routeName, payload.departureTime);
+        if (!nextPayload) {
+          throw new Error('재계산 후 최신 구간 데이터를 받지 못했습니다.');
+        }
+        setStatus('변경 적용 완료. 최신 분석구간을 다시 그립니다.', false);
+        debugLog('segment recalculation completed; applying partial refresh');
+        stopForcePointMode();
+        refreshPayload(nextPayload);
+      } catch (error) {
+        setStatus(error.message || '경로 재설정 중 오류가 발생했습니다.', true);
+      }
+    }
+
+    async function clearSectionPoint(index) {
+      if (!window.opener || !window.opener.__wonderLinxRouteTime) {
+        setStatus("메인 창과 연결되지 않아 포인트를 초기화할 수 없습니다.", true);
+        return;
+      }
+      setStatus('구간 ' + String(index + 1) + '의 강제 포인트를 초기화하는 중입니다...', false);
+      try {
+        await window.opener.__wonderLinxRouteTime.clearSegmentCorrection(
+          payload.reportId,
+          payload.routeName,
+          payload.departureTime,
+          index + 1
+        );
+        delete pendingForcedPoints[index];
+        const nextPayload = window.opener.__wonderLinxRouteTime.getMapWindowPayload(payload.reportId, payload.routeName, payload.departureTime);
+        if (!nextPayload) {
+          throw new Error('초기화 후 최신 구간 데이터를 받지 못했습니다.');
+        }
+        setStatus('포인트 초기화 완료. 기본 분석구간으로 되돌렸습니다.', false);
+        debugLog('segment correction cleared; applying partial refresh');
+        stopForcePointMode();
+        refreshPayload(nextPayload);
+      } catch (error) {
+        setStatus(error.message || '포인트 초기화 중 오류가 발생했습니다.', true);
+      }
+    }
+
+    document.getElementById("toggle-original-path")?.addEventListener("change", (event) => {
+      if (originalPolyline) originalPolyline.setMap(event.target.checked ? map : null);
+    });
+    document.getElementById("toggle-analysis-path")?.addEventListener("change", (event) => {
+      if (analysisPolyline) analysisPolyline.setMap(event.target.checked ? map : null);
+    });
+    document.getElementById("toggle-sections")?.addEventListener("change", (event) => {
+      if (!event.target.checked) activeSectionIndex = -1;
+      applySectionState();
+    });
+    document.querySelectorAll("[data-section-card]").forEach((card) => {
+      card.addEventListener("click", () => {
+        const index = Number(card.getAttribute("data-section-card"));
+        if (!Number.isFinite(index)) return;
+        const sectionToggle = document.getElementById("toggle-sections");
+        if (sectionToggle && !sectionToggle.checked) sectionToggle.checked = true;
+        focusSection(index, "both");
+      });
+    });
+    document.querySelectorAll("[data-section-toggle]").forEach((toggle) => {
+      toggle.addEventListener("click", (event) => event.stopPropagation());
+      toggle.addEventListener("change", (event) => {
+        const index = Number(event.target.getAttribute("data-section-toggle"));
+        if (!Number.isFinite(index)) return;
+        sectionVisible[index] = event.target.checked;
+        if (!event.target.checked && activeSectionIndex === index) activeSectionIndex = -1;
+        applySectionState();
+      });
+    });
+    document.querySelectorAll("[data-focus-section]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const index = Number(button.getAttribute("data-focus-section"));
+        if (!Number.isFinite(index)) return;
+        focusSection(index, "both");
+      });
+    });
+    document.querySelectorAll("[data-section-view]").forEach((viewEl) => {
+      viewEl.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const index = Number(viewEl.getAttribute("data-section-view-index"));
+        const view = viewEl.getAttribute("data-section-view");
+        if (!Number.isFinite(index) || (view !== "original" && view !== "analysis")) return;
+        const sectionToggle = document.getElementById("toggle-sections");
+        if (sectionToggle && !sectionToggle.checked) sectionToggle.checked = true;
+        focusSection(index, view);
+      });
+    });
+    document.querySelectorAll("[data-recalc-section]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const index = Number(button.getAttribute("data-recalc-section"));
+        if (!Number.isFinite(index)) return;
+        await recalcSection(index);
+      });
+    });
+    document.querySelectorAll("[data-force-point-section]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const index = Number(button.getAttribute("data-force-point-section"));
+        if (!Number.isFinite(index)) return;
+        startForcePointMode(index);
+      });
+    });
+    document.querySelectorAll("[data-clear-point-section]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const index = Number(button.getAttribute("data-clear-point-section"));
+        if (!Number.isFinite(index)) return;
+        await clearSectionPoint(index);
+      });
+    });
+
+    syncPendingForcedPointsFromPayload();
+    renderSectionOrderEditors();
+    renderMap();
+  </script>
+</body>
+</html>`;
+  }
+
+  function writeRouteTimeSimulationMapWindow(targetWindow, reportId, routeName, departureTime) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      setStatus("표시할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
+      return false;
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      setStatus("표시할 시간대 경로 결과를 찾지 못했습니다.", true);
+      return false;
+    }
+    targetWindow.document.open();
+    targetWindow.document.write(buildRouteTimeSimulationMapWindowHtml(reportId, routeName, simulation));
+    targetWindow.document.close();
+    return true;
+  }
+
+  function getRouteTimeSimulationMapWindowHtml(reportId, routeName, departureTime) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      return "";
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      return "";
+    }
+    return buildRouteTimeSimulationMapWindowHtml(reportId, routeName, simulation);
+  }
+
+  function getRouteTimeSimulationMapWindowPayload(reportId, routeName, departureTime) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      return null;
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      return null;
+    }
+    const originalPath = Array.isArray(simulation?.originalPathCoordinates) ? simulation.originalPathCoordinates : [];
+    const chunks = Array.isArray(simulation?.chunks) ? simulation.chunks : [];
+    const analysisPath = [];
+    chunks.forEach((chunk) => {
+      appendUniqueCoordinates(analysisPath, Array.isArray(chunk.coordinates) ? chunk.coordinates : []);
+    });
+    const sections = chunks.map((chunk, index) => ({
+      sectionIndex: Number(chunk?.chunkIndex || index + 1),
+      originalCoordinateGroups: Array.isArray(chunk?.originalChunkCoordinateGroups) ? chunk.originalChunkCoordinateGroups : [],
+      originalCoordinates: getChunkOriginalCoordinates(chunk),
+      analysisCoordinates: getChunkAnalysisCoordinates(chunk),
+      stops: Array.isArray(chunk?.stops) ? chunk.stops : [],
+      baseStops: (Array.isArray(chunk?.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true),
+      forcedStops: (Array.isArray(chunk?.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection === true),
+      originalDistanceMeters: measureCoordinatePathDistance(getChunkOriginalCoordinates(chunk)),
+      analysisDistanceMeters: Number(chunk?.distanceMeters || 0),
+      analysisDriveSeconds: Number(chunk?.driveSeconds || 0),
+      correctionCount: (Array.isArray(chunk?.stops) ? chunk.stops.filter((stop) => stop?.isSimulationCorrection === true).length : 0),
+    }));
+    return {
+      reportId,
+      routeName,
+      departureTime: simulation?.departureTime || "",
+      originalPath,
+      analysisPath,
+      sections,
+    };
+  }
+
+  function openRouteTimeSimulationMapWindow(reportId, routeName, departureTime) {
+    if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+      setStatus("표시할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
+      return;
+    }
+    const mapWindow = window.open("", `route-time-map-${routeName}-${departureTime}`, "width=1520,height=980,resizable=yes,scrollbars=yes");
+    if (!mapWindow) {
+      setStatus("팝업이 차단되었습니다. 경로보기 창을 허용해 주세요.", true);
+      return;
+    }
+    if (!writeRouteTimeSimulationMapWindow(mapWindow, reportId, routeName, departureTime)) {
+      return;
+    }
+    mapWindow.focus();
   }
 
   async function requestRouteTimeSimulation(payload) {
@@ -4795,6 +6192,33 @@
     };
   }
 
+  function findNearestCoordinateIndexInRange(coordinates, point, startIndex = 0, endIndex = null) {
+    if (!Array.isArray(coordinates) || !coordinates.length) {
+      return {
+        index: -1,
+        distanceMeters: Number.POSITIVE_INFINITY,
+      };
+    }
+    const normalizedStartIndex = Math.max(0, Math.min(coordinates.length - 1, Math.round(Number(startIndex) || 0)));
+    const normalizedEndIndex = endIndex == null
+      ? coordinates.length - 1
+      : Math.max(normalizedStartIndex, Math.min(coordinates.length - 1, Math.round(Number(endIndex) || 0)));
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = normalizedStartIndex; index <= normalizedEndIndex; index += 1) {
+      const coordinate = coordinates[index];
+      const distance = distanceInMeters(coordinate, point);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    return {
+      index: bestIndex,
+      distanceMeters: bestDistance,
+    };
+  }
+
   function sliceCoordinatesBetweenPoints(coordinates, startPoint, endPoint, toleranceMeters = 250) {
     if (!Array.isArray(coordinates) || coordinates.length < 2) {
       return [];
@@ -4814,6 +6238,33 @@
     }
 
     return coordinates.slice(start.index, end.index + 1);
+  }
+
+  function sliceCoordinatesBetweenPointsForward(coordinates, startPoint, endPoint, startSearchIndex = 0, toleranceMeters = 250) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return {
+        coordinates: [],
+        endIndex: -1,
+      };
+    }
+    const start = findNearestCoordinateIndexInRange(coordinates, startPoint, startSearchIndex);
+    if (start.index < 0 || start.distanceMeters > toleranceMeters) {
+      return {
+        coordinates: [],
+        endIndex: -1,
+      };
+    }
+    const end = findNearestCoordinateIndexInRange(coordinates, endPoint, start.index + 1);
+    if (end.index < 0 || end.distanceMeters > toleranceMeters || end.index <= start.index) {
+      return {
+        coordinates: [],
+        endIndex: -1,
+      };
+    }
+    return {
+      coordinates: coordinates.slice(start.index, end.index + 1),
+      endIndex: end.index,
+    };
   }
 
   async function requestDesignedRouteSegment(routeName, points, designOptions = {}) {
@@ -5737,6 +7188,13 @@
     }
     if (Number.isFinite(Number(setting.routeOrder))) {
       entries.push(`<Data name="routeOrder"><value>${escapeXml(String(setting.routeOrder))}</value></Data>`);
+    }
+    if (hasSimulationCorrections(setting.simulationCorrections)) {
+      const serializedCorrections = JSON.stringify({
+        ...setting.simulationCorrections,
+        routeName: normalizeRouteName(routeName),
+      });
+      entries.push(`<Data name="simulationCorrections"><value>${escapeXml(serializedCorrections)}</value></Data>`);
     }
     return entries;
   }
@@ -7542,6 +9000,7 @@
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
       ridership: getRidershipFromExtendedData(extendedData),
+      simulationCorrections: getSimulationCorrectionsFromExtendedData(extendedData, routeName || fileName),
       extendedData,
     };
   }
@@ -7589,6 +9048,7 @@
       styleUrl: directChildText(placemark, "styleUrl"),
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
+      simulationCorrections: getSimulationCorrectionsFromExtendedData(extendedData, routeName || fileName),
       rawCoordinates,
       coordinates,
     };
@@ -7661,6 +9121,9 @@
       if (Number.isFinite(Number(item?.routeOrder)) && !Number.isFinite(Number(next.routeOrder))) {
         next.routeOrder = Number(item.routeOrder);
       }
+      if (hasSimulationCorrections(item?.simulationCorrections) && !hasSimulationCorrections(next.simulationCorrections)) {
+        next.simulationCorrections = normalizeSimulationCorrections(item.simulationCorrections, routeName);
+      }
       routeMetaByName.set(routeName, next);
     });
 
@@ -7669,6 +9132,9 @@
         ...getRouteSetting(routeName),
         ...(meta.routeGroup ? { routeGroup: meta.routeGroup } : {}),
         ...(Number.isFinite(Number(meta.routeOrder)) ? { routeOrder: Number(meta.routeOrder) } : {}),
+        ...(hasSimulationCorrections(meta.simulationCorrections)
+          ? { simulationCorrections: normalizeSimulationCorrections(meta.simulationCorrections, routeName) }
+          : {}),
       };
     });
   }
@@ -11620,6 +13086,35 @@
         return;
       }
       downloadRouteTimeSimulationCsv(latestRouteTimeSimulationReport);
+    },
+    showMap(reportId, routeName, departureTime) {
+      openRouteTimeSimulationMapWindow(reportId, routeName, departureTime);
+    },
+    showLog(reportId, routeName, departureTime) {
+      openRouteTimeSimulationLogWindow(reportId, routeName, departureTime);
+    },
+    async recalculateSegment(reportId, routeName, departureTime, segmentIndex, forcedWaypoint = null, forcedWaypointOrder = null) {
+      return recalculateRouteTimeSegment(reportId, routeName, departureTime, segmentIndex, forcedWaypoint, forcedWaypointOrder);
+    },
+    async clearSegmentCorrection(reportId, routeName, departureTime, segmentIndex) {
+      return clearRouteTimeSegmentCorrection(reportId, routeName, departureTime, segmentIndex);
+    },
+    getMapWindowHtml(reportId, routeName, departureTime) {
+      return getRouteTimeSimulationMapWindowHtml(reportId, routeName, departureTime);
+    },
+    getMapWindowPayload(reportId, routeName, departureTime) {
+      return getRouteTimeSimulationMapWindowPayload(reportId, routeName, departureTime);
+    },
+    getForcedPointDebugMeta(routeName, point) {
+      const snapped = snapPointToRoutePathCoordinate(routeName, point);
+      return {
+        pathLat: Number(snapped.lat),
+        pathLng: Number(snapped.lng),
+        snapDistanceMeters: snapped.snapDistanceMeters == null ? null : Number(snapped.snapDistanceMeters),
+      };
+    },
+    refreshMapWindow(targetWindow, reportId, routeName, departureTime) {
+      writeRouteTimeSimulationMapWindow(targetWindow, reportId, routeName, departureTime);
     },
   };
 
