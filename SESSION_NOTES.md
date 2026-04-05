@@ -67,6 +67,62 @@ Use this next time:
 ```text
 다음 파일 이어서 시작 — hyodo_date/month의 PDF를 하나씩 열어 5호차부터 이어가며 승객 수 데이터를 직접 표로 옮겨서 날짜별/정류장별 Excel 시트를 완성하고 검토까지 마친 뒤 다음 파일을 진행합니다.
 ```
+## 2026-04-05 Route-Time Simulation Console And Research Update
+
+- Route-time simulation settings were revised:
+  - removed per-stop dwell input
+  - removed vehicle type input
+  - added single-date selection
+  - aligned start time, end time, and interval on one row below the date
+- Execution flow was revised:
+  - simulation now opens a dedicated execution console window
+  - the console no longer disappears automatically when computation finishes
+  - completion now keeps the console open and highlights a `결과 보기` button
+  - the main app now directly attaches the console window reference so live logs continue to stream into the popup
+- Results flow was revised:
+  - the top route-level `경로보기` button was removed from the simulation result window
+  - per-timeslot `경로보기` and `계산로그` remain because routes can differ by departure time
+- Bug fixes completed:
+  - fixed execution-console `결과 보기` no-response issue by wiring the console popup back to the main app result handler
+  - fixed blank `계산로그` popup caused by an undefined `formatRidershipLabel()` reference while building the log text
+- Current research-based formula in code:
+  - `final operating time = max(kakao drive time, regional average-speed drive time) + dwell adjustment`
+  - base dwell is `26 seconds` per stop
+  - if ridership inputs are missing, dwell is applied uniformly with weight `1.0`
+  - bus-specific extra delay for curb-lane driving/intersection friction is not yet a separate term in code
+- Research discussion reached this conclusion:
+  - current logs can make it look like only dwell is applied when the regional speed floor is equal to Kakao time
+  - the next refinement should separate:
+    - Kakao-derived speed
+    - regional bus-speed floor
+    - applied drive speed
+    - dwell adjustment
+    - additional bus-delay correction
+- Real-world route sample analysis completed for:
+  - `C:\Users\wls29\Desktop\my-map-app\버스도착시간 예측관련 문서\3노선_운행데이터.xlsx`
+  - extracted usable one-way runs:
+    - `2026-03-30`: about `36.5 min`
+    - `2026-03-31`: about `42.0 min`
+  - mean actual one-way running time: about `39.25 min`
+  - with current route distance `7.28 km` and Seoul Sunday speed `15.2 km/h`, residual extra bus delay beyond regional-speed drive time plus base dwell is about `2.71 min`
+  - this is about `9.4%` of the regional-speed drive baseline for Route 3
+- Next analysis task:
+  - inspect `5노선_운행데이터.xlsx` and `6노선_운행데이터.xlsx`
+  - derive an average bus-delay correction across Routes `3`, `5`, and `6`
+  - then decide whether to implement that correction as a new research-based term in the simulation formula
+
+## Next Resume Prompt
+
+Use this next time:
+
+```text
+C:\Users\wls29\Desktop\my-map-app\kml-kakao-map 프로젝트와
+C:\Users\wls29\Desktop\kcgbus-render 배포 저장소를 불러와서 SESSION_NOTES.md 기준으로 최근 작업 맥락 복원하고,
+운행시간 시뮬레이션 실행콘솔/결과창/계산로그 연결 상태를 먼저 점검한 뒤
+C:\Users\wls29\Desktop\my-map-app\버스도착시간 예측관련 문서\3노선_운행데이터.xlsx,
+5노선_운행데이터.xlsx, 6노선_운행데이터.xlsx를 같은 방식으로 분석해서
+평균적인 버스지체보정값을 산출하고 현재 연구 기반 계산식에 어떻게 반영할지 이어서 정리해줘.
+```
 
 ## 2026-03-25 Ridership CSV Update
 

@@ -17,7 +17,46 @@
   const AUTO_SAVE_INTERVAL_MS = 10 * 60 * 1000;
   const UNDO_HISTORY_LIMIT = 10;
   const OPTIMIZATION_FEATURE_ENABLED = false;
-  const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 4;
+  const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 5;
+  const RESEARCH_BASE_DWELL_SECONDS = 26;
+  const REGION_AVERAGE_SPEED_KMH = {
+    "서울": { weekday: 13.9, saturday: 14.4, sunday: 15.2 },
+    "부산": { weekday: 16.4, saturday: 16.8, sunday: 17.4 },
+    "대구": { weekday: 15.9, saturday: 16.1, sunday: 16.4 },
+    "인천": { weekday: 15.5, saturday: 15.7, sunday: 16.1 },
+    "광주": { weekday: 16.7, saturday: 17.2, sunday: 17.3 },
+    "대전": { weekday: 16.1, saturday: 16.4, sunday: 16.8 },
+    "울산": { weekday: 21.8, saturday: 22.6, sunday: 23.7 },
+    "세종": { weekday: 25.8, saturday: 26.4, sunday: 26.8 },
+    "경기": { weekday: 21.6, saturday: 22.1, sunday: 22.9 },
+    "강원": { weekday: 25.4, saturday: 26.0, sunday: 26.6 },
+    "충북": { weekday: 23.8, saturday: 24.1, sunday: 24.6 },
+    "충남": { weekday: 23.2, saturday: 23.7, sunday: 24.4 },
+    "전북": { weekday: 22.1, saturday: 22.8, sunday: 23.7 },
+    "전남": { weekday: 25.3, saturday: 25.3, sunday: 26.5 },
+    "경북": { weekday: 27.1, saturday: 27.6, sunday: 28.2 },
+    "경남": { weekday: 24.5, saturday: 25.2, sunday: 26.1 },
+    "제주": { weekday: 25.6, saturday: 26.2, sunday: 26.5 },
+  };
+  const REGION_DETECTION_RULES = [
+    { name: "서울", minLat: 37.41, maxLat: 37.72, minLng: 126.76, maxLng: 127.18 },
+    { name: "인천", minLat: 37.33, maxLat: 37.75, minLng: 126.37, maxLng: 126.86 },
+    { name: "경기", minLat: 36.88, maxLat: 38.30, minLng: 126.45, maxLng: 127.90 },
+    { name: "부산", minLat: 35.01, maxLat: 35.39, minLng: 128.78, maxLng: 129.35 },
+    { name: "대구", minLat: 35.71, maxLat: 36.02, minLng: 128.35, maxLng: 128.78 },
+    { name: "광주", minLat: 35.05, maxLat: 35.28, minLng: 126.74, maxLng: 127.02 },
+    { name: "대전", minLat: 36.20, maxLat: 36.50, minLng: 127.24, maxLng: 127.55 },
+    { name: "울산", minLat: 35.35, maxLat: 35.75, minLng: 129.06, maxLng: 129.47 },
+    { name: "세종", minLat: 36.43, maxLat: 36.67, minLng: 127.18, maxLng: 127.38 },
+    { name: "강원", minLat: 37.02, maxLat: 38.62, minLng: 127.10, maxLng: 129.40 },
+    { name: "충북", minLat: 36.08, maxLat: 37.30, minLng: 127.27, maxLng: 128.70 },
+    { name: "충남", minLat: 35.97, maxLat: 37.10, minLng: 125.98, maxLng: 127.70 },
+    { name: "전북", minLat: 35.23, maxLat: 36.15, minLng: 126.47, maxLng: 127.95 },
+    { name: "전남", minLat: 34.17, maxLat: 35.53, minLng: 125.06, maxLng: 127.65 },
+    { name: "경북", minLat: 35.53, maxLat: 37.30, minLng: 128.03, maxLng: 129.62 },
+    { name: "경남", minLat: 34.58, maxLat: 35.90, minLng: 127.56, maxLng: 129.05 },
+    { name: "제주", minLat: 33.10, maxLat: 33.60, minLng: 126.10, maxLng: 126.98 },
+  ];
 
   const config = window.KAKAO_MAP_CONFIG || {};
   const dropzone = document.getElementById("dropzone");
@@ -2849,7 +2888,7 @@
     p { margin:0; color:var(--muted); }
     .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:14px; }
     label { display:grid; gap:6px; font-weight:600; }
-    input[type="number"] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
+    input[type="number"], input[type="date"] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
     .check { display:flex; align-items:center; gap:8px; font-weight:600; }
     .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
     button { padding:11px 16px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--text); font:inherit; cursor:pointer; }
@@ -3111,16 +3150,149 @@
     const intervalMinutes = Number.isFinite(Number(current.intervalMinutes))
       ? Math.min(240, Math.max(15, Math.round(Number(current.intervalMinutes))))
       : 60;
-    const stopDwellSeconds = Number.isFinite(Number(current.stopDwellSeconds))
-      ? Math.min(1800, Math.max(0, Math.round(Number(current.stopDwellSeconds))))
-      : 0;
+    const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(String(current.selectedDate || "").trim())
+      ? String(current.selectedDate).trim()
+      : formatDateInputValue(new Date());
 
     return {
+      selectedDate,
       startHour,
       endHour: Math.max(startHour, endHour),
       intervalMinutes,
-      stopDwellSeconds,
-      carTypeLabel: "버스",
+    };
+  }
+
+  function formatDateInputValue(date) {
+    const current = date instanceof Date ? date : new Date(date);
+    const year = current.getFullYear();
+    const month = String(current.getMonth() + 1).padStart(2, "0");
+    const day = String(current.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function getSimulationDayType(dateValue) {
+    const current = /^\d{4}-\d{2}-\d{2}$/.test(String(dateValue || "").trim())
+      ? new Date(`${String(dateValue).trim()}T00:00:00`)
+      : new Date();
+    const day = current.getDay();
+    if (day === 0) {
+      return { key: "sunday", label: "일요일" };
+    }
+    if (day === 6) {
+      return { key: "saturday", label: "토요일" };
+    }
+    return { key: "weekday", label: "평일" };
+  }
+
+  function detectRegionFromCoordinates(coordinates) {
+    const valid = (Array.isArray(coordinates) ? coordinates : []).filter((item) => (
+      Number.isFinite(Number(item?.lat)) && Number.isFinite(Number(item?.lng))
+    ));
+    if (!valid.length) {
+      return "서울";
+    }
+    const center = valid.reduce((sum, item) => ({
+      lat: sum.lat + Number(item.lat),
+      lng: sum.lng + Number(item.lng),
+    }), { lat: 0, lng: 0 });
+    const centerLat = center.lat / valid.length;
+    const centerLng = center.lng / valid.length;
+    const matched = REGION_DETECTION_RULES.find((rule) => (
+      centerLat >= rule.minLat
+      && centerLat <= rule.maxLat
+      && centerLng >= rule.minLng
+      && centerLng <= rule.maxLng
+    ));
+    return matched?.name || "서울";
+  }
+
+  function getRegionAverageSpeedKmh(regionName, dayTypeKey) {
+    const region = REGION_AVERAGE_SPEED_KMH[regionName] || REGION_AVERAGE_SPEED_KMH["서울"];
+    return Number(region?.[dayTypeKey] || region?.weekday || 13.9);
+  }
+
+  function getRouteCoordinatesForRegionDetection(routeName) {
+    const points = getPointsInRoute(routeName).map((point) => ({ lat: Number(point.lat), lng: Number(point.lng) }));
+    if (points.length) {
+      return points;
+    }
+    const coordinates = [];
+    getPathsInRoute(routeName).forEach((pathItem) => {
+      appendUniqueCoordinates(coordinates, Array.isArray(pathItem.coordinates) ? pathItem.coordinates : []);
+    });
+    return coordinates;
+  }
+
+  function getRouteRidershipProfile(routeName) {
+    const points = getPointsInRoute(routeName);
+    const normalized = points.map((point, index) => ({
+      point,
+      index,
+      ridership: normalizeRidershipValue(point.ridership),
+    }));
+    const valid = normalized.filter((item) => item.ridership != null);
+    const totalRidership = valid.reduce((sum, item) => sum + Number(item.ridership || 0), 0);
+    return {
+      points,
+      totalRidership,
+      ridershipStopCount: valid.length,
+    };
+  }
+
+  function getRidershipDwellWeight(ridership, totalRidership) {
+    if (!Number.isFinite(Number(ridership)) || !Number.isFinite(Number(totalRidership)) || totalRidership <= 0) {
+      return 1;
+    }
+    const share = Number(ridership) / Number(totalRidership);
+    if (share >= 0.15) {
+      return 1.35;
+    }
+    if (share >= 0.08) {
+      return 1.2;
+    }
+    if (share >= 0.04) {
+      return 1.08;
+    }
+    if (share <= 0.015) {
+      return 0.9;
+    }
+    return 1;
+  }
+
+  function buildRouteResearchProfile(routeName, distanceMeters, options = {}) {
+    const ridershipProfile = getRouteRidershipProfile(routeName);
+    const dayType = getSimulationDayType(options.selectedDate);
+    const region = detectRegionFromCoordinates(getRouteCoordinatesForRegionDetection(routeName));
+    const regionAverageSpeedKmh = getRegionAverageSpeedKmh(region, dayType.key);
+    const regionalDriveSeconds = regionAverageSpeedKmh > 0 && Number(distanceMeters || 0) > 0
+      ? (Number(distanceMeters) / 1000 / regionAverageSpeedKmh) * 3600
+      : 0;
+    const stopDetails = ridershipProfile.points.map((point) => {
+      const ridership = normalizeRidershipValue(point.ridership);
+      const dwellWeight = getRidershipDwellWeight(ridership, ridershipProfile.totalRidership);
+      const dwellSeconds = Math.round(RESEARCH_BASE_DWELL_SECONDS * dwellWeight);
+      const sharePercent = ridershipProfile.totalRidership > 0 && ridership != null
+        ? (ridership / ridershipProfile.totalRidership) * 100
+        : null;
+      return {
+        name: point.name,
+        ridership,
+        sharePercent,
+        dwellWeight,
+        dwellSeconds,
+      };
+    });
+    return {
+      selectedDate: options.selectedDate || formatDateInputValue(new Date()),
+      dayTypeLabel: dayType.label,
+      region,
+      regionAverageSpeedKmh,
+      regionalDriveSeconds: Math.round(regionalDriveSeconds),
+      baseDwellSeconds: RESEARCH_BASE_DWELL_SECONDS,
+      ridershipStopCount: ridershipProfile.ridershipStopCount,
+      totalRidership: ridershipProfile.totalRidership,
+      totalDwellSeconds: stopDetails.reduce((sum, item) => sum + Number(item.dwellSeconds || 0), 0),
+      stopDetails,
     };
   }
 
@@ -3201,23 +3373,18 @@
         </div>
         <div class="route-items">${routeItemsHtml || "<p>선택 가능한 노선이 없습니다.</p>"}</div>
       </div>
-      <div class="grid" style="margin-top:16px;">
-        <label class="field">정류장당 기본 정차시간(초)
-          <input name="stopDwellSeconds" type="number" min="0" max="1800" step="1" value="${escapeHtml(String(defaults.stopDwellSeconds))}">
-        </label>
-        <label class="field">차종
-          <div class="readonly">버스(고정)</div>
+      <div class="grid" style="margin-top:14px;">
+        <label class="field">운행 날짜
+          <input name="selectedDate" type="date" value="${escapeHtml(String(defaults.selectedDate || formatDateInputValue(new Date())))}">
         </label>
       </div>
-      <div class="grid" style="margin-top:14px;">
+      <div class="grid" style="margin-top:14px; grid-template-columns:repeat(3,minmax(0,1fr));">
         <label class="field">시작 시각(시)
           <input name="startHour" type="number" min="0" max="23" step="1" value="${escapeHtml(String(defaults.startHour))}">
         </label>
         <label class="field">종료 시각(시)
           <input name="endHour" type="number" min="0" max="23" step="1" value="${escapeHtml(String(defaults.endHour))}">
         </label>
-      </div>
-      <div class="grid" style="margin-top:14px;">
         <label class="field">시뮬레이션 간격(분)
           <input name="intervalMinutes" type="number" min="15" max="240" step="15" value="${escapeHtml(String(defaults.intervalMinutes))}">
         </label>
@@ -3253,6 +3420,13 @@
     }
 
     window.__setRouteTimeLog = appendLog;
+    window.__wonderLinxRouteTime = {
+      showResults(reportId) {
+        if (window.opener && window.opener.__wonderLinxRouteTime) {
+          window.opener.__wonderLinxRouteTime.showResults(reportId);
+        }
+      },
+    };
     appendLog("운행시간 시뮬레이션 설정을 준비했습니다.", false, true);
 
     function setRoutesChecked(checked) {
@@ -3274,19 +3448,31 @@
         .map((checkbox) => checkbox.value);
       const options = {
         selectedRouteNames,
-        stopDwellSeconds: Number(data.get("stopDwellSeconds") || 0),
+        selectedDate: String(data.get("selectedDate") || ""),
         startHour: Number(data.get("startHour")),
         endHour: Number(data.get("endHour")),
         intervalMinutes: Number(data.get("intervalMinutes") || 60),
       };
       appendLog("시뮬레이션 실행을 요청했습니다.");
-      const resultsWindow = window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
+      const resultsWindow = window.open("", "route-time-simulation-console", "width=1320,height=940,resizable=yes,scrollbars=yes");
       if (!resultsWindow) {
         appendLog("팝업이 차단되었습니다. 결과 창을 허용해 주세요.", true);
         return;
       }
+      const normalizedOptions = window.opener.__wonderLinxRouteTime.normalizeOptions(options);
+      const estimatedSlotCount = Math.max(1, window.opener.__wonderLinxRouteTime.getDepartureSlotCount(normalizedOptions));
+      if (window.opener && window.opener.__wonderLinxRouteTime && typeof window.opener.__wonderLinxRouteTime.attachConsoleWindow === "function") {
+        window.opener.__wonderLinxRouteTime.attachConsoleWindow(resultsWindow);
+      }
       resultsWindow.document.open();
-      resultsWindow.document.write('<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>운행시간 시뮬레이션 준비중</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f7fb;color:#172033;font:16px/1.6 "Segoe UI","Malgun Gothic",sans-serif;} .card{padding:24px 28px;border:1px solid #d8e1ec;border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);} strong{display:block;font-size:20px;margin-bottom:8px;} p{margin:0;color:#64758d;}</style></head><body><div class="card"><strong>운행시간 시뮬레이션 실행 중</strong><p>계산이 끝나면 이 창에 결과를 표시합니다.</p></div></body></html>');
+      resultsWindow.document.write(window.opener.__wonderLinxRouteTime.buildPendingWindowHtml({
+        routeCount: selectedRouteNames.length,
+        timeSlotCount: estimatedSlotCount,
+        requestCount: selectedRouteNames.length * estimatedSlotCount,
+        activeLabel: "실행 요청 접수",
+        statusText: "시뮬레이션 세션을 초기화하는 중입니다.",
+        progress: 6,
+      }));
       resultsWindow.document.close();
       if (window.opener && window.opener.__wonderLinxRouteTime) {
         window.opener.__wonderLinxRouteTime.run(${JSON.stringify(groupKey)}, options);
@@ -3299,15 +3485,11 @@
 
   function buildSimulationDepartureSlots(options) {
     const slots = [];
-    const base = new Date();
+    const base = options.selectedDate ? new Date(`${options.selectedDate}T00:00:00`) : new Date();
     base.setSeconds(0, 0);
     let current = new Date(base.getFullYear(), base.getMonth(), base.getDate(), options.startHour, 0, 0, 0);
     let end = new Date(base.getFullYear(), base.getMonth(), base.getDate(), options.endHour, 0, 0, 0);
     if (end < current) {
-      end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
-    }
-    if (current <= base) {
-      current = new Date(current.getTime() + 24 * 60 * 60 * 1000);
       end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
     }
     while (current <= end) {
@@ -3491,12 +3673,36 @@
       });
   }
 
+  function getSimulationSectionBaseStops(stops, limit = ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1) {
+    const maxBaseStops = Math.max(2, Number(limit || (ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1)));
+    return (Array.isArray(stops) ? stops : [])
+      .filter((stop) => stop?.isSimulationCorrection !== true)
+      .slice(0, maxBaseStops);
+  }
+
+  function getSimulationSectionForcedStops(stops, baseLimit = ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1) {
+    const baseStops = getSimulationSectionBaseStops(stops, baseLimit);
+    const availableCorrectionSlots = Math.max(0, ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - baseStops.length);
+    if (availableCorrectionSlots <= 0) {
+      return [];
+    }
+    return (Array.isArray(stops) ? stops : [])
+      .filter((stop) => stop?.isSimulationCorrection === true)
+      .slice(0, availableCorrectionSlots);
+  }
+
+  function buildSimulationSectionDisplayStops(stops, baseLimit = ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1) {
+    const baseStops = getSimulationSectionBaseStops(stops, baseLimit);
+    const correctionStops = getSimulationSectionForcedStops(stops, baseLimit);
+    return mergeSegmentPointsWithCorrections(baseStops, correctionStops);
+  }
+
   function applyRouteSimulationCorrection(routeName, segmentPoints, segmentIndex) {
     const correction = getRouteSimulationCorrection(routeName, segmentIndex);
     if (!correction || !Array.isArray(segmentPoints) || segmentPoints.length < 2) {
       return segmentPoints;
     }
-    const availableCorrectionSlots = Math.max(0, 5 - segmentPoints.length);
+    const availableCorrectionSlots = Math.max(0, ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - segmentPoints.length);
     if (availableCorrectionSlots <= 0) {
       return segmentPoints;
     }
@@ -3703,11 +3909,11 @@
     const savedCorrection = getRouteSimulationCorrection(routeName, segmentIndex);
     const correctionWaypoints = manualWaypoint
       ? [manualWaypoint]
-      : (Array.isArray(savedCorrection?.waypoints) ? savedCorrection.waypoints.map(normalizeSimulationCorrectionWaypoint).filter(Boolean) : []);
+      : (Array.isArray(savedCorrection?.waypoints) ? savedCorrection.waypoints.map(normalizeSimulationCorrectionWaypoint).filter(Boolean).slice(0, 1) : []);
     if (!correctionWaypoints.length) {
       throw new Error("먼저 강제 포인트를 추가하세요.");
     }
-    const baseStops = (Array.isArray(chunk.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true);
+    const baseStops = getSimulationSectionBaseStops(chunk.stops);
     const allPoints = mergeSegmentPointsWithCorrections(
       baseStops,
       correctionWaypoints.map((point, index) => buildCorrectionSimulationPoint(
@@ -3767,7 +3973,7 @@
     if (!chunk) {
       throw new Error("초기화할 분석구간을 찾지 못했습니다.");
     }
-    const baseStops = (Array.isArray(chunk.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true);
+    const baseStops = getSimulationSectionBaseStops(chunk.stops);
     if (baseStops.length < 2) {
       throw new Error("기본 정류장 정보가 부족해 포인트를 초기화할 수 없습니다.");
     }
@@ -3812,7 +4018,10 @@
     const rows = [];
     routes.forEach((route) => {
       const originalPathCoordinates = buildRouteSimulationAnchorCoordinates(route.routeName);
-      (route.simulations || []).forEach((item) => {
+      route.simulations = (route.simulations || []).map((item) => {
+        const researchProfile = buildRouteResearchProfile(route.routeName, item.distanceMeters, options);
+        const adjustedDriveSeconds = Math.max(Number(item.driveSeconds || 0), Number(researchProfile.regionalDriveSeconds || 0));
+        const adjustedDwellSeconds = Number(researchProfile.totalDwellSeconds || 0);
         const chunks = (Array.isArray(item.chunks) ? item.chunks : []).map((chunk, index) => {
           const stops = Array.isArray(chunk?.stops) ? chunk.stops : [];
           const originalChunkCoordinateGroups = buildOriginalChunkPathGroups(originalPathCoordinates, stops);
@@ -3825,19 +4034,30 @@
             originalChunkCoordinates,
           };
         });
-        rows.push({
+        const simulationRow = {
           routeName: route.routeName,
           stopCount: route.stopCount,
           segmentCount: route.segmentCount,
           timeLabel: item.label,
           departureTime: item.departureTime,
-          driveSeconds: item.driveSeconds,
-          dwellSecondsTotal: item.dwellSecondsTotal,
-          totalSeconds: item.totalSeconds,
+          driveSeconds: Math.round(adjustedDriveSeconds),
+          dwellSecondsTotal: Math.round(adjustedDwellSeconds),
+          totalSeconds: Math.round(adjustedDriveSeconds + adjustedDwellSeconds),
           distanceMeters: item.distanceMeters,
           chunks,
           originalPathCoordinates,
-        });
+          researchProfile,
+        };
+        rows.push(simulationRow);
+        return {
+          ...item,
+          driveSeconds: simulationRow.driveSeconds,
+          dwellSecondsTotal: simulationRow.dwellSecondsTotal,
+          totalSeconds: simulationRow.totalSeconds,
+          distanceMeters: simulationRow.distanceMeters,
+          chunks,
+          researchProfile,
+        };
       });
       route.originalPathCoordinates = originalPathCoordinates;
     });
@@ -3917,6 +4137,7 @@
     if (!simulation) {
       return "계산 로그를 찾지 못했습니다.";
     }
+    const research = simulation.researchProfile || {};
     const lines = [
       `노선: ${simulation.routeName || "-"}`,
       `시간대: ${simulation.timeLabel || "-"}`,
@@ -3927,6 +4148,18 @@
       `총 정차 보정: ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
       `총 운행시간: ${formatSimulationDurationLabel(simulation.totalSeconds || 0)}`,
       `총 거리: ${(Number(simulation.distanceMeters || 0) / 1000).toFixed(2)}km`,
+      "",
+      "[연구 기반 적용값]",
+      `기준 날짜: ${research.selectedDate || "-"}`,
+      `요일 유형: ${research.dayTypeLabel || "-"}`,
+      `자동 감지 권역: ${research.region || "-"}`,
+      `권역 평균 버스속도: ${Number(research.regionAverageSpeedKmh || 0).toFixed(1)}km/h`,
+      `기준 정류장 정차시간: ${research.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS}초`,
+      `탑승자 입력 정류장: ${research.ridershipStopCount || 0}개 / 총합 ${Number(research.totalRidership || 0).toLocaleString("ko-KR")}`,
+      `권역 속도 기준 주행시간: ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
+      `최종 적용 주행시간: max(카카오, 권역속도기준) = ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
+      `최종 적용 정차보정: 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
+      `적용식: max(카카오 주행시간, 권역 평균속도 주행시간) + 정류장별 정차보정`,
       "",
       "[구간별 계산 로그]",
     ];
@@ -3979,7 +4212,7 @@
     }
     const logText = buildRouteTimeSimulationLogText(simulation);
     logWindow.document.open();
-    logWindow.document.write(`<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${escapeHtml(routeName)} 계산 로그</title><style>body{margin:0;padding:20px;background:#0f172a;color:#e2e8f0;font:13px/1.6 Consolas,'Courier New',monospace;} pre{white-space:pre-wrap;word-break:break-word;} button{margin-bottom:12px;padding:8px 12px;border:0;border-radius:999px;background:#1d4ed8;color:#fff;cursor:pointer;font:inherit;}</style></head><body><button type="button" onclick="window.close()">닫기</button><pre>${escapeHtml(logText)}</pre></body></html>`);
+    logWindow.document.write(`<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${escapeHtml(routeName)} 계산 로그</title><style>:root{color-scheme:light;--line:#d8e1ec;--text:#172033;--muted:#64758d;}*{box-sizing:border-box;}body{margin:0;padding:24px;background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%);color:var(--text);font:14px/1.6 "Segoe UI","Malgun Gothic",sans-serif;}.wrap{max-width:1080px;margin:0 auto;display:grid;gap:16px;}.card{padding:18px;border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);}h1{margin:0 0 6px;font-size:26px;}p{margin:0;color:var(--muted);}.actions{display:flex;gap:10px;flex-wrap:wrap;}button{padding:10px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font:inherit;cursor:pointer;}pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.7 Consolas,"Courier New",monospace;color:#1e293b;background:#f8fbff;border:1px solid var(--line);border-radius:14px;padding:16px;min-height:420px;}</style></head><body><div class="wrap"><div class="card"><h1>${escapeHtml(routeName)} 계산 로그</h1><p>${escapeHtml(departureTime)} 기준 시뮬레이션 세부 계산값입니다.</p></div><div class="card"><div class="actions"><button type="button" onclick="window.close()">닫기</button></div></div><div class="card"><pre>${escapeHtml(logText || "계산 로그가 비어 있습니다.")}</pre></div></div></body></html>`);
     logWindow.document.close();
     logWindow.focus();
   }
@@ -3992,7 +4225,6 @@
             <h2>${escapeHtml(route.routeName)}</h2>
             <p class="meta">정류장 ${escapeHtml(String(route.stopCount))}개 / 청크 ${escapeHtml(String(route.segmentCount))}개</p>
           </div>
-          <button type="button" data-route-map="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(route.simulations?.[0]?.departureTime || "")}">경로보기</button>
         </div>
         <div class="table-wrap">
           <table>
@@ -4038,6 +4270,7 @@
       <h1>운행시간 시뮬레이션 결과</h1>
       <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 시간대 ${escapeHtml(String(report.summary.timeSlotCount))}개 / 결과 ${escapeHtml(String(report.summary.simulationRowCount))}행</p>
       <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
+      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 계산식: <code>max(카카오 주행시간, 권역 평균속도 주행시간) + 정류장별 정차보정</code></p>
     </div>
     <div class="cards">
       <div class="card stat"><strong>${escapeHtml(String(report.summary.routeCount))}</strong><p>분석 노선</p></div>
@@ -4049,7 +4282,7 @@
         <button class="primary" type="button" id="download-simulation-csv-button">엑셀용 CSV 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 기반 예상 주행시간에 정류장당 기본 정차시간을 더한 값입니다. 실제 운행 상황과는 차이가 날 수 있습니다.</p>
+      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간을 기준으로, 노선 위치에서 자동 감지한 권역 평균 버스속도와 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다.</p>
     </div>
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
@@ -4102,6 +4335,39 @@
     ) {
       routeTimeSettingsWindowRef.__setRouteTimeLog(String(message || ""), Boolean(isError), Boolean(replace));
     }
+    if (
+      routeTimeResultsWindowRef
+      && !routeTimeResultsWindowRef.closed
+      && typeof routeTimeResultsWindowRef.__appendSimulationConsoleLog === "function"
+    ) {
+      routeTimeResultsWindowRef.__appendSimulationConsoleLog(String(message || ""), Boolean(isError), Boolean(replace));
+    }
+  }
+
+  function setRouteTimeSimulationConsoleState(state = {}) {
+    if (
+      routeTimeResultsWindowRef
+      && !routeTimeResultsWindowRef.closed
+      && typeof routeTimeResultsWindowRef.__setSimulationConsoleState === "function"
+    ) {
+      routeTimeResultsWindowRef.__setSimulationConsoleState(state && typeof state === "object" ? state : {});
+    }
+  }
+
+  function buildRouteTimeSimulationPendingWindowHtml(meta = {}) {
+    const initialState = {
+      headline: "운행시간 시뮬레이션 실행 콘솔",
+      statusText: String(meta.statusText || "시뮬레이션 세션을 준비하는 중입니다."),
+      activeLabel: String(meta.activeLabel || "대기"),
+      routeCount: Number.isFinite(Number(meta.routeCount)) ? Number(meta.routeCount) : 0,
+      timeSlotCount: Number.isFinite(Number(meta.timeSlotCount)) ? Number(meta.timeSlotCount) : 0,
+      requestCount: Number.isFinite(Number(meta.requestCount)) ? Number(meta.requestCount) : 0,
+      progress: Number.isFinite(Number(meta.progress)) ? Math.max(0, Math.min(100, Number(meta.progress))) : 0,
+      currentRoute: String(meta.currentRoute || "-"),
+      currentSlot: String(meta.currentSlot || "-"),
+      currentChunk: String(meta.currentChunk || "-"),
+    };
+    return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>운행시간 시뮬레이션 실행 콘솔</title><style>:root{color-scheme:light;--line:#d8e1ec;--text:#172033;--muted:#64758d;--accent:#1f6feb;--soft:#eaf2ff;}*{box-sizing:border-box;}body{margin:0;min-height:100vh;background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%);color:var(--text);font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif;}.wrap{max-width:1360px;margin:0 auto;padding:24px;display:grid;gap:16px;}.hero,.panel{border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);overflow:hidden;}.hero{padding:20px 22px;}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:var(--soft);color:var(--accent);font-size:12px;font-weight:700;}.pulse{width:8px;height:8px;border-radius:999px;background:var(--accent);}h1{margin:12px 0 6px;font-size:28px;line-height:1.15;}.subtitle{margin:0;color:var(--muted);}.hero-grid{margin-top:16px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}.stat{padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:#f8fbff;}.stat b{display:block;margin-bottom:6px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;}.stat strong{font-size:28px;line-height:1;}.layout{display:grid;grid-template-columns:320px 1fr;gap:16px;}.panel-head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center;background:#fbfdff;}.panel-body{padding:18px;}.progress-shell{height:12px;border-radius:999px;background:#edf2f7;overflow:hidden;border:1px solid var(--line);}.progress-bar{height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#1f6feb);transition:width .35s ease;}.stage{margin-top:12px;font-size:16px;font-weight:700;}.status{margin-top:6px;color:var(--muted);min-height:42px;}.meta-list{margin-top:18px;display:grid;gap:10px;}.meta-row{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:12px;background:#f8fbff;border:1px solid var(--line);}.meta-row span{color:var(--muted);}.console-lines{height:620px;overflow:auto;padding:16px 18px 18px;font:13px/1.65 Consolas,"Courier New",monospace;background:#f8fbff;}.console-line{padding:4px 0;color:#1e293b;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed rgba(216,225,236,.8);}.console-line.error{color:#b42318;}.console-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;}button{padding:10px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font:inherit;cursor:pointer;}.primary{border-color:#bcd3ff;background:#eaf2ff;color:var(--accent);font-weight:700;}.primary.ready{background:#1f6feb;color:#fff;border-color:#1f6feb;box-shadow:0 10px 22px rgba(31,111,235,.2);}@media (max-width:1024px){.layout{grid-template-columns:1fr;}.hero-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.console-lines{height:420px;}}</style></head><body><div class="wrap"><section class="hero"><div class="eyebrow"><span class="pulse"></span><span>Simulation Console</span></div><h1 id="sim-console-headline">${escapeHtml(initialState.headline)}</h1><p class="subtitle" id="sim-console-status">${escapeHtml(initialState.statusText)}</p><div class="hero-grid"><div class="stat"><b>Selected Routes</b><strong id="sim-console-route-count">${escapeHtml(String(initialState.routeCount))}</strong></div><div class="stat"><b>Departure Slots</b><strong id="sim-console-slot-count">${escapeHtml(String(initialState.timeSlotCount))}</strong></div><div class="stat"><b>Estimated Calls</b><strong id="sim-console-request-count">${escapeHtml(String(initialState.requestCount))}</strong></div><div class="stat"><b>Status</b><strong id="sim-console-stage">${escapeHtml(initialState.activeLabel)}</strong></div></div></section><section class="layout"><div class="panel"><div class="panel-head"><strong>실행 상태</strong><span id="sim-console-progress-label">${escapeHtml(String(initialState.progress))}%</span></div><div class="panel-body"><div class="progress-shell"><div class="progress-bar" id="sim-console-progress"></div></div><div class="stage" id="sim-console-active">${escapeHtml(initialState.activeLabel)}</div><div class="status" id="sim-console-detail">${escapeHtml(initialState.statusText)}</div><div class="meta-list"><div class="meta-row"><span>현재 노선</span><strong id="sim-console-current-route">${escapeHtml(initialState.currentRoute)}</strong></div><div class="meta-row"><span>현재 시간대</span><strong id="sim-console-current-slot">${escapeHtml(initialState.currentSlot)}</strong></div><div class="meta-row"><span>현재 청크</span><strong id="sim-console-current-chunk">${escapeHtml(initialState.currentChunk)}</strong></div></div><div class="console-actions"><button type="button" id="sim-console-open-results" class="primary" disabled>결과 보기</button><button type="button" id="sim-console-close">닫기</button></div></div></div><div class="panel"><div class="panel-head"><strong>실행 로그</strong><span>실시간 업데이트</span></div><div class="console-lines" id="sim-console-lines"></div></div></section></div><script>const linesEl=document.getElementById("sim-console-lines");const openResultsButton=document.getElementById("sim-console-open-results");const stateEls={headline:document.getElementById("sim-console-headline"),status:document.getElementById("sim-console-status"),routeCount:document.getElementById("sim-console-route-count"),slotCount:document.getElementById("sim-console-slot-count"),requestCount:document.getElementById("sim-console-request-count"),stage:document.getElementById("sim-console-stage"),active:document.getElementById("sim-console-active"),detail:document.getElementById("sim-console-detail"),currentRoute:document.getElementById("sim-console-current-route"),currentSlot:document.getElementById("sim-console-current-slot"),currentChunk:document.getElementById("sim-console-current-chunk"),progress:document.getElementById("sim-console-progress"),progressLabel:document.getElementById("sim-console-progress-label")};let latestReportId=null;function appendLine(message,isError=false,replace=false){if(!linesEl)return;if(replace)linesEl.innerHTML="";const line=document.createElement("div");line.className="console-line"+(isError?" error":"");line.textContent="["+new Date().toLocaleTimeString("ko-KR",{hour12:false})+"] "+String(message||"");linesEl.appendChild(line);linesEl.scrollTop=linesEl.scrollHeight;}function setState(nextState={}){if(nextState.headline!=null&&stateEls.headline)stateEls.headline.textContent=String(nextState.headline);if(nextState.statusText!=null&&stateEls.status)stateEls.status.textContent=String(nextState.statusText);if(nextState.routeCount!=null&&stateEls.routeCount)stateEls.routeCount.textContent=String(nextState.routeCount);if(nextState.timeSlotCount!=null&&stateEls.slotCount)stateEls.slotCount.textContent=String(nextState.timeSlotCount);if(nextState.requestCount!=null&&stateEls.requestCount)stateEls.requestCount.textContent=String(nextState.requestCount);if(nextState.activeLabel!=null&&stateEls.stage)stateEls.stage.textContent=String(nextState.activeLabel);if(nextState.activeLabel!=null&&stateEls.active)stateEls.active.textContent=String(nextState.activeLabel);if(nextState.statusText!=null&&stateEls.detail)stateEls.detail.textContent=String(nextState.statusText);if(nextState.currentRoute!=null&&stateEls.currentRoute)stateEls.currentRoute.textContent=String(nextState.currentRoute);if(nextState.currentSlot!=null&&stateEls.currentSlot)stateEls.currentSlot.textContent=String(nextState.currentSlot);if(nextState.currentChunk!=null&&stateEls.currentChunk)stateEls.currentChunk.textContent=String(nextState.currentChunk);if(nextState.progress!=null){const progress=Math.max(0,Math.min(100,Number(nextState.progress)||0));if(stateEls.progress)stateEls.progress.style.width=progress+"%";if(stateEls.progressLabel)stateEls.progressLabel.textContent=progress+"%";}}function setResultReady(reportId){latestReportId=reportId?String(reportId):null;if(openResultsButton){openResultsButton.disabled=!latestReportId;openResultsButton.classList.toggle("ready",Boolean(latestReportId));}}window.__appendSimulationConsoleLog=appendLine;window.__setSimulationConsoleState=setState;window.__setSimulationConsoleResultReady=setResultReady;setState(${JSON.stringify(initialState)});setResultReady(null);openResultsButton?.addEventListener("click",()=>{if(latestReportId&&window.opener?.__wonderLinxRouteTime){window.opener.__wonderLinxRouteTime.showResults(latestReportId);}});document.getElementById("sim-console-close")?.addEventListener("click",()=>window.close());appendLine("시뮬레이션 콘솔을 준비했습니다.",false,true);appendLine("실행 요청을 기다리고 있습니다.");</script></body></html>`;
   }
 
   function openRouteTimeSimulationResultsWindow(report) {
@@ -4110,7 +4376,6 @@
       setStatus("팝업이 차단되었습니다. 운행시간 시뮬레이션 결과 창을 허용해 주세요.", true);
       return false;
     }
-    routeTimeResultsWindowRef = resultsWindow;
     resultsWindow.document.open();
     resultsWindow.document.write(buildRouteTimeSimulationResultsWindowHtml(report));
     resultsWindow.document.close();
@@ -4915,19 +5180,33 @@
     chunks.forEach((chunk) => {
       appendUniqueCoordinates(analysisPath, Array.isArray(chunk.coordinates) ? chunk.coordinates : []);
     });
-    const sections = chunks.map((chunk, index) => ({
-      sectionIndex: Number(chunk?.chunkIndex || index + 1),
-      originalCoordinateGroups: Array.isArray(chunk?.originalChunkCoordinateGroups) ? chunk.originalChunkCoordinateGroups : [],
-      originalCoordinates: getChunkOriginalCoordinates(chunk),
-      analysisCoordinates: getChunkAnalysisCoordinates(chunk),
-      stops: Array.isArray(chunk?.stops) ? chunk.stops : [],
-      baseStops: (Array.isArray(chunk?.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection !== true),
-      forcedStops: (Array.isArray(chunk?.stops) ? chunk.stops : []).filter((stop) => stop?.isSimulationCorrection === true),
-      originalDistanceMeters: measureCoordinatePathDistance(getChunkOriginalCoordinates(chunk)),
-      analysisDistanceMeters: Number(chunk?.distanceMeters || 0),
-      analysisDriveSeconds: Number(chunk?.driveSeconds || 0),
-      correctionCount: (Array.isArray(chunk?.stops) ? chunk.stops.filter((stop) => stop?.isSimulationCorrection === true).length : 0),
-    }));
+    const sections = chunks.map((chunk, index) => {
+      const displayStops = buildSimulationSectionDisplayStops(chunk?.stops);
+      const baseStops = getSimulationSectionBaseStops(chunk?.stops);
+      const forcedStops = getSimulationSectionForcedStops(chunk?.stops);
+      const originalCoordinateGroups = buildOriginalChunkPathGroups(originalPath, displayStops);
+      const originalCoordinates = flattenCoordinateGroups(originalCoordinateGroups);
+      const analysisCoordinateGroups = buildOriginalChunkPathGroups(
+        Array.isArray(chunk?.coordinates) ? chunk.coordinates : [],
+        displayStops
+      );
+      const analysisCoordinates = analysisCoordinateGroups.length
+        ? flattenCoordinateGroups(analysisCoordinateGroups)
+        : getChunkAnalysisCoordinates(chunk);
+      return {
+        sectionIndex: Number(chunk?.chunkIndex || index + 1),
+        originalCoordinateGroups,
+        originalCoordinates,
+        analysisCoordinates,
+        stops: displayStops,
+        baseStops,
+        forcedStops,
+        originalDistanceMeters: measureCoordinatePathDistance(originalCoordinates),
+        analysisDistanceMeters: Number(chunk?.distanceMeters || 0),
+        analysisDriveSeconds: Number(chunk?.driveSeconds || 0),
+        correctionCount: forcedStops.length,
+      };
+    });
     return {
       reportId,
       routeName,
@@ -4982,9 +5261,44 @@
     if (!departureSlots.length) {
       throw new Error("시뮬레이션 시간대를 만들지 못했습니다. 시작 시각과 종료 시각을 확인하세요.");
     }
+    const estimatedRequests = routePayload.reduce(
+      (sum, route) => sum + ((Array.isArray(route.segments) ? route.segments.length : 0) * departureSlots.length),
+      0
+    );
+    let fetchHeartbeat = null;
+    let fetchHeartbeatIndex = 0;
+    const heartbeatMessages = [
+      "카카오 미래 길찾기 배치에 대한 응답을 대기 중입니다.",
+      "청크 단위 운행시간을 수집하고 있습니다.",
+      "시간대별 경로 결과를 검증하는 중입니다.",
+      "주행시간 및 거리 메트릭을 집계 중입니다.",
+    ];
 
     appendRouteTimeSimulationLog("시뮬레이션을 시작합니다.", false, true);
-    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`);
+    setRouteTimeSimulationConsoleState({
+      headline: "운행시간 시뮬레이션 실행 콘솔",
+      activeLabel: "Preflight",
+      statusText: "입력 노선과 시간대를 검증하고 실행 계획을 구성하는 중입니다.",
+      routeCount: routePayload.length,
+      timeSlotCount: departureSlots.length,
+      requestCount: estimatedRequests,
+      currentRoute: "-",
+      currentSlot: "-",
+      currentChunk: "-",
+      progress: 10,
+    });
+    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / 예상 호출 ${estimatedRequests}회`);
+    appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분`);
+    appendRouteTimeSimulationLog(`적용식: max(카카오 주행시간, 권역 평균속도 주행시간) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)`);
+    routePayload.forEach((route, routeIndex) => {
+      const routeResearch = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, normalizedOptions);
+      appendRouteTimeSimulationLog(
+        `노선 ${routeIndex + 1}/${routePayload.length} 프리플라이트: ${route.routeName} / 정류장 ${route.stopCount}개 / 청크 ${route.segmentCount}개`
+      );
+      appendRouteTimeSimulationLog(
+        `연구기준 적용: ${route.routeName} / 권역=${routeResearch.region} / 평균속도=${Number(routeResearch.regionAverageSpeedKmh || 0).toFixed(1)}km/h / 기준정차=${routeResearch.baseDwellSeconds}초 / 승객입력정류장=${routeResearch.ridershipStopCount}개`
+      );
+    });
     if (routePayload[0]) {
       appendRouteTimeSimulationLog(
         `첫 노선 스냅 보정: ${routePayload[0].snappedPointCount || 0}/${routePayload[0].stopCount}개 정류장`
@@ -5003,19 +5317,79 @@
         );
       }
     }
-    setStatus(`운행시간 시뮬레이션을 시작합니다. 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`, false);
-    const responsePayload = await requestRouteTimeSimulation({
-      groupKey,
-      options: normalizedOptions,
-      departureSlots,
-      routes: routePayload,
+    setRouteTimeSimulationConsoleState({
+      activeLabel: "Dispatch Ready",
+      statusText: "카카오 미래 길찾기 요청 배치를 전송할 준비가 완료되었습니다.",
+      currentRoute: routePayload[0]?.routeName || "-",
+      currentSlot: departureSlots[0]?.label || "-",
+      currentChunk: routePayload[0]?.segments?.length ? `1 / ${routePayload[0].segments.length}` : "-",
+      progress: 18,
     });
-    const report = buildRouteTimeSimulationReport(responsePayload, normalizedOptions);
-    latestRouteTimeSimulationReport = report;
-    openRouteTimeSimulationResultsWindow(report);
-    appendRouteTimeSimulationLog(`시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`);
-    setStatus(`운행시간 시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`, false);
-    return report;
+    setStatus(`운행시간 시뮬레이션을 시작합니다. 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`, false);
+    appendRouteTimeSimulationLog("카카오 미래 길찾기 배치 요청을 전송했습니다.");
+    setRouteTimeSimulationConsoleState({
+      activeLabel: "Dispatching Kakao Jobs",
+      statusText: "청크별 미래 길찾기 요청을 전송하고 응답을 대기하는 중입니다.",
+      progress: 24,
+    });
+    try {
+      fetchHeartbeat = window.setInterval(() => {
+        const nextProgress = 32 + (fetchHeartbeatIndex % 6) * 8;
+        setRouteTimeSimulationConsoleState({
+          activeLabel: "Collecting Route Telemetry",
+          statusText: heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length],
+          progress: Math.min(82, nextProgress),
+        });
+        appendRouteTimeSimulationLog(heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length]);
+        fetchHeartbeatIndex += 1;
+      }, 1400);
+      const responsePayload = await requestRouteTimeSimulation({
+        groupKey,
+        options: normalizedOptions,
+        departureSlots,
+        routes: routePayload,
+      });
+      if (fetchHeartbeat) {
+        window.clearInterval(fetchHeartbeat);
+        fetchHeartbeat = null;
+      }
+      appendRouteTimeSimulationLog("응답 payload 수신 완료. 결과 구조를 조립합니다.");
+      setRouteTimeSimulationConsoleState({
+        activeLabel: "Materializing Report",
+        statusText: "수신된 청크 결과를 노선별 시간표 리포트로 조합하고 있습니다.",
+        progress: 88,
+      });
+      const report = buildRouteTimeSimulationReport(responsePayload, normalizedOptions);
+      latestRouteTimeSimulationReport = report;
+      appendRouteTimeSimulationLog(`리포트 조합 완료 / 결과 ${report.rows.length}행 / 결과 창 렌더링 준비`);
+      setRouteTimeSimulationConsoleState({
+        activeLabel: "Completed",
+        statusText: "계산이 완료되었습니다. 아래 결과 보기 버튼으로 리포트를 열 수 있습니다.",
+        progress: 100,
+      });
+      if (
+        routeTimeResultsWindowRef
+        && !routeTimeResultsWindowRef.closed
+        && typeof routeTimeResultsWindowRef.__setSimulationConsoleResultReady === "function"
+      ) {
+        routeTimeResultsWindowRef.__setSimulationConsoleResultReady(report.id);
+      }
+      appendRouteTimeSimulationLog(`시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`);
+      appendRouteTimeSimulationLog("결과 보기 버튼이 활성화되었습니다.");
+      setStatus(`운행시간 시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`, false);
+      return report;
+    } catch (error) {
+      if (fetchHeartbeat) {
+        window.clearInterval(fetchHeartbeat);
+        fetchHeartbeat = null;
+      }
+      setRouteTimeSimulationConsoleState({
+        activeLabel: "Execution Failed",
+        statusText: error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.",
+        progress: 100,
+      });
+      throw error;
+    }
   }
 
   function estimateRouteDurationSeconds(distanceMeters) {
@@ -13077,8 +13451,25 @@
         await runRouteTimeSimulation(groupKey, options);
       } catch (error) {
         appendRouteTimeSimulationLog(error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.", true);
+        setRouteTimeSimulationConsoleState({
+          activeLabel: "Execution Failed",
+          statusText: error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.",
+          progress: 100,
+        });
         setStatus(error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.", true);
       }
+    },
+    buildPendingWindowHtml(meta) {
+      return buildRouteTimeSimulationPendingWindowHtml(meta);
+    },
+    attachConsoleWindow(targetWindow) {
+      routeTimeResultsWindowRef = targetWindow || null;
+    },
+    normalizeOptions(options) {
+      return normalizeRouteTimeSimulationOptions(options);
+    },
+    getDepartureSlotCount(options) {
+      return buildSimulationDepartureSlots(normalizeRouteTimeSimulationOptions(options)).length;
     },
     download(reportId) {
       if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
@@ -13092,6 +13483,13 @@
     },
     showLog(reportId, routeName, departureTime) {
       openRouteTimeSimulationLogWindow(reportId, routeName, departureTime);
+    },
+    showResults(reportId) {
+      if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
+        setStatus("표시할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
+        return;
+      }
+      openRouteTimeSimulationResultsWindow(latestRouteTimeSimulationReport);
     },
     async recalculateSegment(reportId, routeName, departureTime, segmentIndex, forcedWaypoint = null, forcedWaypointOrder = null) {
       return recalculateRouteTimeSegment(reportId, routeName, departureTime, segmentIndex, forcedWaypoint, forcedWaypointOrder);
