@@ -4113,44 +4113,98 @@
     };
   }
 
-  function buildRouteTimeSimulationCsv(report) {
-    const lines = [
+  function escapeSpreadsheetXml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  }
+
+  function buildSpreadsheetCellXml(value) {
+    if (value == null || value === "") {
+      return "<Cell><Data ss:Type=\"String\"></Data></Cell>";
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return `<Cell><Data ss:Type="Number">${value}</Data></Cell>`;
+    }
+    return `<Cell><Data ss:Type="String">${escapeSpreadsheetXml(value)}</Data></Cell>`;
+  }
+
+  function buildSpreadsheetWorksheetXml(name, rows) {
+    const rowXml = (Array.isArray(rows) ? rows : [])
+      .map((row) => `<Row>${(Array.isArray(row) ? row : []).map(buildSpreadsheetCellXml).join("")}</Row>`)
+      .join("");
+    return `<Worksheet ss:Name="${escapeSpreadsheetXml(name)}"><Table>${rowXml}</Table></Worksheet>`;
+  }
+
+  function buildRouteTimeSimulationExcelWorkbook(report) {
+    const summaryRows = [
       ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "kakao_drive_minutes", "dwell_minutes", "bus_delay_minutes", "total_minutes", "distance_km"],
     ];
+    const stopRows = [
+      ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds"],
+    ];
+
     report.rows.forEach((row) => {
-      lines.push([
+      summaryRows.push([
         row.routeName,
         row.timeLabel,
         row.departureTime,
-        String(row.stopCount),
-        String(row.segmentCount),
-        (Number(row.researchProfile?.kakaoDriveSeconds || 0) / 60).toFixed(1),
-        (Number(row.dwellSecondsTotal || 0) / 60).toFixed(1),
-        (Number(row.researchProfile?.busDelaySeconds || 0) / 60).toFixed(1),
-        (Number(row.totalSeconds || 0) / 60).toFixed(1),
-        (Number(row.distanceMeters || 0) / 1000).toFixed(2),
+        Number(row.stopCount || 0),
+        Number(row.segmentCount || 0),
+        Number((Number(row.researchProfile?.kakaoDriveSeconds || 0) / 60).toFixed(1)),
+        Number((Number(row.dwellSecondsTotal || 0) / 60).toFixed(1)),
+        Number((Number(row.researchProfile?.busDelaySeconds || 0) / 60).toFixed(1)),
+        Number((Number(row.totalSeconds || 0) / 60).toFixed(1)),
+        Number((Number(row.distanceMeters || 0) / 1000).toFixed(2)),
       ]);
+
+      (row.researchProfile?.stopDetails || []).forEach((stop, index) => {
+        stopRows.push([
+          row.routeName,
+          row.timeLabel,
+          row.departureTime,
+          index + 1,
+          stop.name || "",
+          stop.ridership == null ? "" : Number(stop.ridership),
+          stop.sharePercent == null ? "" : Number(Number(stop.sharePercent).toFixed(2)),
+          stop.dwellWeight == null ? "" : Number(Number(stop.dwellWeight).toFixed(2)),
+          Number(row.researchProfile?.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS),
+          Number(stop.dwellSeconds || 0),
+        ]);
+      });
     });
-    return lines
-      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, "\"\"")}"`).join(","))
-      .join("\r\n");
+
+    const worksheets = [
+      buildSpreadsheetWorksheetXml("Simulation Summary", summaryRows),
+      buildSpreadsheetWorksheetXml("Stop Details", stopRows),
+    ].join("");
+
+    return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?>` +
+      `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:html="http://www.w3.org/TR/REC-html40">` +
+      `<DocumentProperties xmlns="urn:schemas-microsoft-com:office:office"><Author>OpenAI Codex</Author><Created>${escapeSpreadsheetXml(new Date().toISOString())}</Created></DocumentProperties>` +
+      `<Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Bottom"/><Borders/><Font/><Interior/><NumberFormat/><Protection/></Style></Styles>` +
+      `${worksheets}</Workbook>`;
   }
 
-  function downloadRouteTimeSimulationCsv(report = latestRouteTimeSimulationReport) {
+  function downloadRouteTimeSimulationExcel(report = latestRouteTimeSimulationReport) {
     if (!report || !report.rows?.length) {
       setStatus("다운로드할 운행시간 시뮬레이션 결과가 없습니다.", true);
       return;
     }
-    const blob = new Blob(["\uFEFF", buildRouteTimeSimulationCsv(report)], { type: "text/csv;charset=utf-8;" });
+    const workbookXml = buildRouteTimeSimulationExcelWorkbook(report);
+    const blob = new Blob(["\uFEFF", workbookXml], { type: "application/vnd.ms-excel;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `route-time-simulation-${formatAutoSaveTimestamp()}.csv`;
+    link.download = `route-time-simulation-${formatAutoSaveTimestamp()}.xls`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setStatus(`운행시간 시뮬레이션 결과 ${report.rows.length}행을 CSV로 다운로드했습니다.`, false);
+    setStatus(`운행시간 시뮬레이션 결과 ${report.rows.length}행을 2시트 엑셀로 다운로드했습니다.`, false);
   }
 
   function buildRouteTimeSimulationRowsHtml(route) {
@@ -4320,7 +4374,7 @@
     </div>
     <div class="card">
       <div class="actions">
-        <button class="primary" type="button" id="download-simulation-csv-button">엑셀용 CSV 다운로드</button>
+        <button class="primary" type="button" id="download-simulation-csv-button">엑셀 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
       <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 권역 평균 버스속도 하한과 버스지체보정률, 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 실무에서는 평균 운행시간에 10~15% 정도의 여유를 더해 편차를 흡수하는 경우가 많습니다.</p>
@@ -13547,7 +13601,7 @@
         setStatus("다운로드할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
         return;
       }
-      downloadRouteTimeSimulationCsv(latestRouteTimeSimulationReport);
+      downloadRouteTimeSimulationExcel(latestRouteTimeSimulationReport);
     },
     showMap(reportId, routeName, departureTime) {
       openRouteTimeSimulationMapWindow(reportId, routeName, departureTime);
