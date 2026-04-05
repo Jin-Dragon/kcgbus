@@ -67,6 +67,54 @@ Use this next time:
 ```text
 다음 파일 이어서 시작 — hyodo_date/month의 PDF를 하나씩 열어 5호차부터 이어가며 승객 수 데이터를 직접 표로 옮겨서 날짜별/정류장별 Excel 시트를 완성하고 검토까지 마친 뒤 다음 파일을 진행합니다.
 ```
+
+## 2026-04-05 Route-Time Simulation Buffer And Chunk Update
+
+- Research-based operating-time model was extended:
+  - added `busDelayPercent` option to route-time simulation settings
+  - default bus-delay correction is `9%`
+  - users can now modify the percentage directly in the simulation settings window
+- Current simulation formula in code:
+  - `final operating time = (max(kakao drive time, regional average-speed drive time) x (1 + busDelayPercent)) + dwell adjustment`
+  - display intent was later refined so the result table now shows:
+    - Kakao base drive time
+    - dwell adjustment
+    - bus-delay adjustment
+    - final operating time
+- Result screen updates completed:
+  - added a dedicated `버스지체보정` column in the route-time result table
+  - `예상 주행시간` now shows Kakao base drive time again
+  - CSV export now also separates:
+    - `kakao_drive_minutes`
+    - `dwell_minutes`
+    - `bus_delay_minutes`
+    - `total_minutes`
+  - result summary text explains that many real operations add about `10~15%` slack to absorb variability
+- Important route segmentation fix completed:
+  - the simulation chunk generation was corrected to follow the user-facing base-stop rule
+  - chunk windows are now created from `4 base stops` with `1 overlapped boundary stop` between adjacent chunks
+  - intended pattern is now:
+    - `1~4`
+    - `4~7`
+    - `7~10`
+  - this replaced the previous internal chunking mismatch that could look like:
+    - `1~5`
+    - `5~9`
+    - while the popup only displayed 4 base stops
+- Deployment checkpoint:
+  - this note corresponds to the version that should be pushed to Render after `app.js` sync
+
+## Next Resume Prompt
+
+Use this next time:
+
+```text
+C:\Users\wls29\Desktop\my-map-app\kml-kakao-map 프로젝트와
+C:\Users\wls29\Desktop\kcgbus-render 배포 저장소를 불러와서 SESSION_NOTES.md 기준으로 최근 작업 맥락 복원하고,
+운행시간 시뮬레이션의 버스지체보정률(기본 9%) 적용 상태와 결과표의 `예상 주행시간 / 정차보정 / 버스지체보정 / 예상 총 운행시간` 분리 표시가 유지되는지 먼저 점검해줘.
+그리고 청크 분할이 `1~4, 4~7, 7~10`처럼 마지막 정류장이 다음 청크 시작점으로 겹치게 생성되는지 경로보기에서 다시 확인하고,
+필요하면 live Render 화면까지 점검해서 이어서 수정해줘.
+```
 ## 2026-04-05 Route-Time Simulation Console And Research Update
 
 - Route-time simulation settings were revised:
