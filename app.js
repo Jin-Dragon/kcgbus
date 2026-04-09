@@ -3994,6 +3994,78 @@
     return visibleSegments;
   }
 
+  function normalizeDisplaySimulationStop(stop) {
+    if (!stop) {
+      return null;
+    }
+    const lat = Number(stop.originalLat ?? stop.lat);
+    const lng = Number(stop.originalLng ?? stop.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return null;
+    }
+    return {
+      name: stop.name || "",
+      lat,
+      lng,
+      originalLat: lat,
+      originalLng: lng,
+      routeStopIndex: Number.isFinite(Number(stop.routeStopIndex)) ? Number(stop.routeStopIndex) : null,
+      isVirtual: false,
+      isSimulationCorrection: false,
+    };
+  }
+
+  function buildDisplayStopsFromTimelineSegments(segments) {
+    const timelineSegments = Array.isArray(segments) ? segments : [];
+    if (!timelineSegments.length) {
+      return [];
+    }
+    const stops = [];
+    const firstStop = normalizeDisplaySimulationStop(timelineSegments[0].fromStop);
+    if (firstStop) {
+      stops.push(firstStop);
+    }
+    timelineSegments.forEach((segment) => {
+      const nextStop = normalizeDisplaySimulationStop(segment.toStop);
+      if (!nextStop) {
+        return;
+      }
+      const lastStop = stops[stops.length - 1];
+      if (lastStop && isSameSimulationStop(lastStop, nextStop)) {
+        return;
+      }
+      stops.push(nextStop);
+    });
+    return stops;
+  }
+
+  function buildDisplayRequestedOrderMaps(rawBaseStops, displayBaseStops) {
+    const rawStops = Array.isArray(rawBaseStops) ? rawBaseStops : [];
+    const visibleRawOrders = rawStops
+      .map((stop, index) => (stop?.isVirtual === true ? null : index + 1))
+      .filter((value) => value != null);
+    const displayCount = Array.isArray(displayBaseStops) ? displayBaseStops.length : 0;
+    const displayToRequested = {};
+    const requestedToDisplay = {};
+    for (let displayOrder = 2; displayOrder <= displayCount; displayOrder += 1) {
+      const requestedOrder = visibleRawOrders[displayOrder - 1];
+      if (!Number.isFinite(requestedOrder)) {
+        continue;
+      }
+      displayToRequested[String(displayOrder)] = requestedOrder;
+      requestedToDisplay[String(requestedOrder)] = displayOrder;
+    }
+    if (displayCount >= 1) {
+      const tailRequestedOrder = rawStops.length + 1;
+      displayToRequested[String(displayCount + 1)] = tailRequestedOrder;
+      requestedToDisplay[String(tailRequestedOrder)] = displayCount + 1;
+    }
+    return {
+      displayToRequested,
+      requestedToDisplay,
+    };
+  }
+
   function buildSimulationStopTimeline(simulation) {
     if (!simulation || !simulation.researchProfile) {
       return {
@@ -4032,6 +4104,8 @@
       return {
         order: index + 1,
         chunkIndex: Number(segment.chunkIndex || 0),
+        fromStop: normalizeDisplaySimulationStop(segment.fromStop),
+        toStop: normalizeDisplaySimulationStop(segment.toStop),
         fromStopName: segment.fromStop?.name || `정류장 ${index + 1}`,
         toStopName: segment.toStop?.name || `정류장 ${index + 2}`,
         fromRouteStopIndex: Number.isFinite(Number(segment.fromStop?.routeStopIndex)) ? Number(segment.fromStop.routeStopIndex) : null,
@@ -5114,9 +5188,7 @@
       const source = Array.isArray(section?.baseStops) && section.baseStops.length
         ? section.baseStops
         : (Array.isArray(section?.stops) ? section.stops.filter((stop) => stop?.isSimulationCorrection !== true) : []);
-      return source
-        .filter((stop) => stop?.isVirtual !== true)
-        .slice(0, 4);
+      return source.slice(0, 4);
     }
 
     function getStoredForcedPoint(section) {
@@ -5131,7 +5203,9 @@
         name: item.name || "강제포인트",
         lat: Number(item.originalLat ?? item.lat),
         lng: Number(item.originalLng ?? item.lng),
-        order: Number.isFinite(Number(item.requestedOrder)) ? Number(item.requestedOrder) : (getSectionBaseStops(section).length + 1),
+        order: Number.isFinite(Number(section?.requestedOrderToDisplayOrder?.[String(item.requestedOrder)]))
+          ? Number(section.requestedOrderToDisplayOrder[String(item.requestedOrder)])
+          : (getSectionBaseStops(section).length + 1),
       };
     }
 
@@ -5482,7 +5556,7 @@
           payload.departureTime,
           index + 1,
           forcedPoint,
-          forcedPoint.order
+          Number(payload.sections[index]?.displayOrderToRequestedOrder?.[String(forcedPoint.order)] || forcedPoint.order)
         );
         window.alert('변경 적용');
         const nextPayload = window.opener.__wonderLinxRouteTime.getMapWindowPayload(payload.reportId, payload.routeName, payload.departureTime);
@@ -5648,10 +5722,15 @@
       appendUniqueCoordinates(analysisPath, Array.isArray(chunk.coordinates) ? chunk.coordinates : []);
     });
     const sections = chunks.map((chunk, index) => {
-      const visibleStops = buildSimulationSectionDisplayStops(chunk?.stops);
-      const baseStops = getSimulationSectionBaseStops(chunk?.stops);
+      const rawBaseStops = getSimulationSectionBaseStops(chunk?.stops);
       const forcedStops = getSimulationSectionForcedStops(chunk?.stops);
       const chunkTimeProfile = (simulation.chunkTimeProfiles || []).find((item) => Number(item.sectionIndex || 0) === Number(chunk?.chunkIndex || index + 1)) || null;
+      const timelineStops = buildDisplayStopsFromTimelineSegments(chunkTimeProfile?.segments);
+      const displayBaseStops = timelineStops.length
+        ? timelineStops
+        : buildSimulationSectionDisplayStops(chunk?.stops);
+      const visibleStops = displayBaseStops;
+      const orderMaps = buildDisplayRequestedOrderMaps(rawBaseStops, displayBaseStops);
       const originalCoordinateGroups = buildOriginalChunkPathGroups(originalPath, visibleStops);
       const originalCoordinates = flattenCoordinateGroups(originalCoordinateGroups);
       const analysisCoordinateGroups = buildOriginalChunkPathGroups(
@@ -5667,8 +5746,11 @@
         originalCoordinates,
         analysisCoordinates,
         stops: visibleStops,
-        baseStops,
+        baseStops: displayBaseStops,
+        rawBaseStops,
         forcedStops,
+        displayOrderToRequestedOrder: orderMaps.displayToRequested,
+        requestedOrderToDisplayOrder: orderMaps.requestedToDisplay,
         originalDistanceMeters: measureCoordinatePathDistance(originalCoordinates),
         analysisDistanceMeters: Number(chunk?.distanceMeters || 0),
         analysisDriveSeconds: Number(chunk?.driveSeconds || 0),
