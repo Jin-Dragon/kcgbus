@@ -15,7 +15,7 @@ const LOCAL_SERVER_ENV = readLocalServerEnv(LOCAL_SERVER_ENV_PATH);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || LOCAL_SERVER_ENV.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
 const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY || "";
-const SERVER_BUILD_TAG = "2026-04-01-route-time-debug-3";
+const SERVER_BUILD_TAG = "2026-04-09-stop-timeline-1";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -240,8 +240,10 @@ function normalizeSimulationPointWithCandidates(point) {
     originalLng: Number.isFinite(Number(point?.originalLng)) ? Number(point.originalLng) : lng,
     snappedToPath: point?.snappedToPath === true,
     snapDistanceMeters: Number.isFinite(Number(point?.snapDistanceMeters)) ? Number(point.snapDistanceMeters) : null,
+    isVirtual: point?.isVirtual === true,
     isSimulationCorrection: point?.isSimulationCorrection === true,
     pathIndex: Number.isFinite(Number(point?.pathIndex)) ? Number(point.pathIndex) : null,
+    routeStopIndex: Number.isFinite(Number(point?.routeStopIndex)) ? Number(point.routeStopIndex) : null,
     requestedOrder: Number.isFinite(Number(point?.requestedOrder)) ? Math.round(Number(point.requestedOrder)) : null,
   };
 }
@@ -484,8 +486,10 @@ function buildSimulationChunkPayload(segment, segmentIndex, segmentResult) {
       snappedLng: point.lng,
       snappedToPath: Boolean(point.snappedToPath),
       snapDistanceMeters: point.snapDistanceMeters == null ? null : Number(point.snapDistanceMeters),
+      isVirtual: point.isVirtual === true,
       isSimulationCorrection: point.isSimulationCorrection === true,
       pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+      routeStopIndex: Number.isFinite(point.routeStopIndex) ? Number(point.routeStopIndex) : null,
       requestedOrder: Number.isFinite(point.requestedOrder) ? Number(point.requestedOrder) : null,
     })),
   };

@@ -147,6 +147,7 @@
     fileName: document.getElementById("form-file-name"),
     lat: document.getElementById("form-lat"),
     lng: document.getElementById("form-lng"),
+    isVirtual: document.getElementById("form-is-virtual"),
     description: document.getElementById("form-description"),
   };
 
@@ -1553,6 +1554,31 @@
     return next;
   }
 
+  function getVirtualFlagFromExtendedData(value) {
+    const extendedData = normalizeExtendedData(value);
+    const raw = getExtendedDataValue(extendedData, "virtual");
+    return String(raw || "").trim().toLowerCase() === "true";
+  }
+
+  function withVirtualExtendedData(value, isVirtual) {
+    const next = normalizeExtendedData(value).filter((item) => String(item?.name || "").trim() !== "virtual");
+    if (isVirtual === true) {
+      next.push({
+        name: "virtual",
+        value: "true",
+      });
+    }
+    return next;
+  }
+
+  function isVirtualRoutingPoint(point) {
+    return point?.isVirtual === true;
+  }
+
+  function getOperationalPointsInRoute(routeName) {
+    return getPointsInRoute(routeName).filter((point) => !isVirtualRoutingPoint(point));
+  }
+
   function normalizeSimulationCorrectionWaypoint(point) {
     const lat = Number(point?.lat);
     const lng = Number(point?.lng);
@@ -1756,6 +1782,7 @@
     const lat = Number(point.lat);
     const lng = Number(point.lng);
     const extendedData = normalizeExtendedData(point.extendedData);
+    const isVirtual = point.isVirtual === true || getVirtualFlagFromExtendedData(extendedData);
     const ridership = normalizeRidershipValue(
       point.ridership != null ? point.ridership : getRidershipFromExtendedData(extendedData)
     );
@@ -1777,8 +1804,9 @@
       lat,
       lng,
       altitude: point.altitude == null || point.altitude === "" ? null : Number(point.altitude),
+      isVirtual,
       ridership,
-      extendedData: withRidershipExtendedData(extendedData, ridership),
+      extendedData: withVirtualExtendedData(withRidershipExtendedData(extendedData, ridership), isVirtual),
     };
   }
 
@@ -1787,6 +1815,9 @@
     const extendedData = normalizeExtendedData(
       Object.prototype.hasOwnProperty.call(override, "extendedData") ? override.extendedData : point.extendedData
     );
+    const isVirtual = Object.prototype.hasOwnProperty.call(override, "isVirtual")
+      ? override.isVirtual === true
+      : (point.isVirtual === true || getVirtualFlagFromExtendedData(extendedData));
     const ridership = normalizeRidershipValue(
       Object.prototype.hasOwnProperty.call(override, "ridership")
         ? override.ridership
@@ -1801,8 +1832,9 @@
         ? Number(override.createdOrder)
         : (Number.isFinite(Number(point.createdOrder)) ? Number(point.createdOrder) : null),
       routeName: normalizeRouteName(override.routeName || point.routeName || point.fileName),
+      isVirtual,
       ridership,
-      extendedData: withRidershipExtendedData(extendedData, ridership),
+      extendedData: withVirtualExtendedData(withRidershipExtendedData(extendedData, ridership), isVirtual),
     };
   }
 
@@ -3230,7 +3262,7 @@
   }
 
   function getRouteRidershipProfile(routeName) {
-    const points = getPointsInRoute(routeName);
+    const points = getOperationalPointsInRoute(routeName);
     const normalized = points.map((point, index) => ({
       point,
       index,
@@ -3267,25 +3299,31 @@
 
   function buildRouteResearchProfile(routeName, distanceMeters, options = {}) {
     const ridershipProfile = getRouteRidershipProfile(routeName);
+    const virtualStopCount = getPointsInRoute(routeName).filter((point) => isVirtualRoutingPoint(point)).length;
     const dayType = getSimulationDayType(options.selectedDate);
     const region = detectRegionFromCoordinates(getRouteCoordinatesForRegionDetection(routeName));
     const regionAverageSpeedKmh = getRegionAverageSpeedKmh(region, dayType.key);
     const regionalDriveSeconds = regionAverageSpeedKmh > 0 && Number(distanceMeters || 0) > 0
       ? (Number(distanceMeters) / 1000 / regionAverageSpeedKmh) * 3600
       : 0;
-    const stopDetails = ridershipProfile.points.map((point) => {
+    const lastOperationalIndex = Math.max(-1, ridershipProfile.points.length - 1);
+    const stopDetails = ridershipProfile.points.map((point, index) => {
       const ridership = normalizeRidershipValue(point.ridership);
       const dwellWeight = getRidershipDwellWeight(ridership, ridershipProfile.totalRidership);
-      const dwellSeconds = Math.round(RESEARCH_BASE_DWELL_SECONDS * dwellWeight);
+      const dwellSeconds = index === lastOperationalIndex
+        ? 0
+        : Math.round(RESEARCH_BASE_DWELL_SECONDS * dwellWeight);
       const sharePercent = ridershipProfile.totalRidership > 0 && ridership != null
         ? (ridership / ridershipProfile.totalRidership) * 100
         : null;
       return {
         name: point.name,
+        routeStopIndex: index,
         ridership,
         sharePercent,
         dwellWeight,
         dwellSeconds,
+        isTerminal: index === lastOperationalIndex,
       };
     });
     return {
@@ -3299,6 +3337,7 @@
         : DEFAULT_BUS_DELAY_PERCENT,
       baseDwellSeconds: RESEARCH_BASE_DWELL_SECONDS,
       ridershipStopCount: ridershipProfile.ridershipStopCount,
+      virtualStopCount,
       totalRidership: ridershipProfile.totalRidership,
       totalDwellSeconds: stopDetails.reduce((sum, item) => sum + Number(item.dwellSeconds || 0), 0),
       stopDetails,
@@ -3309,13 +3348,14 @@
     return getRouteNamesByGroup(groupKey)
       .map((routeName) => {
         const points = getPointsInRoute(routeName);
+        const operationalPoints = points.filter((point) => !isVirtualRoutingPoint(point));
         return {
           routeName,
-          stopCount: points.length,
+          stopCount: operationalPoints.length,
           chunkCount: points.length >= 2
             ? Math.max(1, 1 + Math.ceil(Math.max(0, points.length - ROUTE_TIME_SIMULATION_BASE_STOP_COUNT) / Math.max(1, ROUTE_TIME_SIMULATION_BASE_STOP_COUNT - 1)))
             : 0,
-          disabled: points.length < 2,
+          disabled: points.length < 2 || operationalPoints.length < 2,
         };
       });
   }
@@ -3707,9 +3747,10 @@
   }
 
   function buildSimulationSectionDisplayStops(stops, baseLimit = ROUTE_TIME_SIMULATION_BASE_STOP_COUNT) {
-    const baseStops = getSimulationSectionBaseStops(stops, baseLimit);
-    const correctionStops = getSimulationSectionForcedStops(stops, baseLimit);
-    return mergeSegmentPointsWithCorrections(baseStops, correctionStops);
+    return (Array.isArray(stops) ? stops : []).filter((stop) => (
+      stop?.isSimulationCorrection !== true
+      && stop?.isVirtual !== true
+    ));
   }
 
   function applyRouteSimulationCorrection(routeName, segmentPoints, segmentIndex) {
@@ -3757,6 +3798,8 @@
         lng,
         originalLat: lat,
         originalLng: lng,
+        isVirtual: point.isVirtual === true,
+        routeStopIndex: normalizedPoints.length,
       });
     });
 
@@ -3789,7 +3832,7 @@
     }
     return {
       routeName,
-      stopCount: preparedPoints.length,
+      stopCount: getOperationalPointsInRoute(routeName).length,
       segmentCount: segments.length,
       segments,
       snappedPointCount: preparedPoints.filter((point) => point.snappedToPath).length,
@@ -3821,6 +3864,210 @@
       return Number.POSITIVE_INFINITY;
     }
     return findNearestCoordinateIndex(coordinates, point).distanceMeters;
+  }
+
+  function isDisplayableSimulationStop(stop) {
+    return Boolean(stop) && stop.isSimulationCorrection !== true && stop.isVirtual !== true;
+  }
+
+  function getSimulationStopCoordinate(stop) {
+    return {
+      lat: Number.isFinite(Number(stop?.snappedLat)) ? Number(stop.snappedLat) : Number(stop?.lat),
+      lng: Number.isFinite(Number(stop?.snappedLng)) ? Number(stop.snappedLng) : Number(stop?.lng),
+    };
+  }
+
+  function isSameSimulationStop(left, right) {
+    if (!left || !right) {
+      return false;
+    }
+    if (Number.isFinite(Number(left.routeStopIndex)) && Number.isFinite(Number(right.routeStopIndex))) {
+      return Number(left.routeStopIndex) === Number(right.routeStopIndex);
+    }
+    return (
+      String(left.name || "") === String(right.name || "")
+      && Math.abs(Number(left.originalLat ?? left.lat ?? 0) - Number(right.originalLat ?? right.lat ?? 0)) < 0.000001
+      && Math.abs(Number(left.originalLng ?? left.lng ?? 0) - Number(right.originalLng ?? right.lng ?? 0)) < 0.000001
+      && Boolean(left.isVirtual) === Boolean(right.isVirtual)
+      && Boolean(left.isSimulationCorrection) === Boolean(right.isSimulationCorrection)
+    );
+  }
+
+  function allocateSecondsByWeights(totalSeconds, weights) {
+    const normalizedTotal = Math.max(0, Math.round(Number(totalSeconds || 0)));
+    const normalizedWeights = (Array.isArray(weights) ? weights : []).map((weight) => {
+      const value = Number(weight);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    });
+    if (!normalizedWeights.length) {
+      return [];
+    }
+    let activeWeights = normalizedWeights;
+    if (!activeWeights.some((weight) => weight > 0)) {
+      activeWeights = normalizedWeights.map(() => 1);
+    }
+    const totalWeight = activeWeights.reduce((sum, weight) => sum + weight, 0);
+    const allocations = activeWeights.map((weight) => Math.floor((normalizedTotal * weight) / totalWeight));
+    let remainder = normalizedTotal - allocations.reduce((sum, value) => sum + value, 0);
+    const rankedIndexes = activeWeights
+      .map((weight, index) => ({
+        index,
+        remainder: ((normalizedTotal * weight) / totalWeight) - allocations[index],
+      }))
+      .sort((left, right) => right.remainder - left.remainder);
+    for (let index = 0; index < rankedIndexes.length && remainder > 0; index += 1, remainder -= 1) {
+      allocations[rankedIndexes[index].index] += 1;
+    }
+    return allocations;
+  }
+
+  function buildChunkDriveEdges(chunk, adjustedDriveSeconds) {
+    const routingStops = Array.isArray(chunk?.stops) ? chunk.stops : [];
+    if (routingStops.length < 2) {
+      return [];
+    }
+    const coordinates = getChunkAnalysisCoordinates(chunk);
+    let searchIndex = 0;
+    const edgeMeta = [];
+    const edgeWeights = [];
+    for (let index = 0; index < routingStops.length - 1; index += 1) {
+      const fromStop = routingStops[index];
+      const toStop = routingStops[index + 1];
+      const fromCoordinate = getSimulationStopCoordinate(fromStop);
+      const toCoordinate = getSimulationStopCoordinate(toStop);
+      const sliced = sliceCoordinatesBetweenPointsForward(coordinates, fromCoordinate, toCoordinate, searchIndex, 250);
+      const slicedCoordinates = Array.isArray(sliced.coordinates) && sliced.coordinates.length >= 2
+        ? sliced.coordinates
+        : [fromCoordinate, toCoordinate];
+      const distanceMeters = Math.max(
+        1,
+        measureCoordinatePathDistance(slicedCoordinates) || distanceInMeters(fromCoordinate, toCoordinate) || 1
+      );
+      if (sliced.endIndex >= 0) {
+        searchIndex = sliced.endIndex;
+      }
+      edgeMeta.push({
+        fromStop,
+        toStop,
+        distanceMeters,
+      });
+      edgeWeights.push(distanceMeters);
+    }
+    const allocations = allocateSecondsByWeights(adjustedDriveSeconds, edgeWeights);
+    return edgeMeta.map((edge, index) => ({
+      ...edge,
+      driveSeconds: allocations[index] || 0,
+    }));
+  }
+
+  function buildChunkVisibleSegments(chunk, adjustedDriveSeconds) {
+    const edges = buildChunkDriveEdges(chunk, adjustedDriveSeconds);
+    const visibleSegments = [];
+    let currentVisibleStop = null;
+    let accumulatedDriveSeconds = 0;
+    let hiddenStopCount = 0;
+    edges.forEach((edge) => {
+      if (!currentVisibleStop && isDisplayableSimulationStop(edge.fromStop)) {
+        currentVisibleStop = edge.fromStop;
+      }
+      accumulatedDriveSeconds += Number(edge.driveSeconds || 0);
+      if (!isDisplayableSimulationStop(edge.toStop)) {
+        hiddenStopCount += 1;
+        return;
+      }
+      const fromStop = currentVisibleStop || edge.fromStop;
+      visibleSegments.push({
+        chunkIndex: Number(chunk?.chunkIndex || 0),
+        fromStop,
+        toStop: edge.toStop,
+        driveSeconds: Math.round(accumulatedDriveSeconds),
+        hiddenStopCount,
+      });
+      currentVisibleStop = edge.toStop;
+      accumulatedDriveSeconds = 0;
+      hiddenStopCount = 0;
+    });
+    return visibleSegments;
+  }
+
+  function buildSimulationStopTimeline(simulation) {
+    if (!simulation || !simulation.researchProfile) {
+      return {
+        segments: [],
+        sections: [],
+        visibleStopCount: 0,
+      };
+    }
+    const chunks = Array.isArray(simulation.chunks) ? simulation.chunks : [];
+    const rawChunkDriveWeights = chunks.map((chunk) => Math.max(0, Number(chunk?.driveSeconds || 0)));
+    const fallbackChunkWeights = chunks.map((chunk) => Math.max(0, Number(chunk?.distanceMeters || 0)));
+    const chunkDriveAllocations = allocateSecondsByWeights(
+      Number(simulation.driveSeconds || 0),
+      rawChunkDriveWeights.some((weight) => weight > 0) ? rawChunkDriveWeights : fallbackChunkWeights
+    );
+    const routeSegments = [];
+    chunks.forEach((chunk, chunkIndex) => {
+      buildChunkVisibleSegments(chunk, chunkDriveAllocations[chunkIndex] || 0).forEach((segment) => {
+        routeSegments.push(segment);
+      });
+    });
+    if (!routeSegments.length) {
+      return {
+        segments: [],
+        sections: [],
+        visibleStopCount: 0,
+      };
+    }
+
+    let elapsedSeconds = 0;
+    const timelineSegments = routeSegments.map((segment, index) => {
+      const stopDetail = simulation.researchProfile?.stopDetails?.[index] || {};
+      const dwellSeconds = Math.round(Number(stopDetail.dwellSeconds || 0));
+      const totalSeconds = Math.round(Number(segment.driveSeconds || 0) + dwellSeconds);
+      elapsedSeconds += totalSeconds;
+      return {
+        order: index + 1,
+        chunkIndex: Number(segment.chunkIndex || 0),
+        fromStopName: segment.fromStop?.name || `정류장 ${index + 1}`,
+        toStopName: segment.toStop?.name || `정류장 ${index + 2}`,
+        fromRouteStopIndex: Number.isFinite(Number(segment.fromStop?.routeStopIndex)) ? Number(segment.fromStop.routeStopIndex) : null,
+        toRouteStopIndex: Number.isFinite(Number(segment.toStop?.routeStopIndex)) ? Number(segment.toStop.routeStopIndex) : null,
+        hiddenStopCount: Number(segment.hiddenStopCount || 0),
+        driveSeconds: Math.round(Number(segment.driveSeconds || 0)),
+        dwellSeconds,
+        totalSeconds,
+        elapsedSeconds,
+      };
+    });
+
+    const sections = [];
+    timelineSegments.forEach((segment) => {
+      let section = sections[sections.length - 1];
+      if (!section || section.sectionIndex !== segment.chunkIndex) {
+        section = {
+          sectionIndex: segment.chunkIndex,
+          segments: [],
+          totalSeconds: 0,
+        };
+        sections.push(section);
+      }
+      section.segments.push(segment);
+      section.totalSeconds += Number(segment.totalSeconds || 0);
+    });
+
+    return {
+      segments: timelineSegments,
+      sections,
+      visibleStopCount: timelineSegments.length + 1,
+    };
+  }
+
+  function hydrateSimulationStopTimeline(simulation) {
+    const timeline = buildSimulationStopTimeline(simulation);
+    simulation.stopTimeline = timeline.segments;
+    simulation.chunkTimeProfiles = timeline.sections;
+    simulation.visibleStopCount = timeline.visibleStopCount;
+    return simulation;
   }
 
   async function requestRouteTimeSegmentRecalculation(payload) {
@@ -3899,6 +4146,11 @@
           item.distanceMeters = simulation.distanceMeters;
           item.totalSeconds = simulation.totalSeconds;
           item.chunks = simulation.chunks;
+          item.dwellSecondsTotal = simulation.dwellSecondsTotal;
+          item.researchProfile = simulation.researchProfile;
+          item.stopTimeline = simulation.stopTimeline;
+          item.chunkTimeProfiles = simulation.chunkTimeProfiles;
+          item.visibleStopCount = simulation.visibleStopCount;
         }
       });
     });
@@ -4040,6 +4292,7 @@
     simulation.driveSeconds = Math.round(baseDriveSeconds + busDelaySeconds);
     simulation.distanceMeters = Number(simulation.chunks.reduce((sum, item) => sum + Number(item.distanceMeters || 0), 0).toFixed(1));
     simulation.totalSeconds = Math.round(simulation.driveSeconds + Number(simulation.dwellSecondsTotal || 0));
+    hydrateSimulationStopTimeline(simulation);
     return simulation;
   }
 
@@ -4084,6 +4337,7 @@
           originalPathCoordinates,
           researchProfile,
         };
+        hydrateSimulationStopTimeline(simulationRow);
         rows.push(simulationRow);
         return {
           ...item,
@@ -4093,6 +4347,9 @@
           distanceMeters: simulationRow.distanceMeters,
           chunks,
           researchProfile,
+          stopTimeline: simulationRow.stopTimeline,
+          chunkTimeProfiles: simulationRow.chunkTimeProfiles,
+          visibleStopCount: simulationRow.visibleStopCount,
         };
       });
       route.originalPathCoordinates = originalPathCoordinates;
@@ -4139,12 +4396,50 @@
     return `<Worksheet ss:Name="${escapeSpreadsheetXml(name)}"><Table>${rowXml}</Table></Worksheet>`;
   }
 
+  function buildStopTimelineInlineText(segments) {
+    if (!Array.isArray(segments) || !segments.length) {
+      return "정류장별 운행시간 정보가 없습니다.";
+    }
+    const parts = [String(segments[0].fromStopName || "-")];
+    segments.forEach((segment) => {
+      parts.push(`(${formatSimulationDurationLabel(segment.totalSeconds || 0)})`);
+      parts.push(String(segment.toStopName || "-"));
+    });
+    return parts.join(" - ");
+  }
+
+  function buildStopTimelinePanelHtml(segments) {
+    if (!Array.isArray(segments) || !segments.length) {
+      return `<div class="timeline-empty">정류장별 운행시간 정보가 없습니다.</div>`;
+    }
+    const inlineText = buildStopTimelineInlineText(segments);
+    const cardsHtml = segments.map((segment) => `
+      <div class="timeline-card">
+        <div class="timeline-card-route">${escapeHtml(segment.fromStopName || "-")} <span class="timeline-arrow">→</span> ${escapeHtml(segment.toStopName || "-")}</div>
+        <div class="timeline-card-meta">
+          <span>구간합 ${escapeHtml(formatSimulationDurationLabel(segment.totalSeconds || 0))}</span>
+          <span>주행 ${escapeHtml(formatSimulationDurationLabel(segment.driveSeconds || 0))}</span>
+          <span>정차 ${escapeHtml(formatSimulationDurationLabel(segment.dwellSeconds || 0))}</span>
+          <span>누적 ${escapeHtml(formatSimulationDurationLabel(segment.elapsedSeconds || 0))}</span>
+          ${segment.hiddenStopCount > 0 ? `<span>숨김포인트 ${escapeHtml(String(segment.hiddenStopCount))}개 포함</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+    return `
+      <div class="timeline-inline">${escapeHtml(inlineText)}</div>
+      <div class="timeline-grid">${cardsHtml}</div>
+    `;
+  }
+
   function buildRouteTimeSimulationExcelWorkbook(report) {
     const summaryRows = [
       ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "kakao_drive_minutes", "dwell_minutes", "bus_delay_minutes", "total_minutes", "distance_km"],
     ];
     const stopRows = [
-      ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds"],
+      ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "is_terminal"],
+    ];
+    const timelineRows = [
+      ["route_name", "time_label", "departure_time", "segment_order", "from_stop", "to_stop", "drive_seconds", "dwell_seconds", "segment_total_seconds", "elapsed_seconds", "hidden_point_count"],
     ];
 
     report.rows.forEach((row) => {
@@ -4173,6 +4468,23 @@
           stop.dwellWeight == null ? "" : Number(Number(stop.dwellWeight).toFixed(2)),
           Number(row.researchProfile?.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS),
           Number(stop.dwellSeconds || 0),
+          stop.isTerminal === true ? "Y" : "",
+        ]);
+      });
+
+      (row.stopTimeline || []).forEach((segment) => {
+        timelineRows.push([
+          row.routeName,
+          row.timeLabel,
+          row.departureTime,
+          Number(segment.order || 0),
+          segment.fromStopName || "",
+          segment.toStopName || "",
+          Number(segment.driveSeconds || 0),
+          Number(segment.dwellSeconds || 0),
+          Number(segment.totalSeconds || 0),
+          Number(segment.elapsedSeconds || 0),
+          Number(segment.hiddenStopCount || 0),
         ]);
       });
     });
@@ -4180,6 +4492,7 @@
     const worksheets = [
       buildSpreadsheetWorksheetXml("Simulation Summary", summaryRows),
       buildSpreadsheetWorksheetXml("Stop Details", stopRows),
+      buildSpreadsheetWorksheetXml("Stop Timeline", timelineRows),
     ].join("");
 
     return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?>` +
@@ -4204,12 +4517,12 @@
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setStatus(`운행시간 시뮬레이션 결과 ${report.rows.length}행을 2시트 엑셀로 다운로드했습니다.`, false);
+    setStatus(`운행시간 시뮬레이션 결과 ${report.rows.length}행을 3시트 엑셀로 다운로드했습니다.`, false);
   }
 
   function buildRouteTimeSimulationRowsHtml(route) {
     return (route.simulations || []).map((item) => `
-      <tr>
+      <tr class="simulation-row">
         <td>${escapeHtml(item.label)}</td>
         <td>${escapeHtml(item.departureTime)}</td>
         <td>${escapeHtml(formatSimulationDurationLabel(item.researchProfile?.kakaoDriveSeconds || 0))}</td>
@@ -4218,8 +4531,14 @@
         <td><strong>${escapeHtml(formatSimulationDurationLabel(item.totalSeconds))}</strong></td>
         <td>${escapeHtml((Number(item.distanceMeters || 0) / 1000).toFixed(2))}km</td>
         <td style="white-space:nowrap;display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" data-route-detail-toggle="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}">정류장별 시간</button>
           <button type="button" data-route-map="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}">경로보기</button>
           <button type="button" data-route-log="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}">계산로그</button>
+        </td>
+      </tr>
+      <tr class="timeline-detail-row" data-route-detail-row="${escapeHtml(route.routeName)}" data-route-time="${escapeHtml(item.departureTime)}" hidden>
+        <td colspan="8">
+          ${buildStopTimelinePanelHtml(item.stopTimeline || [])}
         </td>
       </tr>
     `).join("");
@@ -4249,18 +4568,19 @@
       `버스지체보정률: ${Number(research.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`,
       `기준 정류장 정차시간: ${research.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS}초`,
       `탑승자 입력 정류장: ${research.ridershipStopCount || 0}개 / 총합 ${Number(research.totalRidership || 0).toLocaleString("ko-KR")}`,
+      `가상정류장 수: ${research.virtualStopCount || 0}개`,
       `권역 속도 기준 주행시간: ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
       `기준 주행시간: max(카카오 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)}, 권역속도기준 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}) = ${formatSimulationDurationLabel(research.baseAppliedDriveSeconds || 0)}`,
       `버스지체보정 추가시간: ${formatSimulationDurationLabel(research.busDelaySeconds || 0)}`,
       `최종 적용 주행시간: 기준 주행시간 + 버스지체보정 = ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
-      `최종 적용 정차보정: 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
+      `최종 적용 정차보정: 마지막 정류장 제외, 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
       `적용식: (max(카카오 주행시간, 권역 평균속도 주행시간) x (1 + 버스지체보정률)) + 정류장별 정차보정`,
       "",
       "[구간별 계산 로그]",
     ];
     (simulation.chunks || []).forEach((chunk, index) => {
       const stopLines = (chunk.stops || []).map((stop, stopIndex) => (
-        `  ${stopIndex + 1}. ${stop.name || "-"}${stop.isSimulationCorrection ? " [보정포인트]" : ""}`
+        `  ${stopIndex + 1}. ${stop.name || "-"}${stop.isSimulationCorrection ? " [보정포인트]" : (stop.isVirtual ? " [가상]" : "")}`
         + ` / 원본=(${Number((Number.isFinite(stop.originalLng) ? stop.originalLng : stop.lng) || 0).toFixed(7)}, ${Number((Number.isFinite(stop.originalLat) ? stop.originalLat : stop.lat) || 0).toFixed(7)})`
         + ` / 스냅=(${Number((Number.isFinite(stop.snappedLng) ? stop.snappedLng : stop.lng) || 0).toFixed(7)}, ${Number((Number.isFinite(stop.snappedLat) ? stop.snappedLat : stop.lat) || 0).toFixed(7)})`
         + ` / 스냅거리=${stop.snapDistanceMeters == null ? "-" : `${stop.snapDistanceMeters}m`}`
@@ -4277,7 +4597,7 @@
         `- distance: ${(Number(chunk.distanceMeters || 0) / 1000).toFixed(2)}km`,
         `- 최종 요청 순서:`,
         ...((chunk.stops || []).map((stop, orderIndex) => {
-          const pointType = stop.isSimulationCorrection ? "강제포인트" : "정류장";
+          const pointType = stop.isSimulationCorrection ? "강제포인트" : (stop.isVirtual ? "가상포인트" : "정류장");
           const pathOrder = Number.isFinite(Number(stop.pathIndex)) ? String(stop.pathIndex) : "-";
           const requestedOrder = Number.isFinite(Number(stop.requestedOrder)) ? String(stop.requestedOrder) : "-";
           return `  ${orderIndex + 1}. [${pointType}] ${stop.name || "-"} / pathIndex=${pathOrder} / requestedOrder=${requestedOrder}`;
@@ -4324,7 +4644,7 @@
         <div class="table-wrap">
           <table>
             <thead><tr><th>시간대</th><th>출발시각</th><th>예상 주행시간</th><th>정차 보정</th><th>버스지체보정</th><th>예상 총 운행시간</th><th>거리</th><th>지도</th></tr></thead>
-            <tbody>${buildRouteTimeSimulationRowsHtml(route) || "<tr><td colspan=\"7\">결과 없음</td></tr>"}</tbody>
+            <tbody>${buildRouteTimeSimulationRowsHtml(route) || "<tr><td colspan=\"8\">결과 없음</td></tr>"}</tbody>
           </table>
         </div>
       </div>
@@ -4356,6 +4676,15 @@
     thead th { background:#f8fbff; position:sticky; top:0; }
     .table-wrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:14px; margin-top:12px; }
     .note { color:var(--muted); font-size:12px; }
+    .simulation-row { background:#fff; }
+    .timeline-detail-row td { background:#f8fbff; }
+    .timeline-inline { padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:#fff; font-weight:600; line-height:1.7; }
+    .timeline-grid { display:grid; gap:10px; margin-top:12px; }
+    .timeline-card { padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .timeline-card-route { font-weight:700; }
+    .timeline-card-meta { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; color:var(--muted); font-size:12px; }
+    .timeline-arrow { color:var(--muted); }
+    .timeline-empty { padding:14px; border:1px dashed var(--line); border-radius:12px; color:var(--muted); background:#fff; }
     @media (max-width: 900px) { body { padding:16px; } .cards { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -4377,7 +4706,7 @@
         <button class="primary" type="button" id="download-simulation-csv-button">엑셀 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 권역 평균 버스속도 하한과 버스지체보정률, 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 실무에서는 평균 운행시간에 10~15% 정도의 여유를 더해 편차를 흡수하는 경우가 많습니다.</p>
+      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 권역 평균 버스속도 하한과 버스지체보정률, 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
     </div>
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
@@ -4391,6 +4720,25 @@
       button.addEventListener("click", () => {
         if (window.opener && window.opener.__wonderLinxRouteTime) {
           window.opener.__wonderLinxRouteTime.showMap(${JSON.stringify(report.id)}, button.dataset.routeMap, button.dataset.routeTime);
+        }
+      });
+    });
+    document.querySelectorAll("[data-route-detail-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const row = Array.from(document.querySelectorAll("[data-route-detail-row]")).find((candidate) => (
+          candidate.dataset.routeDetailRow === button.dataset.routeDetailToggle
+          && candidate.dataset.routeTime === button.dataset.routeTime
+        ));
+        if (!row) {
+          return;
+        }
+        const isHidden = row.hasAttribute("hidden");
+        if (isHidden) {
+          row.removeAttribute("hidden");
+          button.textContent = "정류장별 시간 닫기";
+        } else {
+          row.setAttribute("hidden", "");
+          button.textContent = "정류장별 시간";
         }
       });
     });
@@ -4523,6 +4871,10 @@
     .section-title { display:flex; align-items:center; gap:8px; }
     .section-title strong { margin:0; }
     .badge { display:inline-flex; align-items:center; height:24px; padding:0 9px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; }
+    .section-stop-list { display:grid; gap:8px; margin-top:10px; }
+    .section-stop-item { padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .section-stop-route { font-weight:700; font-size:13px; }
+    .section-stop-meta { display:flex; gap:8px; flex-wrap:wrap; margin-top:4px; color:var(--muted); font-size:12px; }
     .mini-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
     .mini { padding:10px; border:1px solid var(--line); border-radius:12px; background:#fff; cursor:pointer; transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
     .mini b { display:block; margin-bottom:4px; font-size:12px; color:var(--muted); }
@@ -4579,6 +4931,7 @@
                 <input type="checkbox" data-section-toggle="${index}" checked>
                 <span class="swatch" style="background:${escapeHtml(sectionColors[index % sectionColors.length])};"></span>
                 <strong>구간 ${index + 1}</strong>
+                <span class="badge">${escapeHtml(formatSimulationDurationLabel(section.totalSeconds || 0))}</span>
               </div>
               ${section.correctionCount > 0 ? `<span class="badge">보정 ${escapeHtml(String(section.correctionCount))}</span>` : ""}
             </div>
@@ -4593,6 +4946,19 @@
                 <b>분석구간</b>
                 <div>${escapeHtml(formatSimulationDurationLabel(section.analysisDriveSeconds || 0))} / ${escapeHtml((Number(section.analysisDistanceMeters || 0) / 1000).toFixed(2))}km</div>
               </div>
+            </div>
+            <div class="section-stop-list">
+              ${(section.timelineSegments || []).map((segment) => `
+                <div class="section-stop-item">
+                  <div class="section-stop-route">${escapeHtml(segment.fromStopName || "-")} → ${escapeHtml(segment.toStopName || "-")} (${escapeHtml(formatSimulationDurationLabel(segment.totalSeconds || 0))})</div>
+                  <div class="section-stop-meta">
+                    <span>주행 ${escapeHtml(formatSimulationDurationLabel(segment.driveSeconds || 0))}</span>
+                    <span>정차 ${escapeHtml(formatSimulationDurationLabel(segment.dwellSeconds || 0))}</span>
+                    <span>누적 ${escapeHtml(formatSimulationDurationLabel(segment.elapsedSeconds || 0))}</span>
+                    ${segment.hiddenStopCount > 0 ? `<span>숨김포인트 ${escapeHtml(String(segment.hiddenStopCount))}개 포함</span>` : ""}
+                  </div>
+                </div>
+              `).join("") || `<div class="section-stop-item"><div class="section-stop-route">정류장별 시간이 없습니다.</div></div>`}
             </div>
             <div class="order-editor" data-order-editor="${index}"></div>
             <div class="actions">
@@ -5276,14 +5642,15 @@
       appendUniqueCoordinates(analysisPath, Array.isArray(chunk.coordinates) ? chunk.coordinates : []);
     });
     const sections = chunks.map((chunk, index) => {
-      const displayStops = buildSimulationSectionDisplayStops(chunk?.stops);
+      const visibleStops = buildSimulationSectionDisplayStops(chunk?.stops);
       const baseStops = getSimulationSectionBaseStops(chunk?.stops);
       const forcedStops = getSimulationSectionForcedStops(chunk?.stops);
-      const originalCoordinateGroups = buildOriginalChunkPathGroups(originalPath, displayStops);
+      const chunkTimeProfile = (simulation.chunkTimeProfiles || []).find((item) => Number(item.sectionIndex || 0) === Number(chunk?.chunkIndex || index + 1)) || null;
+      const originalCoordinateGroups = buildOriginalChunkPathGroups(originalPath, visibleStops);
       const originalCoordinates = flattenCoordinateGroups(originalCoordinateGroups);
       const analysisCoordinateGroups = buildOriginalChunkPathGroups(
         Array.isArray(chunk?.coordinates) ? chunk.coordinates : [],
-        displayStops
+        visibleStops
       );
       const analysisCoordinates = analysisCoordinateGroups.length
         ? flattenCoordinateGroups(analysisCoordinateGroups)
@@ -5293,12 +5660,14 @@
         originalCoordinateGroups,
         originalCoordinates,
         analysisCoordinates,
-        stops: displayStops,
+        stops: visibleStops,
         baseStops,
         forcedStops,
         originalDistanceMeters: measureCoordinatePathDistance(originalCoordinates),
         analysisDistanceMeters: Number(chunk?.distanceMeters || 0),
         analysisDriveSeconds: Number(chunk?.driveSeconds || 0),
+        totalSeconds: Number(chunkTimeProfile?.totalSeconds || 0),
+        timelineSegments: Array.isArray(chunkTimeProfile?.segments) ? chunkTimeProfile.segments : [],
         correctionCount: forcedStops.length,
       };
     });
@@ -9468,6 +9837,7 @@
       createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
+      isVirtual: getVirtualFlagFromExtendedData(extendedData),
       ridership: getRidershipFromExtendedData(extendedData),
       simulationCorrections: getSimulationCorrectionsFromExtendedData(extendedData, routeName || fileName),
       extendedData,
@@ -10911,9 +11281,11 @@
       const ridershipMeta = document.createElement("span");
       ridershipMeta.className = "point-meta";
       ridershipMeta.textContent =
-        normalizeRidershipValue(point.ridership) == null
-          ? "탑승객 미입력"
-          : `탑승객 ${formatRidershipValue(point.ridership)}명`;
+        point.isVirtual
+          ? "가상 포인트"
+          : (normalizeRidershipValue(point.ridership) == null
+            ? "탑승객 미입력"
+            : `탑승객 ${formatRidershipValue(point.ridership)}명`);
       button.appendChild(ridershipMeta);
       button.addEventListener("click", () => selectPointById(point.id));
       button.addEventListener("contextmenu", (event) => {
@@ -11304,13 +11676,53 @@
     return nextCoordinates;
   }
 
-  function createMarkerImage(color, isSelected, labelText = "", isMuted = false) {
+  function parseHexColor(color) {
+    const value = String(color || "").trim();
+    const match = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (!match) {
+      return null;
+    }
+    const hex = match[1].length === 3
+      ? match[1].split("").map((char) => char + char).join("")
+      : match[1];
+    return {
+      r: parseInt(hex.slice(0, 2), 16),
+      g: parseInt(hex.slice(2, 4), 16),
+      b: parseInt(hex.slice(4, 6), 16),
+    };
+  }
+
+  function isRouteColorRedLike(color) {
+    const rgb = parseHexColor(color);
+    if (!rgb) {
+      return false;
+    }
+    return rgb.r >= 170 && rgb.g <= 110 && rgb.b <= 110;
+  }
+
+  function createMarkerImage(color, isSelected, labelText = "", isMuted = false, isVirtual = false) {
     const size = isSelected ? 30 : 26;
     const stroke = isSelected ? "#1f1a14" : isMuted ? "#d8e2ee" : "#ffffff";
     const strokeWidth = isSelected ? 3 : 2;
     const radius = isSelected ? 11 : 10;
     const center = size / 2;
     const displayLabel = String(labelText || "").slice(0, 3);
+    const virtualBadgeFill = isRouteColorRedLike(color) ? "#2563eb" : "#dc2626";
+    const virtualBadgeRadius = isSelected ? 4.4 : 4;
+    const virtualBadgeCx = isSelected ? size - 6 : size - 5;
+    const virtualBadgeCy = isSelected ? 6 : 5;
+    const virtualBadge = isVirtual ? `
+        <circle cx="${virtualBadgeCx}" cy="${virtualBadgeCy}" r="${virtualBadgeRadius}" fill="${virtualBadgeFill}" stroke="#ffffff" stroke-width="1.5" />
+        <text
+          x="${virtualBadgeCx}"
+          y="${virtualBadgeCy + 0.2}"
+          text-anchor="middle"
+          dominant-baseline="middle"
+          font-family="Segoe UI, Noto Sans KR, sans-serif"
+          font-size="${isSelected ? 6.6 : 6.2}"
+          font-weight="800"
+          fill="#ffffff"
+        >V</text>` : "";
     const svg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
         <circle cx="${center}" cy="${center}" r="${radius}" fill="${color}" fill-opacity="${isMuted ? "0.76" : "1"}" stroke="${stroke}" stroke-width="${strokeWidth}" />
@@ -11324,6 +11736,7 @@
           font-weight="700"
           fill="#ffffff"
         >${escapeHtml(displayLabel)}</text>
+        ${virtualBadge}
       </svg>
     `.trim();
 
@@ -11811,6 +12224,7 @@
       "routeorder",
       "filename",
       "createdorder",
+      "virtual",
       "ridership",
       "boardingcount",
       "passengercount",
@@ -11825,6 +12239,7 @@
       { label: "위도", value: String(point.lat) },
       { label: "경도", value: String(point.lng) },
       { label: "설명", value: point.description },
+      { label: "가상 포인트", value: point.isVirtual ? "예" : "" },
       { label: "주소", value: point.address },
       { label: "전화번호", value: point.phoneNumber },
       { label: "탑승객 수", value: normalizeRidershipValue(point.ridership) == null ? "" : `${formatRidershipValue(point.ridership)}명` },
@@ -11925,6 +12340,7 @@
     formEls.fileName.value = point?.fileName || "직접 추가";
     formEls.lat.value = point?.lat ?? "";
     formEls.lng.value = point?.lng ?? "";
+    formEls.isVirtual.checked = point?.isVirtual === true;
     formEls.description.value = point?.description || "";
     deletePointButtonEl.disabled = !point;
   }
@@ -11979,6 +12395,7 @@
       lat,
       lng,
       altitude: null,
+      isVirtual: false,
       extendedData: [],
     };
   }
@@ -12379,7 +12796,8 @@
           routeSetting.color,
           point.id === selectedPointId,
           String(routeOrderMap.get(point.id) || ""),
-          isMuted && point.id !== selectedPointId
+          isMuted && point.id !== selectedPointId,
+          isVirtualRoutingPoint(point)
         ),
       });
 
@@ -12849,12 +13267,16 @@
       lat,
       lng,
       altitude,
+      isVirtual: formEls.isVirtual.checked === true,
       phoneNumber: basePoint.phoneNumber || "",
       address: basePoint.address || "",
       description: formEls.description.value.trim(),
       rawCoordinates: altitude == null ? `${lng},${lat}` : `${lng},${lat},${altitude}`,
       ridership: normalizeRidershipValue(basePoint.ridership),
-      extendedData: withRidershipExtendedData(basePoint.extendedData, basePoint.ridership),
+      extendedData: withVirtualExtendedData(
+        withRidershipExtendedData(basePoint.extendedData, basePoint.ridership),
+        formEls.isVirtual.checked === true
+      ),
     };
   }
 
