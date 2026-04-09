@@ -3167,10 +3167,14 @@
     const normalized = Math.max(0, Math.round(Number(seconds || 0)));
     const hours = Math.floor(normalized / 3600);
     const minutes = Math.floor((normalized % 3600) / 60);
+    const remainingSeconds = normalized % 60;
     if (hours > 0) {
-      return `${hours}시간 ${minutes}분`;
+      return `${hours}시간 ${minutes}분 ${remainingSeconds}초`;
     }
-    return `${Math.max(0, minutes)}분`;
+    if (minutes > 0) {
+      return `${minutes}분 ${remainingSeconds}초`;
+    }
+    return `${remainingSeconds}초`;
   }
 
   function normalizeRouteTimeSimulationOptions(value = {}) {
