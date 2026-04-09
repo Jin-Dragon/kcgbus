@@ -5114,7 +5114,9 @@
       const source = Array.isArray(section?.baseStops) && section.baseStops.length
         ? section.baseStops
         : (Array.isArray(section?.stops) ? section.stops.filter((stop) => stop?.isSimulationCorrection !== true) : []);
-      return source.slice(0, 4);
+      return source
+        .filter((stop) => stop?.isVirtual !== true)
+        .slice(0, 4);
     }
 
     function getStoredForcedPoint(section) {
