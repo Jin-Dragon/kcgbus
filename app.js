@@ -127,10 +127,18 @@
   const analysisModalEl = document.getElementById("analysis-modal");
   const analysisModalBodyEl = document.getElementById("analysis-modal-body");
   const analysisModalCloseEl = document.getElementById("analysis-modal-close");
+  const mapWrapEl = document.querySelector(".map-wrap");
+  const mapSearchPanelEl = document.getElementById("map-search-panel");
+  const mapSearchToggleEl = document.getElementById("map-search-toggle");
   const mapSearchFormEl = document.getElementById("map-search-form");
   const mapSearchInputEl = document.getElementById("map-search-input");
   const mapSearchButtonEl = document.getElementById("map-search-button");
   const mapSearchClearEl = document.getElementById("map-search-clear");
+  const roadviewToggleEl = document.getElementById("roadview-toggle");
+  const roadviewPanelEl = document.getElementById("roadview-panel");
+  const roadviewCloseEl = document.getElementById("roadview-close");
+  const roadviewResizeHandleEl = document.getElementById("roadview-resize-handle");
+  const roadviewEl = document.getElementById("roadview");
   const helpButtonEl = document.getElementById("help-button");
   const observationAreaNameEl = document.getElementById("observation-area-name");
   const observationAreaColorEl = document.getElementById("observation-area-color");
@@ -214,6 +222,15 @@
   let mapSearchPlaces = null;
   let mapSearchMarker = null;
   let mapSearchInfoWindow = null;
+  let mapSearchResultPosition = null;
+  let roadview = null;
+  let roadviewClient = null;
+  let roadviewOverlay = null;
+  let roadviewMarker = null;
+  let roadviewPlacementActive = false;
+  let roadviewPanelOpen = false;
+  let roadviewResizeObserver = null;
+  let roadviewResizeState = null;
   let latestAnalysisReport = null;
   let latestOptimizationPlan = null;
   let latestRidershipAnalysisReport = null;
@@ -311,6 +328,228 @@
     if (mapSearchInfoWindow) {
       mapSearchInfoWindow.close();
     }
+    mapSearchResultPosition = null;
+  }
+
+  function setMapSearchCollapsed(collapsed) {
+    const nextCollapsed = collapsed === true;
+    mapSearchPanelEl?.classList.toggle("is-collapsed", nextCollapsed);
+    if (mapSearchToggleEl) {
+      mapSearchToggleEl.setAttribute("aria-expanded", String(!nextCollapsed));
+      mapSearchToggleEl.setAttribute("aria-label", nextCollapsed ? "검색 펼치기" : "검색 접기");
+      mapSearchToggleEl.textContent = nextCollapsed ? "+" : "−";
+    }
+  }
+
+  function ensureRoadviewTools() {
+    if (!window.kakao?.maps?.Roadview || !window.kakao?.maps?.RoadviewClient) {
+      return false;
+    }
+    if (!roadview && roadviewEl) {
+      roadview = new window.kakao.maps.Roadview(roadviewEl);
+    }
+    if (!roadviewClient) {
+      roadviewClient = new window.kakao.maps.RoadviewClient();
+    }
+    if (!roadviewResizeObserver && roadviewPanelEl && typeof ResizeObserver === "function") {
+      roadviewResizeObserver = new ResizeObserver(() => {
+        if (roadview && typeof roadview.relayout === "function") {
+          roadview.relayout();
+        }
+      });
+      roadviewResizeObserver.observe(roadviewPanelEl);
+    }
+    return Boolean(roadview && roadviewClient);
+  }
+
+  function updateRoadviewButtonState() {
+    if (!roadviewToggleEl) {
+      return;
+    }
+    roadviewToggleEl.classList.toggle("is-active", roadviewPlacementActive);
+    roadviewToggleEl.setAttribute("aria-pressed", String(roadviewPlacementActive));
+    roadviewToggleEl.setAttribute("aria-label", roadviewPlacementActive ? "로드뷰 종료" : "로드뷰");
+    roadviewToggleEl.setAttribute("title", roadviewPlacementActive ? "로드뷰 종료" : "로드뷰");
+  }
+
+  function setRoadviewPanelOpen(open) {
+    roadviewPanelOpen = open === true;
+    roadviewPanelEl?.classList.toggle("is-open", roadviewPanelOpen);
+    roadviewPanelEl?.setAttribute("aria-hidden", String(!roadviewPanelOpen));
+    window.setTimeout(() => {
+      if (roadview && typeof roadview.relayout === "function") {
+        roadview.relayout();
+      }
+    }, 80);
+  }
+
+  function closeRoadviewPanel() {
+    setRoadviewPanelOpen(false);
+    setStatus("로드뷰 창을 닫았습니다.", false);
+  }
+
+  function relayoutRoadviewSoon() {
+    window.setTimeout(() => {
+      if (roadview && typeof roadview.relayout === "function") {
+        roadview.relayout();
+      }
+    }, 40);
+  }
+
+  function beginRoadviewResize(event) {
+    if (!roadviewPanelEl) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = roadviewPanelEl.getBoundingClientRect();
+    roadviewResizeState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: rect.width,
+      startHeight: rect.height,
+    };
+    roadviewPanelEl.classList.add("is-resizing");
+    roadviewResizeHandleEl?.setPointerCapture?.(event.pointerId);
+    window.addEventListener("pointermove", resizeRoadviewPanel);
+    window.addEventListener("pointerup", finishRoadviewResize);
+    window.addEventListener("pointercancel", finishRoadviewResize);
+  }
+
+  function resizeRoadviewPanel(event) {
+    if (!roadviewResizeState || !roadviewPanelEl) {
+      return;
+    }
+    const maxWidth = Math.max(320, window.innerWidth - 36);
+    const maxHeight = Math.max(260, window.innerHeight - 36);
+    const minWidth = 300;
+    const minHeight = 220;
+    const nextWidth = Math.min(maxWidth, Math.max(minWidth, roadviewResizeState.startWidth + (roadviewResizeState.startX - event.clientX)));
+    const nextHeight = Math.min(maxHeight, Math.max(minHeight, roadviewResizeState.startHeight + (roadviewResizeState.startY - event.clientY)));
+    roadviewPanelEl.style.width = `${Math.round(nextWidth)}px`;
+    roadviewPanelEl.style.height = `${Math.round(nextHeight)}px`;
+    if (roadview && typeof roadview.relayout === "function") {
+      roadview.relayout();
+    }
+  }
+
+  function finishRoadviewResize(event) {
+    if (!roadviewResizeState) {
+      return;
+    }
+    roadviewResizeHandleEl?.releasePointerCapture?.(roadviewResizeState.pointerId);
+    roadviewResizeState = null;
+    roadviewPanelEl?.classList.remove("is-resizing");
+    window.removeEventListener("pointermove", resizeRoadviewPanel);
+    window.removeEventListener("pointerup", finishRoadviewResize);
+    window.removeEventListener("pointercancel", finishRoadviewResize);
+    relayoutRoadviewSoon();
+  }
+
+  function createRoadviewMarker(position) {
+    if (!mapReady || !map || !position) {
+      return null;
+    }
+    const markerImage = createRoadviewMarkerImage();
+    if (!roadviewMarker) {
+      roadviewMarker = new window.kakao.maps.Marker({
+        map,
+        position,
+        draggable: true,
+        image: markerImage,
+        title: "로드뷰 위치",
+      });
+      window.kakao.maps.event.addListener(roadviewMarker, "dragend", () => {
+        openRoadviewAtPosition(roadviewMarker.getPosition());
+      });
+      window.kakao.maps.event.addListener(roadviewMarker, "click", () => {
+        openRoadviewAtPosition(roadviewMarker.getPosition());
+      });
+    } else {
+      roadviewMarker.setMap(map);
+      roadviewMarker.setPosition(position);
+      if (markerImage && typeof roadviewMarker.setImage === "function") {
+        roadviewMarker.setImage(markerImage);
+      }
+    }
+    return roadviewMarker;
+  }
+
+  function createRoadviewMarkerImage() {
+    if (!window.kakao?.maps?.MarkerImage || !window.kakao?.maps?.Size || !window.kakao?.maps?.Point) {
+      return null;
+    }
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="42" height="48" viewBox="0 0 42 48">
+        <filter id="shadow" x="-40%" y="-30%" width="180%" height="180%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#14315a" flood-opacity=".28"/>
+        </filter>
+        <g filter="url(#shadow)">
+          <path d="M21 46c8-9 14-17 14-27C35 10.7 28.7 4 21 4S7 10.7 7 19c0 10 6 18 14 27z" fill="#fff" stroke="#1f6feb" stroke-width="2"/>
+          <circle cx="21" cy="18" r="9" fill="#1f6feb"/>
+          <circle cx="21" cy="18" r="4" fill="#fff"/>
+          <path d="M15 31h12" stroke="#1f6feb" stroke-width="3" stroke-linecap="round"/>
+        </g>
+      </svg>
+    `;
+    const src = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+    return new window.kakao.maps.MarkerImage(
+      src,
+      new window.kakao.maps.Size(42, 48),
+      { offset: new window.kakao.maps.Point(21, 46) }
+    );
+  }
+
+  function setRoadviewPlacementActive(active) {
+    const nextActive = active === true;
+    if (nextActive && !ensureRoadviewTools()) {
+      setStatus("카카오 로드뷰 기능을 아직 사용할 수 없습니다.", true);
+      return;
+    }
+    roadviewPlacementActive = nextActive;
+    mapWrapEl?.classList.toggle("is-roadview-placement", roadviewPlacementActive);
+    updateRoadviewButtonState();
+    if (roadviewPlacementActive) {
+      if (!roadviewOverlay && window.kakao?.maps?.RoadviewOverlay) {
+        roadviewOverlay = new window.kakao.maps.RoadviewOverlay();
+      }
+      roadviewOverlay?.setMap(map);
+      createRoadviewMarker(mapSearchResultPosition || map.getCenter());
+      setStatus("로드뷰가 가능한 길이 표시됩니다. 지도 위 도로를 클릭하거나 로드뷰 아이콘을 끌어 위치를 지정하세요.", false);
+    } else {
+      roadviewOverlay?.setMap(null);
+      if (roadviewMarker) {
+        roadviewMarker.setMap(null);
+      }
+      setRoadviewPanelOpen(false);
+      setStatus("로드뷰 모드를 종료했습니다.", false);
+    }
+  }
+
+  function openRoadviewAtPosition(position) {
+    if (!mapReady || !position) {
+      setStatus("로드뷰를 열 지도 위치를 찾지 못했습니다.", true);
+      return;
+    }
+    if (!ensureRoadviewTools()) {
+      setStatus("카카오 로드뷰 기능을 아직 사용할 수 없습니다.", true);
+      return;
+    }
+    createRoadviewMarker(position);
+    roadviewClient.getNearestPanoId(position, 80, (panoId) => {
+      if (!panoId) {
+        setStatus("현재 위치 주변에서 로드뷰를 찾지 못했습니다.", true);
+        return;
+      }
+      setRoadviewPanelOpen(true);
+      roadview.setPanoId(panoId, position);
+      setStatus("로드뷰 위치를 표시했습니다.", false);
+    });
+  }
+
+  function toggleRoadviewPlacement() {
+    setRoadviewPlacementActive(!roadviewPlacementActive);
   }
 
   function getObservationAreaCenter(points) {
@@ -573,6 +812,7 @@
     const lat = Number(place.y);
     const lng = Number(place.x);
     const position = new window.kakao.maps.LatLng(lat, lng);
+    mapSearchResultPosition = position;
     mapSearchMarker = new window.kakao.maps.Marker({
       map,
       position,
@@ -590,6 +830,9 @@
 
     map.setLevel(4);
     map.panTo(position);
+    if (roadviewPlacementActive) {
+      openRoadviewAtPosition(position);
+    }
   }
 
   function handleMapSearchSubmit(event) {
@@ -12660,6 +12903,11 @@
     designedRouteInfoWindows.forEach((item) => item.close());
     designedRouteInfoWindows = [];
 
+    if (roadviewPlacementActive) {
+      openRoadviewAtPosition(mouseEvent.latLng);
+      return;
+    }
+
     if (observationAreaDrawMode) {
       workingObservationAreaPoints = workingObservationAreaPoints.concat([{ lat, lng }]);
       renderObservationAreas();
@@ -14050,6 +14298,12 @@
       }
     });
     deletePathButtonEl.addEventListener("click", handleDeletePath);
+    mapSearchToggleEl?.addEventListener("click", () => {
+      setMapSearchCollapsed(!mapSearchPanelEl?.classList.contains("is-collapsed"));
+    });
+    roadviewToggleEl?.addEventListener("click", toggleRoadviewPlacement);
+    roadviewCloseEl?.addEventListener("click", closeRoadviewPanel);
+    roadviewResizeHandleEl?.addEventListener("pointerdown", beginRoadviewResize);
     mapSearchFormEl?.addEventListener("submit", handleMapSearchSubmit);
     mapSearchClearEl?.addEventListener("click", () => {
       if (mapSearchInputEl) {

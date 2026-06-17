@@ -1458,7 +1458,7 @@ h1::before {
   backdrop-filter: blur(10px);
 }
 
-.map-search {
+.map-search-panel {
   position: absolute;
   top: 18px;
   left: 50%;
@@ -1475,6 +1475,55 @@ h1::before {
   box-shadow: 0 16px 32px rgba(38, 65, 96, 0.14);
   transform: translateX(-50%);
   backdrop-filter: blur(10px);
+}
+
+.map-search-panel.is-collapsed {
+  min-width: 0;
+}
+
+.map-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.map-search-panel.is-collapsed .map-search-field,
+.map-search-panel.is-collapsed .map-search-button,
+.map-search-panel.is-collapsed .map-search-clear {
+  display: none;
+}
+
+.map-roadview-toggle {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.map-roadview-toggle::before {
+  content: "";
+  display: block;
+  width: 22px;
+  height: 26px;
+  margin: 0 auto;
+  background: #666;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 22'%3E%3Cpath d='M8 21c4-5.2 7-9.6 7-14A7 7 0 1 0 1 7c0 4.4 3 8.8 7 14zM8 10.8A3.2 3.2 0 1 1 8 4.4a3.2 3.2 0 0 1 0 6.4z'/%3E%3C/svg%3E") center / contain no-repeat;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 22'%3E%3Cpath d='M8 21c4-5.2 7-9.6 7-14A7 7 0 1 0 1 7c0 4.4 3 8.8 7 14zM8 10.8A3.2 3.2 0 1 1 8 4.4a3.2 3.2 0 0 1 0 6.4z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.map-roadview-toggle.is-active {
+  border-color: #1f6feb;
+  background: #eaf2ff;
+}
+
+.map-roadview-toggle.is-active::before {
+  background: #1f6feb;
+}
+
+.map-wrap.is-roadview-placement #map {
+  cursor: crosshair;
 }
 
 .map-search-field {
@@ -1510,9 +1559,38 @@ h1::before {
 
 .map-search-button,
 .map-search-clear {
-  align-self: flex-end;
   height: 44px;
   white-space: nowrap;
+}
+
+.map-search-actions {
+  align-self: flex-end;
+  display: grid;
+  grid-template-rows: 22px 44px;
+  gap: 4px;
+}
+
+.map-search-toggle {
+  width: 100%;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  line-height: 1;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.map-search-panel.is-collapsed .map-search {
+  flex: 0 0 auto;
+}
+
+.map-search-panel.is-collapsed .map-search-actions {
+  grid-template-rows: 32px;
+}
+
+.map-search-panel.is-collapsed .map-search-toggle {
+  width: 44px;
+  height: 32px;
 }
 
 #map {
@@ -1522,6 +1600,95 @@ h1::before {
   overflow: hidden;
   box-shadow: none;
   background: #d8e5f3;
+}
+
+.roadview-panel {
+  display: none;
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 22;
+  width: min(520px, calc(100% - 36px));
+  height: min(360px, calc(100% - 36px));
+  min-width: 300px;
+  min-height: 220px;
+  border: 1px solid rgba(31, 65, 114, 0.2);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 42px rgba(31, 65, 114, 0.24);
+  overflow: hidden;
+}
+
+.roadview-panel.is-open {
+  display: block;
+}
+
+.roadview-panel.is-resizing {
+  user-select: none;
+}
+
+.roadview-panel-head {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid #d9e2ee;
+  background: rgba(255, 255, 255, 0.96);
+  color: #20476f;
+  font-size: 13px;
+}
+
+.roadview-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #d9e2ee;
+  border-radius: 999px;
+  background: #fff;
+  color: #5d7088;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.roadview-close:hover {
+  border-color: #b8cae1;
+  background: #f8fbff;
+  color: #1f2d3d;
+}
+
+.roadview-canvas {
+  width: 100%;
+  height: calc(100% - 38px);
+  background: #d8e5f3;
+}
+
+.roadview-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  cursor: nwse-resize;
+}
+
+.roadview-resize-handle::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 7px;
+  width: 12px;
+  height: 12px;
+  border-left: 2px solid #6b8bb1;
+  border-top: 2px solid #6b8bb1;
+  opacity: 0.9;
+}
+
+.roadview-resize-handle:hover::before {
+  border-color: #1f6feb;
 }
 
 .map-overlay-sidebar {
@@ -1630,13 +1797,18 @@ h1::before {
     overflow: visible;
   }
 
-  .map-search {
+  .map-search-panel {
     position: static;
     min-width: 0;
     max-width: none;
     margin: 14px;
     transform: none;
     flex-wrap: wrap;
+  }
+
+  .map-search {
+    flex-wrap: wrap;
+    flex-basis: 100%;
   }
 
   .map-search-field {
@@ -1652,5 +1824,14 @@ h1::before {
   #map {
     height: 60vh;
     min-height: 420px;
+  }
+
+  .roadview-panel {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100% - 24px);
+    height: 45vh;
+    min-height: 320px;
+    min-width: 0;
   }
 }

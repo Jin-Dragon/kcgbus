@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WONDER Linx</title>
-  <link rel="stylesheet" href="./styles.css?v=20260314g">
+  <link rel="stylesheet" href="./styles.css?v=20260617d">
 </head>
 <body>
   <div class="app-shell">
@@ -295,19 +295,33 @@
 
     <main class="map-wrap">
       <button id="help-button" class="secondary-button help-button" type="button">도움말</button>
-      <form id="map-search-form" class="map-search" autocomplete="off">
-        <label class="map-search-field" for="map-search-input">
-          <span class="map-search-label">지역 검색</span>
-          <input
-            id="map-search-input"
-            type="search"
-            placeholder="지역명, 장소명, 주소를 검색"
-          >
-        </label>
-        <button id="map-search-button" class="primary-button map-search-button" type="submit">검색</button>
-        <button id="map-search-clear" class="secondary-button map-search-clear" type="button">초기화</button>
-      </form>
+      <div id="map-search-panel" class="map-search-panel">
+        <button id="roadview-toggle" class="secondary-button map-roadview-toggle" type="button" aria-label="로드뷰" title="로드뷰" aria-pressed="false"></button>
+        <form id="map-search-form" class="map-search" autocomplete="off">
+          <label class="map-search-field" for="map-search-input">
+            <span class="map-search-label">지역 검색</span>
+            <input
+              id="map-search-input"
+              type="search"
+              placeholder="지역명, 장소명, 주소를 검색"
+            >
+          </label>
+          <button id="map-search-button" class="primary-button map-search-button" type="submit">검색</button>
+          <div class="map-search-actions">
+            <button id="map-search-toggle" class="secondary-button map-search-toggle" type="button" aria-label="검색 접기" aria-expanded="true" aria-controls="map-search-form">−</button>
+            <button id="map-search-clear" class="secondary-button map-search-clear" type="button">초기화</button>
+          </div>
+        </form>
+      </div>
       <div id="map"></div>
+      <div id="roadview-panel" class="roadview-panel" aria-hidden="true">
+        <div class="roadview-panel-head">
+          <strong>로드뷰</strong>
+          <button id="roadview-close" class="roadview-close" type="button" aria-label="로드뷰 닫기">x</button>
+        </div>
+        <div id="roadview" class="roadview-canvas"></div>
+        <div id="roadview-resize-handle" class="roadview-resize-handle" role="separator" aria-label="로드뷰 창 크기 조절"></div>
+      </div>
     </main>
   </div>
 
@@ -322,6 +336,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260409a"></script>
+  <script src="./app.js?v=20260617d"></script>
 </body>
 </html>
