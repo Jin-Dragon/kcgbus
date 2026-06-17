@@ -1085,11 +1085,20 @@ h1::before {
 .route-color-input {
   width: 30px;
   height: 30px;
-  padding: 0;
+  padding: 4px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #fff;
   cursor: pointer;
+}
+
+.route-color-input::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 7px;
+  background: var(--route-color, #0f6cbd);
 }
 
 .route-delete-button {
@@ -1209,6 +1218,22 @@ h1::before {
 .route-creation-color-field input[type="color"] {
   width: 72px;
   height: 42px;
+  padding: 4px;
+}
+
+.route-color-card {
+  width: min(360px, 100%);
+}
+
+.route-color-form {
+  margin-top: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.route-color-picker-field input[type="color"] {
+  width: 96px;
+  height: 46px;
   padding: 4px;
 }
 

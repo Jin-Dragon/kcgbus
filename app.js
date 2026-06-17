@@ -192,6 +192,8 @@
   const routeListTimeSimulationButtons = {};
   let routeCreationDialogEl = null;
   let routeCreationGroup = "default";
+  let routeColorDialogEl = null;
+  let routeColorTargetName = null;
   let pointListSearchQuery = "";
   let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
@@ -10154,6 +10156,7 @@
     mapSearchInfoWindow = new window.kakao.maps.InfoWindow({ removable: false });
     mapReady = true;
     window.kakao.maps.event.addListener(map, "click", handleMapClick);
+    window.kakao.maps.event.addListener(map, "rightclick", handleMapRightClick);
     window.kakao.maps.event.addListener(map, "mousemove", handleRoadviewPointerMove);
     window.kakao.maps.event.addListener(map, "mousemove", handleObservationAreaDrag);
   }
@@ -10516,6 +10519,107 @@
     return { points, paths, areas };
   }
 
+  function stripKmlExtension(fileName) {
+    return String(fileName || "").replace(/\.kml$/i, "");
+  }
+
+  function getUniqueImportedFileName(fileName, reservedNames = new Set()) {
+    const normalizedFileName = String(fileName || "import.kml").trim() || "import.kml";
+    const usedNames = new Set(
+      uploadedFileSummaries
+        .map((item) => String(item?.name || "").trim())
+        .filter(Boolean)
+        .concat(Array.from(reservedNames))
+    );
+    if (!usedNames.has(normalizedFileName)) {
+      reservedNames.add(normalizedFileName);
+      return normalizedFileName;
+    }
+
+    const extensionMatch = normalizedFileName.match(/(\.[^.]+)$/);
+    const extension = extensionMatch ? extensionMatch[1] : "";
+    const baseName = extension ? normalizedFileName.slice(0, -extension.length) : normalizedFileName;
+    let index = 2;
+    let candidate = `${baseName} (${index})${extension}`;
+    while (usedNames.has(candidate)) {
+      index += 1;
+      candidate = `${baseName} (${index})${extension}`;
+    }
+    reservedNames.add(candidate);
+    return candidate;
+  }
+
+  function buildUniqueRouteName(baseRouteName, fileName, usedRouteNames) {
+    const normalizedBaseName = normalizeRouteName(baseRouteName);
+    if (!usedRouteNames.has(normalizedBaseName)) {
+      usedRouteNames.add(normalizedBaseName);
+      return normalizedBaseName;
+    }
+
+    const fileLabel = stripKmlExtension(fileName);
+    let candidate = normalizeRouteName(`${normalizedBaseName} (${fileLabel})`);
+    let index = 2;
+    while (usedRouteNames.has(candidate)) {
+      candidate = normalizeRouteName(`${normalizedBaseName} (${fileLabel} ${index})`);
+      index += 1;
+    }
+    usedRouteNames.add(candidate);
+    return candidate;
+  }
+
+  function uniquifyImportedRouteNames(points, paths) {
+    const importedItems = [...(Array.isArray(points) ? points : []), ...(Array.isArray(paths) ? paths : [])];
+    const routeNames = [...new Set(importedItems.map((item) => normalizeRouteName(item.routeName)).filter(Boolean))];
+    const currentRouteNames = new Set(getRoutes());
+    const routeFiles = routeNames.reduce((filesByRoute, routeName) => {
+      const files = new Set(
+        importedItems
+          .filter((item) => normalizeRouteName(item.routeName) === routeName)
+          .map((item) => String(item.fileName || "").trim())
+          .filter(Boolean)
+      );
+      filesByRoute.set(routeName, files);
+      return filesByRoute;
+    }, new Map());
+    const usedRouteNames = new Set(currentRouteNames);
+    const renameMap = new Map();
+
+    routeNames.forEach((routeName) => {
+      const conflictsWithCurrent = currentRouteNames.has(routeName);
+      const conflictsWithinImport = (routeFiles.get(routeName)?.size || 0) > 1;
+      if (!conflictsWithCurrent && !conflictsWithinImport) {
+        usedRouteNames.add(routeName);
+        return;
+      }
+
+      const itemsByFile = importedItems
+        .filter((item) => normalizeRouteName(item.routeName) === routeName)
+        .reduce((groups, item) => {
+          const fileName = String(item.fileName || "").trim();
+          if (!groups.has(fileName)) {
+            groups.set(fileName, []);
+          }
+          groups.get(fileName).push(item);
+          return groups;
+        }, new Map());
+
+      itemsByFile.forEach((items, fileName) => {
+        const nextRouteName = buildUniqueRouteName(routeName, fileName, usedRouteNames);
+        if (nextRouteName !== routeName) {
+          renameMap.set(`${fileName}\n${routeName}`, nextRouteName);
+        }
+        items.forEach((item) => {
+          item.routeName = nextRouteName;
+          if (hasSimulationCorrections(item.simulationCorrections)) {
+            item.simulationCorrections = normalizeSimulationCorrections(item.simulationCorrections, nextRouteName);
+          }
+        });
+      });
+    });
+
+    return renameMap;
+  }
+
   function renderFileList(filesSummary) {
     fileListEl.innerHTML = "";
     filesSummary.forEach((item) => {
@@ -10866,6 +10970,104 @@
     }
   }
 
+  function ensureRouteColorDialog() {
+    if (routeColorDialogEl) {
+      return routeColorDialogEl;
+    }
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "route-color-dialog";
+    backdrop.className = "modal-backdrop route-color-dialog is-hidden";
+    backdrop.setAttribute("aria-hidden", "true");
+    backdrop.innerHTML = `
+      <div class="modal-card route-color-card" role="dialog" aria-modal="true" aria-labelledby="route-color-title">
+        <div class="modal-head">
+          <h2 id="route-color-title" class="section-title">노선 색상</h2>
+          <button class="secondary-button route-color-close" type="button">닫기</button>
+        </div>
+        <form id="route-color-form" class="route-color-form">
+          <label class="field route-color-picker-field">
+            <span>색상</span>
+            <input id="route-color-picker" type="color" value="#0f6cbd">
+          </label>
+          <div class="form-actions">
+            <button class="primary-button" type="submit">적용</button>
+            <button class="secondary-button route-color-cancel" type="button">취소</button>
+          </div>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    routeColorDialogEl = backdrop;
+
+    const formEl = backdrop.querySelector("#route-color-form");
+    const closeButtons = backdrop.querySelectorAll(".route-color-close, .route-color-cancel");
+    closeButtons.forEach((button) => {
+      button.addEventListener("click", closeRouteColorDialog);
+    });
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) {
+        closeRouteColorDialog();
+      }
+    });
+    formEl?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      applyRouteColorDialog();
+    });
+
+    return routeColorDialogEl;
+  }
+
+  function openRouteColorDialog(routeName) {
+    const normalizedRouteName = normalizeRouteName(routeName);
+    if (!getRoutes().includes(normalizedRouteName)) {
+      setStatus("색상을 변경할 노선을 찾지 못했습니다.", true);
+      return;
+    }
+    routeColorTargetName = normalizedRouteName;
+    const dialogEl = ensureRouteColorDialog();
+    const titleEl = dialogEl.querySelector("#route-color-title");
+    const colorEl = dialogEl.querySelector("#route-color-picker");
+    if (titleEl) {
+      titleEl.textContent = `${normalizedRouteName} 색상`;
+    }
+    if (colorEl) {
+      colorEl.value = getRouteSetting(normalizedRouteName).color;
+    }
+    dialogEl.classList.remove("is-hidden");
+    dialogEl.setAttribute("aria-hidden", "false");
+    window.setTimeout(() => colorEl?.focus(), 0);
+  }
+
+  function closeRouteColorDialog() {
+    if (!routeColorDialogEl) {
+      return;
+    }
+    routeColorDialogEl.classList.add("is-hidden");
+    routeColorDialogEl.setAttribute("aria-hidden", "true");
+    routeColorTargetName = null;
+  }
+
+  function applyRouteColorDialog() {
+    if (!routeColorTargetName) {
+      closeRouteColorDialog();
+      return;
+    }
+    const dialogEl = ensureRouteColorDialog();
+    const colorEl = dialogEl.querySelector("#route-color-picker");
+    const nextColor = normalizeHexColor(colorEl?.value, getRouteSetting(routeColorTargetName).color);
+    pushUndoSnapshot();
+    routeSettings[routeColorTargetName] = {
+      ...getRouteSetting(routeColorTargetName),
+      color: nextColor,
+    };
+    saveRouteSettings();
+    const changedRouteName = routeColorTargetName;
+    closeRouteColorDialog();
+    refreshUI();
+    setStatus(`"${changedRouteName}" 노선 색상을 적용했습니다.`, false);
+  }
+
   function ensureRouteListCreateButton(containerEl, groupKey) {
     if (!containerEl?.parentElement) {
       return;
@@ -11040,27 +11242,21 @@
       const routeIconActions = document.createElement("span");
       routeIconActions.className = "route-icon-actions";
 
-      const colorInput = document.createElement("input");
-      colorInput.type = "color";
+      const colorInput = document.createElement("button");
+      colorInput.type = "button";
       colorInput.className = "route-color-input";
       if (isMergedRoute) {
         colorInput.classList.add("is-merged-route");
       }
-      colorInput.value = setting.color;
       colorInput.title = `${routeName} 색상`;
+      colorInput.setAttribute("aria-label", `${routeName} 색상 변경`);
+      colorInput.style.setProperty("--route-color", setting.color);
       colorInput.addEventListener("mousedown", (event) => {
         event.stopPropagation();
       });
       colorInput.addEventListener("click", (event) => {
         event.stopPropagation();
-      });
-      colorInput.addEventListener("input", (event) => {
-        routeSettings[routeName] = {
-          ...getRouteSetting(routeName),
-          color: event.target.value,
-        };
-        saveRouteSettings();
-        refreshUI();
+        openRouteColorDialog(routeName);
       });
       routeIconActions.appendChild(colorInput);
 
@@ -13274,6 +13470,53 @@
     saveOverrides();
   }
 
+  function preparePointCreationAtPosition(lat, lng) {
+    if (!selectedRouteName || !getRoutes().includes(selectedRouteName)) {
+      setStatus("정류장을 추가할 노선을 먼저 선택하세요.", true);
+      return false;
+    }
+    if (drawPathMode || editPathMode) {
+      setStatus("경로 편집 중에는 정류장 추가 모드를 사용할 수 없습니다.", true);
+      return false;
+    }
+
+    stopRelocateMode();
+    stopObservationAreaDrawMode();
+    selectedPointId = null;
+    selectedPathId = null;
+    clearForm(lat, lng);
+    renderFormRouteOptions(selectedRouteName);
+    setAddPointMode(true);
+    openPointFormSection();
+    ensureDraftMarker(lat, lng);
+    formEls.name.focus();
+    setStatus(`정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`, false);
+    return true;
+  }
+
+  function handleMapRightClick(mouseEvent) {
+    if (!mouseEvent?.latLng || roadviewPlacementActive || observationAreaDrawMode || observationAreaMoveMode || observationAreaEditMode || drawPathMode || editPathMode || relocatePointId || addPointMode) {
+      return;
+    }
+    hidePointListContextMenu();
+    hidePathContextMenu();
+
+    if (!selectedRouteName || !getRoutes().includes(selectedRouteName)) {
+      return;
+    }
+
+    const lat = Number(mouseEvent.latLng.getLat().toFixed(7));
+    const lng = Number(mouseEvent.latLng.getLng().toFixed(7));
+    showPathContextMenu(mouseEvent.latLng, [
+      {
+        label: "정류장 추가",
+        onClick: () => {
+          preparePointCreationAtPosition(lat, lng);
+        },
+      },
+    ]);
+  }
+
   function handleMapClick(mouseEvent) {
     const lat = Number(mouseEvent.latLng.getLat().toFixed(7));
     const lng = Number(mouseEvent.latLng.getLng().toFixed(7));
@@ -13358,11 +13601,7 @@
       return;
     }
 
-    clearForm(lat, lng);
-    renderFormRouteOptions(selectedRouteName);
-    ensureDraftMarker(lat, lng);
-    formEls.name.focus();
-    setStatus(`정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`, false);
+    preparePointCreationAtPosition(lat, lng);
   }
 
   function selectPoint(point, marker, infoWindow) {
@@ -14362,12 +14601,14 @@
     const points = [];
     const paths = [];
     const areas = [];
+    const reservedFileNames = new Set();
 
     for (const file of files) {
       const text = await file.text();
-      const parsed = parseKml(text, file.name);
+      const importFileName = getUniqueImportedFileName(file.name, reservedFileNames);
+      const parsed = parseKml(text, importFileName);
       fileSummaries.push({
-        name: file.name,
+        name: importFileName,
         pointCount: parsed.points.length,
         pathCount: parsed.paths.length,
         areaCount: parsed.areas.length,
@@ -14376,6 +14617,7 @@
       paths.push(...parsed.paths);
       areas.push(...parsed.areas);
     }
+    const routeRenameMap = uniquifyImportedRouteNames(points, paths);
 
     pushUndoSnapshot();
     uploadedPoints = [...uploadedPoints, ...points];
@@ -14397,7 +14639,13 @@
     selectedPointId = null;
     selectedPathId = null;
     refreshUI();
-    setStatus("기존 프로젝트에 정류장, 경로, 관찰 구역을 추가로 불러왔습니다.", false);
+    const renameCount = routeRenameMap.size;
+    setStatus(
+      renameCount
+        ? `기존 프로젝트에 정류장, 경로, 관찰 구역을 추가로 불러왔습니다. 중복 노선명 ${renameCount}건은 파일명 기준으로 구분했습니다.`
+        : "기존 프로젝트에 정류장, 경로, 관찰 구역을 추가로 불러왔습니다.",
+      false
+    );
   }
 
   function handleKeydown(event) {
