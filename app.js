@@ -182,6 +182,7 @@
   let draggedRouteName = null;
   let editingRouteName = null;
   let editingPointId = null;
+  let copiedPointSnapshot = null;
   let routeListSearchQueries = {
     original: "",
     merged: "",
@@ -189,6 +190,8 @@
   const routeListAnalyzeButtons = {};
   const routeListRidershipButtons = {};
   const routeListTimeSimulationButtons = {};
+  let routeCreationDialogEl = null;
+  let routeCreationGroup = "default";
   let pointListSearchQuery = "";
   let hasClearedSelection = false;
   let mapMouseMoveHandler = null;
@@ -227,10 +230,15 @@
   let roadviewClient = null;
   let roadviewOverlay = null;
   let roadviewMarker = null;
+  let roadviewDirectionOverlay = null;
+  let roadviewDirectionAngle = 0;
   let roadviewPlacementActive = false;
+  let roadviewAwaitingPlacement = false;
   let roadviewPanelOpen = false;
   let roadviewResizeObserver = null;
   let roadviewResizeState = null;
+  let roadviewPositionListenerBound = false;
+  let roadviewViewpointListenerBound = false;
   let latestAnalysisReport = null;
   let latestOptimizationPlan = null;
   let latestRidershipAnalysisReport = null;
@@ -348,6 +356,14 @@
     if (!roadview && roadviewEl) {
       roadview = new window.kakao.maps.Roadview(roadviewEl);
     }
+    if (roadview && !roadviewPositionListenerBound) {
+      roadviewPositionListenerBound = true;
+      window.kakao.maps.event.addListener(roadview, "position_changed", syncRoadviewMarkerPosition);
+    }
+    if (roadview && !roadviewViewpointListenerBound) {
+      roadviewViewpointListenerBound = true;
+      window.kakao.maps.event.addListener(roadview, "viewpoint_changed", syncRoadviewMarkerDirection);
+    }
     if (!roadviewClient) {
       roadviewClient = new window.kakao.maps.RoadviewClient();
     }
@@ -360,6 +376,26 @@
       roadviewResizeObserver.observe(roadviewPanelEl);
     }
     return Boolean(roadview && roadviewClient);
+  }
+
+  function syncRoadviewMarkerPosition() {
+    if (!roadviewPlacementActive || !roadview || !roadviewMarker) {
+      return;
+    }
+    const position = typeof roadview.getPosition === "function" ? roadview.getPosition() : null;
+    if (!position) {
+      return;
+    }
+    setRoadviewMarkerPosition(position);
+  }
+
+  function syncRoadviewMarkerDirection() {
+    if (!roadview || typeof roadview.getViewpoint !== "function") {
+      return;
+    }
+    const viewpoint = roadview.getViewpoint();
+    roadviewDirectionAngle = Number(viewpoint?.pan || 0);
+    updateRoadviewDirectionOverlay();
   }
 
   function updateRoadviewButtonState() {
@@ -447,6 +483,51 @@
     relayoutRoadviewSoon();
   }
 
+  function setRoadviewMarkerPosition(position) {
+    if (!position) {
+      return;
+    }
+    if (roadviewMarker) {
+      roadviewMarker.setPosition(position);
+    }
+    if (roadviewDirectionOverlay) {
+      roadviewDirectionOverlay.setPosition(position);
+    }
+  }
+
+  function ensureRoadviewDirectionOverlay(position) {
+    if (!window.kakao?.maps?.CustomOverlay || !position) {
+      return null;
+    }
+    if (!roadviewDirectionOverlay) {
+      const content = document.createElement("div");
+      content.className = "roadview-direction-overlay";
+      const needle = document.createElement("div");
+      needle.className = "roadview-direction-needle";
+      content.appendChild(needle);
+      roadviewDirectionOverlay = new window.kakao.maps.CustomOverlay({
+        position,
+        xAnchor: 0.5,
+        yAnchor: 0.68,
+        zIndex: 23,
+        content,
+      });
+    } else {
+      roadviewDirectionOverlay.setPosition(position);
+    }
+    roadviewDirectionOverlay.setMap(map);
+    updateRoadviewDirectionOverlay();
+    return roadviewDirectionOverlay;
+  }
+
+  function updateRoadviewDirectionOverlay() {
+    const root = roadviewDirectionOverlay?.getContent?.();
+    const element = root?.querySelector?.(".roadview-direction-needle");
+    if (element) {
+      element.style.transform = `translate(-50%, -100%) rotate(${roadviewDirectionAngle}deg)`;
+    }
+  }
+
   function createRoadviewMarker(position) {
     if (!mapReady || !map || !position) {
       return null;
@@ -468,11 +549,12 @@
       });
     } else {
       roadviewMarker.setMap(map);
-      roadviewMarker.setPosition(position);
       if (markerImage && typeof roadviewMarker.setImage === "function") {
         roadviewMarker.setImage(markerImage);
       }
     }
+    setRoadviewMarkerPosition(position);
+    ensureRoadviewDirectionOverlay(position);
     return roadviewMarker;
   }
 
@@ -508,6 +590,7 @@
       return;
     }
     roadviewPlacementActive = nextActive;
+    roadviewAwaitingPlacement = nextActive;
     mapWrapEl?.classList.toggle("is-roadview-placement", roadviewPlacementActive);
     updateRoadviewButtonState();
     if (roadviewPlacementActive) {
@@ -516,12 +599,13 @@
       }
       roadviewOverlay?.setMap(map);
       createRoadviewMarker(mapSearchResultPosition || map.getCenter());
-      setStatus("로드뷰가 가능한 길이 표시됩니다. 지도 위 도로를 클릭하거나 로드뷰 아이콘을 끌어 위치를 지정하세요.", false);
+      setStatus("로드뷰가 가능한 길이 표시됩니다. 마우스에 붙은 로드뷰 아이콘을 원하는 도로 위에 놓고 클릭하세요.", false);
     } else {
       roadviewOverlay?.setMap(null);
       if (roadviewMarker) {
         roadviewMarker.setMap(null);
       }
+      roadviewDirectionOverlay?.setMap(null);
       setRoadviewPanelOpen(false);
       setStatus("로드뷰 모드를 종료했습니다.", false);
     }
@@ -536,6 +620,7 @@
       setStatus("카카오 로드뷰 기능을 아직 사용할 수 없습니다.", true);
       return;
     }
+    roadviewAwaitingPlacement = false;
     createRoadviewMarker(position);
     roadviewClient.getNearestPanoId(position, 80, (panoId) => {
       if (!panoId) {
@@ -544,12 +629,20 @@
       }
       setRoadviewPanelOpen(true);
       roadview.setPanoId(panoId, position);
+      window.setTimeout(syncRoadviewMarkerDirection, 80);
       setStatus("로드뷰 위치를 표시했습니다.", false);
     });
   }
 
   function toggleRoadviewPlacement() {
     setRoadviewPlacementActive(!roadviewPlacementActive);
+  }
+
+  function handleRoadviewPointerMove(mouseEvent) {
+    if (!roadviewPlacementActive || !roadviewAwaitingPlacement || !mouseEvent?.latLng) {
+      return;
+    }
+    createRoadviewMarker(mouseEvent.latLng);
   }
 
   function getObservationAreaCenter(points) {
@@ -1985,6 +2078,7 @@
       color: current.color || colorFromRouteName(normalizedRouteName),
       visible: current.visible !== false,
       deleted: current.deleted === true,
+      createdRoute: current.createdRoute === true,
       routeGroup,
       routeOrder: Number.isFinite(Number(current.routeOrder)) ? Number(current.routeOrder) : null,
       villageBusDesign: normalizeVillageBusDesignSettings(current.villageBusDesign),
@@ -2135,9 +2229,12 @@
   }
 
   function getRoutes() {
-    const routeNames = getAllPoints()
+    const explicitRouteNames = Object.entries(routeSettings)
+      .filter(([, setting]) => setting?.createdRoute === true && setting?.deleted !== true)
+      .map(([routeName]) => normalizeRouteName(routeName));
+    const routeNames = explicitRouteNames.concat(getAllPoints()
       .map((point) => normalizeRouteName(point.routeName))
-      .concat(getAllPaths().map((pathItem) => normalizeRouteName(pathItem.routeName)));
+      .concat(getAllPaths().map((pathItem) => normalizeRouteName(pathItem.routeName))));
 
     return [...new Set(routeNames)].sort((a, b) => {
       const settingA = getRouteSetting(a);
@@ -10057,6 +10154,7 @@
     mapSearchInfoWindow = new window.kakao.maps.InfoWindow({ removable: false });
     mapReady = true;
     window.kakao.maps.event.addListener(map, "click", handleMapClick);
+    window.kakao.maps.event.addListener(map, "mousemove", handleRoadviewPointerMove);
     window.kakao.maps.event.addListener(map, "mousemove", handleObservationAreaDrag);
   }
 
@@ -10622,6 +10720,175 @@
     refreshUI();
   }
 
+  function getRouteGroupLabel(groupKey) {
+    return groupKey === "merged" ? "개선 노선" : "기존 노선";
+  }
+
+  function getNextRouteOrderForGroup(groupKey) {
+    const groupRouteOrders = getRoutes()
+      .filter((routeName) => {
+        const routeGroup = getRouteSetting(routeName).routeGroup;
+        return groupKey === "merged" ? routeGroup === "merged" : routeGroup !== "merged";
+      })
+      .map((routeName) => Number(getRouteSetting(routeName).routeOrder))
+      .filter((order) => Number.isFinite(order));
+    const maxOrder = groupRouteOrders.length ? Math.max(...groupRouteOrders) : Date.now();
+    return maxOrder + 1;
+  }
+
+  function ensureRouteCreationDialog() {
+    if (routeCreationDialogEl) {
+      return routeCreationDialogEl;
+    }
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "route-creation-dialog";
+    backdrop.className = "modal-backdrop route-creation-dialog is-hidden";
+    backdrop.setAttribute("aria-hidden", "true");
+    backdrop.innerHTML = `
+      <div class="modal-card route-creation-card" role="dialog" aria-modal="true" aria-labelledby="route-creation-title">
+        <div class="modal-head">
+          <h2 id="route-creation-title" class="section-title">노선 추가</h2>
+          <button class="secondary-button route-creation-close" type="button">닫기</button>
+        </div>
+        <form id="route-creation-form" class="route-creation-form">
+          <label class="field">
+            <span>노선 이름</span>
+            <input id="route-creation-name" type="text" placeholder="새 노선 이름" autocomplete="off">
+          </label>
+          <label class="field route-creation-color-field">
+            <span>노선 색상</span>
+            <input id="route-creation-color" type="color" value="#0f6cbd">
+          </label>
+          <div class="form-actions">
+            <button class="primary-button" type="submit">생성하기</button>
+            <button class="secondary-button route-creation-cancel" type="button">취소</button>
+          </div>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    routeCreationDialogEl = backdrop;
+
+    const formEl = backdrop.querySelector("#route-creation-form");
+    const nameEl = backdrop.querySelector("#route-creation-name");
+    const closeButtons = backdrop.querySelectorAll(".route-creation-close, .route-creation-cancel");
+    closeButtons.forEach((button) => {
+      button.addEventListener("click", closeRouteCreationDialog);
+    });
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) {
+        closeRouteCreationDialog();
+      }
+    });
+    formEl?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitRouteCreation();
+    });
+    nameEl?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRouteCreationDialog();
+      }
+    });
+
+    return routeCreationDialogEl;
+  }
+
+  function openRouteCreationDialog(groupKey) {
+    routeCreationGroup = groupKey === "merged" ? "merged" : "default";
+    const dialogEl = ensureRouteCreationDialog();
+    const titleEl = dialogEl.querySelector("#route-creation-title");
+    const nameEl = dialogEl.querySelector("#route-creation-name");
+    const colorEl = dialogEl.querySelector("#route-creation-color");
+    if (titleEl) {
+      titleEl.textContent = `${getRouteGroupLabel(routeCreationGroup)} 추가`;
+    }
+    if (nameEl) {
+      nameEl.value = "";
+    }
+    if (colorEl) {
+      colorEl.value = colorFromRouteName(`${getRouteGroupLabel(routeCreationGroup)} ${getRoutes().length + 1}`);
+    }
+    dialogEl.classList.remove("is-hidden");
+    dialogEl.setAttribute("aria-hidden", "false");
+    window.setTimeout(() => nameEl?.focus(), 0);
+  }
+
+  function closeRouteCreationDialog() {
+    if (!routeCreationDialogEl) {
+      return;
+    }
+    routeCreationDialogEl.classList.add("is-hidden");
+    routeCreationDialogEl.setAttribute("aria-hidden", "true");
+  }
+
+  function createEmptyRoute(routeName, color, groupKey) {
+    const rawRouteName = String(routeName || "").trim();
+    if (!rawRouteName) {
+      throw new Error("노선 이름을 입력하세요.");
+    }
+    const normalizedRouteName = normalizeRouteName(rawRouteName);
+    if (getRoutes().includes(normalizedRouteName)) {
+      throw new Error("같은 이름의 노선이 이미 있습니다.");
+    }
+
+    pushUndoSnapshot();
+    routeSettings[normalizedRouteName] = {
+      ...getRouteSetting(normalizedRouteName),
+      color: normalizeHexColor(color, colorFromRouteName(normalizedRouteName)),
+      visible: true,
+      deleted: false,
+      createdRoute: true,
+      routeGroup: groupKey === "merged" ? "merged" : "default",
+      routeOrder: getNextRouteOrderForGroup(groupKey),
+    };
+    saveRouteSettings();
+    selectedRouteName = normalizedRouteName;
+    selectedPointId = null;
+    selectedPathId = null;
+    shouldFitMapToData = false;
+    refreshUI();
+    return normalizedRouteName;
+  }
+
+  function submitRouteCreation() {
+    const dialogEl = ensureRouteCreationDialog();
+    const nameEl = dialogEl.querySelector("#route-creation-name");
+    const colorEl = dialogEl.querySelector("#route-creation-color");
+    try {
+      const routeName = createEmptyRoute(nameEl?.value, colorEl?.value, routeCreationGroup);
+      closeRouteCreationDialog();
+      setStatus(`"${routeName}" 노선을 생성했습니다. 정류장 추가로 노선에 정류장을 배치하세요.`, false);
+    } catch (error) {
+      setStatus(error.message || "노선을 생성하지 못했습니다.", true);
+      nameEl?.focus();
+    }
+  }
+
+  function ensureRouteListCreateButton(containerEl, groupKey) {
+    if (!containerEl?.parentElement) {
+      return;
+    }
+    const parentEl = containerEl.parentElement;
+    const buttonId = groupKey === "merged" ? "add-merged-route-button" : "add-original-route-button";
+    let buttonEl = parentEl.querySelector(`#${buttonId}`);
+    if (!buttonEl) {
+      buttonEl = document.createElement("button");
+      buttonEl.id = buttonId;
+      buttonEl.type = "button";
+      buttonEl.className = "secondary-button route-add-button";
+      buttonEl.addEventListener("click", () => {
+        openRouteCreationDialog(groupKey);
+      });
+    }
+    buttonEl.textContent = "노선 추가";
+    const searchInputEl = containerEl.previousElementSibling?.classList?.contains("list-search-input")
+      ? containerEl.previousElementSibling
+      : null;
+    parentEl.insertBefore(buttonEl, searchInputEl || containerEl);
+  }
+
   function renderRouteEntries(containerEl, routes, emptyMessage, moveTargetGroup) {
     containerEl.innerHTML = "";
 
@@ -10919,11 +11186,13 @@
 
     ensureRouteListTitleInput(routeListEl, "original", "불러온 노선");
     ensureRouteListSearchInput(routeListEl, "original");
+    ensureRouteListCreateButton(routeListEl, "default");
     renderRouteEntries(routeListEl, originalRoutes, "노선이 없습니다.", "merged");
 
     if (mergedRouteListEl) {
       ensureRouteListTitleInput(mergedRouteListEl, "merged", "병합된 노선");
       ensureRouteListSearchInput(mergedRouteListEl, "merged");
+      ensureRouteListCreateButton(mergedRouteListEl, "merged");
       renderRouteEntries(mergedRouteListEl, mergedRoutes, "병합된 노선이 없습니다.", "default");
     }
   }
@@ -11556,6 +11825,137 @@
     villageBusDesignSummaryEl.textContent = "설계된 정류장을 기반으로 최적의 경로를 설계합니다.";
   }
 
+  function buildCopiedPointSnapshot(point) {
+    if (!point) {
+      return null;
+    }
+    return cloneJson({
+      routeName: point.routeName,
+      name: point.name,
+      fileName: point.fileName || "직접 추가",
+      lat: Number(point.lat),
+      lng: Number(point.lng),
+      altitude: point.altitude ?? null,
+      phoneNumber: point.phoneNumber || "",
+      address: point.address || "",
+      description: point.description || "",
+      isVirtual: point.isVirtual === true,
+      ridership: normalizeRidershipValue(point.ridership),
+      extendedData: normalizeExtendedData(point.extendedData),
+    });
+  }
+
+  function copyPointToClipboard(point) {
+    const snapshot = buildCopiedPointSnapshot(point);
+    if (!snapshot) {
+      setStatus("복사할 정류장을 찾지 못했습니다.", true);
+      return;
+    }
+    copiedPointSnapshot = snapshot;
+    setStatus(`정류장 "${snapshot.name}" 을 복사했습니다. 붙여넣을 노선의 정류장 리스트에서 오른쪽 클릭하세요.`, false);
+  }
+
+  function canPasteCopiedPoint() {
+    return Boolean(copiedPointSnapshot && selectedRouteName && getRoutes().includes(selectedRouteName));
+  }
+
+  function pasteCopiedPointToSelectedRoute() {
+    if (!copiedPointSnapshot) {
+      setStatus("복사된 정류장이 없습니다.", true);
+      return;
+    }
+    if (!selectedRouteName || !getRoutes().includes(selectedRouteName)) {
+      setStatus("붙여넣을 노선을 먼저 선택하세요.", true);
+      return;
+    }
+    const lat = Number(copiedPointSnapshot.lat);
+    const lng = Number(copiedPointSnapshot.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      setStatus("복사된 정류장의 좌표가 올바르지 않습니다.", true);
+      return;
+    }
+
+    const createdOrder = Date.now();
+    const altitude = copiedPointSnapshot.altitude ?? null;
+    const nextPoint = normalizeCustomPoint({
+      ...copiedPointSnapshot,
+      id: `custom-${createdOrder}`,
+      source: "custom",
+      routeName: selectedRouteName,
+      fileName: copiedPointSnapshot.fileName || "직접 추가",
+      lat,
+      lng,
+      altitude,
+      createdOrder,
+      rawCoordinates: altitude == null ? `${lng},${lat}` : `${lng},${lat},${altitude}`,
+      extendedData: withVirtualExtendedData(
+        withRidershipExtendedData(copiedPointSnapshot.extendedData, copiedPointSnapshot.ridership),
+        copiedPointSnapshot.isVirtual === true
+      ),
+    });
+
+    pushUndoSnapshot();
+    customPoints = customPoints.concat([nextPoint]);
+    saveCustomPoints();
+    selectedPointId = nextPoint.id;
+    selectedPathId = null;
+    shouldFitMapToData = false;
+    refreshUI();
+    setStatus(`정류장 "${nextPoint.name}" 을 "${selectedRouteName}" 노선에 붙여넣었습니다.`, false);
+  }
+
+  function buildPointContextActions(point) {
+    const actions = [];
+    if (point) {
+      actions.push(
+        {
+          label: "편집",
+          onClick: () => {
+            startPointEditForPoint(point);
+          },
+        },
+        {
+          label: "정류장 복사",
+          onClick: () => {
+            copyPointToClipboard(point);
+          },
+        }
+      );
+    }
+    if (canPasteCopiedPoint()) {
+      actions.push({
+        label: "정류장 붙여넣기",
+        onClick: pasteCopiedPointToSelectedRoute,
+      });
+    }
+    if (point) {
+      actions.push({
+        label: "삭제",
+        danger: true,
+        onClick: () => {
+          selectedPointId = point.id;
+          handleDeletePoint();
+        },
+      });
+    }
+    return actions;
+  }
+
+  function showRoutePointListContextMenu(event, point = null) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (point) {
+      selectedPointId = point.id;
+      refreshUI();
+    }
+    const actions = buildPointContextActions(point);
+    if (!actions.length) {
+      setStatus("복사된 정류장이 없습니다.", true);
+      return;
+    }
+    showPointListContextMenu(event.clientX, event.clientY, actions);
+  }
+
   function renderRoutePointList() {
     routePointListEl.innerHTML = "";
     ensurePointListSearchInput();
@@ -11649,26 +12049,7 @@
       button.appendChild(ridershipMeta);
       button.addEventListener("click", () => selectPointById(point.id));
       button.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        selectedPointId = point.id;
-        refreshUI();
-        showPointListContextMenu(event.clientX, event.clientY, [
-          {
-            label: "편집",
-            onClick: () => {
-              startPointEditForPoint(point);
-            },
-          },
-          {
-            label: "삭제",
-            danger: true,
-            onClick: () => {
-              selectedPointId = point.id;
-              handleDeletePoint();
-            },
-          },
-        ]);
+        showRoutePointListContextMenu(event, point);
       });
       button.addEventListener("dragstart", (event) => {
         draggedRoutePointId = point.id;
@@ -14288,6 +14669,12 @@
     deletePointButtonEl.addEventListener("click", handleDeletePoint);
     movePointButtonEl.addEventListener("click", handleMovePoint);
     pointFormEl.addEventListener("submit", handleFormSubmit);
+    routePointListEl?.addEventListener("contextmenu", (event) => {
+      if (event.target.closest(".point-item") || event.target.closest(".point-list-context-menu")) {
+        return;
+      }
+      showRoutePointListContextMenu(event);
+    });
     pathRouteSelectEl.addEventListener("change", () => {
       const isNewRoute = pathRouteSelectEl.value === NEW_ROUTE_VALUE;
       pathNewRouteFieldEl.classList.toggle("is-visible", isNewRoute);

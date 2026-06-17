@@ -817,6 +817,15 @@ h1::before {
   color: #a36200;
 }
 
+.route-add-button {
+  width: 100%;
+  margin-top: 8px;
+  border-color: #cfe0f6;
+  background: #edf4ff;
+  color: #2d74d6;
+  font-weight: 700;
+}
+
 .route-list-title-row + .route-list {
   margin-top: 8px;
   padding: 8px;
@@ -1187,6 +1196,22 @@ h1::before {
   gap: 14px;
 }
 
+.route-creation-card {
+  width: min(420px, 100%);
+}
+
+.route-creation-form {
+  margin-top: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.route-creation-color-field input[type="color"] {
+  width: 72px;
+  height: 42px;
+  padding: 4px;
+}
+
 .analysis-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1524,6 +1549,47 @@ h1::before {
 
 .map-wrap.is-roadview-placement #map {
   cursor: crosshair;
+}
+
+.roadview-direction-overlay {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  pointer-events: none;
+}
+
+.roadview-direction-needle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 24px;
+  height: 34px;
+  transform-origin: 50% 100%;
+  filter: drop-shadow(0 2px 4px rgba(20, 49, 90, 0.28));
+}
+
+.roadview-direction-needle::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 24px;
+  height: 28px;
+  transform: translateX(-50%);
+  clip-path: polygon(50% 0, 100% 100%, 50% 78%, 0 100%);
+  background: rgba(31, 111, 235, 0.88);
+}
+
+.roadview-direction-needle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 6px;
+  height: 11px;
+  border-radius: 999px;
+  background: #1f6feb;
+  transform: translateX(-50%);
 }
 
 .map-search-field {
