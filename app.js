@@ -13466,6 +13466,7 @@
       description: current.description,
       rawCoordinates: current.altitude == null ? `${lng},${lat}` : `${lng},${lat},${current.altitude}`,
       extendedData: current.extendedData,
+      createdOrder: current.createdOrder,
     };
     saveOverrides();
   }
@@ -14032,6 +14033,7 @@
       description: current.description,
       rawCoordinates: current.rawCoordinates,
       extendedData: current.extendedData,
+      createdOrder: current.createdOrder,
     };
     saveOverrides();
   }
@@ -14574,6 +14576,7 @@
           description: updatedPoint.description,
           rawCoordinates: updatedPoint.rawCoordinates,
           extendedData: updatedPoint.extendedData,
+          createdOrder: updatedPoint.createdOrder,
         };
         saveOverrides();
         selectedRouteName = updatedPoint.routeName;
