@@ -1,4 +1,5 @@
 exports/
 server.log
 server-error.log
+server.local.env
 node_modules/

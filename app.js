@@ -4041,24 +4041,36 @@
 
   function buildDisplayRequestedOrderMaps(rawBaseStops, displayBaseStops) {
     const rawStops = Array.isArray(rawBaseStops) ? rawBaseStops : [];
-    const visibleRawOrders = rawStops
-      .map((stop, index) => (stop?.isVirtual === true ? null : index + 1))
-      .filter((value) => value != null);
     const displayCount = Array.isArray(displayBaseStops) ? displayBaseStops.length : 0;
     const displayToRequested = {};
     const requestedToDisplay = {};
+    const requestedOrderToDisplayOrder = (requestedOrder) => {
+      const normalizedOrder = Math.max(2, Math.min(
+        Math.round(Number(requestedOrder || 2)),
+        rawStops.length + 1
+      ));
+      let visibleStopsBeforeOrder = 0;
+      for (let index = 0; index < normalizedOrder - 1 && index < rawStops.length; index += 1) {
+        if (rawStops[index]?.isVirtual !== true) {
+          visibleStopsBeforeOrder += 1;
+        }
+      }
+      return Math.max(2, Math.min(visibleStopsBeforeOrder + 1, displayCount + 1));
+    };
     for (let displayOrder = 2; displayOrder <= displayCount; displayOrder += 1) {
-      const requestedOrder = visibleRawOrders[displayOrder - 1];
-      if (!Number.isFinite(requestedOrder)) {
+      const displayStop = displayBaseStops[displayOrder - 1];
+      const requestedOrder = rawStops.findIndex((stop) => isSameSimulationStop(stop, displayStop)) + 1;
+      if (!Number.isFinite(requestedOrder) || requestedOrder <= 0) {
         continue;
       }
       displayToRequested[String(displayOrder)] = requestedOrder;
-      requestedToDisplay[String(requestedOrder)] = displayOrder;
+    }
+    for (let requestedOrder = 2; requestedOrder <= rawStops.length + 1; requestedOrder += 1) {
+      requestedToDisplay[String(requestedOrder)] = requestedOrderToDisplayOrder(requestedOrder);
     }
     if (displayCount >= 1) {
       const tailRequestedOrder = rawStops.length + 1;
       displayToRequested[String(displayCount + 1)] = tailRequestedOrder;
-      requestedToDisplay[String(tailRequestedOrder)] = displayCount + 1;
     }
     return {
       displayToRequested,
@@ -4360,8 +4372,7 @@
       return simulation;
     }
     const rawDriveSeconds = Math.round(simulation.chunks.reduce((sum, item) => sum + Number(item.driveSeconds || 0), 0));
-    const regionalDriveSeconds = Number(simulation.researchProfile.regionalDriveSeconds || 0);
-    const baseDriveSeconds = Math.max(rawDriveSeconds, regionalDriveSeconds);
+    const baseDriveSeconds = rawDriveSeconds;
     const busDelaySeconds = Math.round(baseDriveSeconds * (Number(simulation.researchProfile.busDelayPercent || 0) / 100));
     simulation.researchProfile.kakaoDriveSeconds = rawDriveSeconds;
     simulation.researchProfile.baseAppliedDriveSeconds = Math.round(baseDriveSeconds);
@@ -4381,7 +4392,7 @@
       const originalPathCoordinates = buildRouteSimulationAnchorCoordinates(route.routeName);
       route.simulations = (route.simulations || []).map((item) => {
         const researchProfile = buildRouteResearchProfile(route.routeName, item.distanceMeters, options);
-        const baseDriveSeconds = Math.max(Number(item.driveSeconds || 0), Number(researchProfile.regionalDriveSeconds || 0));
+        const baseDriveSeconds = Number(item.driveSeconds || 0);
         const busDelaySeconds = Math.round(baseDriveSeconds * (Number(researchProfile.busDelayPercent || 0) / 100));
         const adjustedDriveSeconds = baseDriveSeconds + busDelaySeconds;
         const adjustedDwellSeconds = Number(researchProfile.totalDwellSeconds || 0);
@@ -4511,30 +4522,39 @@
 
   function buildRouteTimeSimulationExcelWorkbook(report) {
     const summaryRows = [
-      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "kakao_drive_minutes", "dwell_minutes", "bus_delay_minutes", "total_minutes", "distance_km"],
+      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "kakao_drive_minutes", "kakao_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km"],
     ];
     const stopRows = [
-      ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "is_terminal"],
+      ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "applied_dwell_time", "is_terminal"],
     ];
     const timelineRows = [
-      ["route_name", "time_label", "departure_time", "segment_order", "from_stop", "to_stop", "drive_seconds", "dwell_seconds", "segment_total_seconds", "elapsed_seconds", "hidden_point_count"],
+      ["route_name", "time_label", "departure_time", "segment_order", "from_stop", "to_stop", "drive_seconds", "drive_time", "dwell_seconds", "dwell_time", "segment_total_seconds", "segment_total_time", "elapsed_seconds", "elapsed_time", "hidden_point_count"],
     ];
 
     report.rows.forEach((row) => {
+      const kakaoDriveSeconds = Number(row.researchProfile?.kakaoDriveSeconds || 0);
+      const dwellSeconds = Number(row.dwellSecondsTotal || 0);
+      const busDelaySeconds = Number(row.researchProfile?.busDelaySeconds || 0);
+      const totalSeconds = Number(row.totalSeconds || 0);
       summaryRows.push([
         row.routeName,
         row.timeLabel,
         row.departureTime,
         Number(row.stopCount || 0),
         Number(row.segmentCount || 0),
-        Number((Number(row.researchProfile?.kakaoDriveSeconds || 0) / 60).toFixed(1)),
-        Number((Number(row.dwellSecondsTotal || 0) / 60).toFixed(1)),
-        Number((Number(row.researchProfile?.busDelaySeconds || 0) / 60).toFixed(1)),
-        Number((Number(row.totalSeconds || 0) / 60).toFixed(1)),
+        Number((kakaoDriveSeconds / 60).toFixed(1)),
+        formatSimulationDurationLabel(kakaoDriveSeconds),
+        Number((dwellSeconds / 60).toFixed(1)),
+        formatSimulationDurationLabel(dwellSeconds),
+        Number((busDelaySeconds / 60).toFixed(1)),
+        formatSimulationDurationLabel(busDelaySeconds),
+        Number((totalSeconds / 60).toFixed(1)),
+        formatSimulationDurationLabel(totalSeconds),
         Number((Number(row.distanceMeters || 0) / 1000).toFixed(2)),
       ]);
 
       (row.researchProfile?.stopDetails || []).forEach((stop, index) => {
+        const appliedDwellSeconds = Number(stop.dwellSeconds || 0);
         stopRows.push([
           row.routeName,
           row.timeLabel,
@@ -4545,12 +4565,17 @@
           stop.sharePercent == null ? "" : Number(Number(stop.sharePercent).toFixed(2)),
           stop.dwellWeight == null ? "" : Number(Number(stop.dwellWeight).toFixed(2)),
           Number(row.researchProfile?.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS),
-          Number(stop.dwellSeconds || 0),
+          appliedDwellSeconds,
+          formatSimulationDurationLabel(appliedDwellSeconds),
           stop.isTerminal === true ? "Y" : "",
         ]);
       });
 
       (row.stopTimeline || []).forEach((segment) => {
+        const driveSeconds = Number(segment.driveSeconds || 0);
+        const segmentDwellSeconds = Number(segment.dwellSeconds || 0);
+        const segmentTotalSeconds = Number(segment.totalSeconds || 0);
+        const elapsedSeconds = Number(segment.elapsedSeconds || 0);
         timelineRows.push([
           row.routeName,
           row.timeLabel,
@@ -4558,10 +4583,14 @@
           Number(segment.order || 0),
           segment.fromStopName || "",
           segment.toStopName || "",
-          Number(segment.driveSeconds || 0),
-          Number(segment.dwellSeconds || 0),
-          Number(segment.totalSeconds || 0),
-          Number(segment.elapsedSeconds || 0),
+          driveSeconds,
+          formatSimulationDurationLabel(driveSeconds),
+          segmentDwellSeconds,
+          formatSimulationDurationLabel(segmentDwellSeconds),
+          segmentTotalSeconds,
+          formatSimulationDurationLabel(segmentTotalSeconds),
+          elapsedSeconds,
+          formatSimulationDurationLabel(elapsedSeconds),
           Number(segment.hiddenStopCount || 0),
         ]);
       });
@@ -4648,11 +4677,11 @@
       `탑승자 입력 정류장: ${research.ridershipStopCount || 0}개 / 총합 ${Number(research.totalRidership || 0).toLocaleString("ko-KR")}`,
       `가상정류장 수: ${research.virtualStopCount || 0}개`,
       `권역 속도 기준 주행시간: ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
-      `기준 주행시간: max(카카오 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)}, 권역속도기준 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}) = ${formatSimulationDurationLabel(research.baseAppliedDriveSeconds || 0)}`,
+      `기준 주행시간: 카카오 미래 길찾기 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)} / 권역속도 참고값 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
       `버스지체보정 추가시간: ${formatSimulationDurationLabel(research.busDelaySeconds || 0)}`,
       `최종 적용 주행시간: 기준 주행시간 + 버스지체보정 = ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
       `최종 적용 정차보정: 마지막 정류장 제외, 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
-      `적용식: (max(카카오 주행시간, 권역 평균속도 주행시간) x (1 + 버스지체보정률)) + 정류장별 정차보정`,
+      `적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정`,
       "",
       "[구간별 계산 로그]",
     ];
@@ -4772,7 +4801,7 @@
       <h1>운행시간 시뮬레이션 결과</h1>
       <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 시간대 ${escapeHtml(String(report.summary.timeSlotCount))}개 / 결과 ${escapeHtml(String(report.summary.simulationRowCount))}행</p>
       <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
-      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 계산식: <code>(max(카카오 주행시간, 권역 평균속도 주행시간) x (1 + 버스지체보정률)) + 정류장별 정차보정</code></p>
+      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 계산식: <code>(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정</code></p>
     </div>
     <div class="cards">
       <div class="card stat"><strong>${escapeHtml(String(report.summary.routeCount))}</strong><p>분석 노선</p></div>
@@ -4784,7 +4813,7 @@
         <button class="primary" type="button" id="download-simulation-csv-button">엑셀 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 권역 평균 버스속도 하한과 버스지체보정률, 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
+      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 버스지체보정률과 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 권역 평균 버스속도는 계산 로그의 참고 기준으로 남기며, 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
     </div>
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
@@ -5841,7 +5870,7 @@
     });
     appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / 예상 호출 ${estimatedRequests}회`);
     appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분 / 버스지체보정=${Number(normalizedOptions.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`);
-    appendRouteTimeSimulationLog(`적용식: (max(카카오 주행시간, 권역 평균속도 주행시간) x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)`);
+    appendRouteTimeSimulationLog(`적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)`);
     routePayload.forEach((route, routeIndex) => {
       const routeResearch = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, normalizedOptions);
       appendRouteTimeSimulationLog(
