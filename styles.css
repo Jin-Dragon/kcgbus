@@ -1199,6 +1199,36 @@ h1::before {
   gap: 12px;
 }
 
+.modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.analysis-overlap-toggle-button {
+  border-color: #e4aaa0;
+  color: #a33b2f;
+}
+
+.analysis-overlap-toggle-button:hover:not(:disabled) {
+  border-color: #cf8377;
+  background: #fff5f2;
+  color: #8e2f25;
+}
+
+.analysis-copy-button {
+  border-color: #a9c6e8;
+  color: #2d5f96;
+}
+
+.analysis-copy-button:hover:not(:disabled) {
+  border-color: #7ea9d8;
+  background: #f3f8ff;
+  color: #244f7e;
+}
+
 .modal-body {
   margin-top: 16px;
   display: grid;

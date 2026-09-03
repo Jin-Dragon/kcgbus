@@ -21,6 +21,7 @@
   const ROUTE_TIME_SIMULATION_BASE_STOP_COUNT = ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1;
   const RESEARCH_BASE_DWELL_SECONDS = 26;
   const DEFAULT_BUS_DELAY_PERCENT = 9;
+  const OVERLAP_DISTANCE_THRESHOLD_METERS = 20;
   const REGION_AVERAGE_SPEED_KMH = {
     "서울": { weekday: 13.9, saturday: 14.4, sunday: 15.2 },
     "부산": { weekday: 16.4, saturday: 16.8, sunday: 17.4 },
@@ -127,6 +128,8 @@
   const analysisModalEl = document.getElementById("analysis-modal");
   const analysisModalBodyEl = document.getElementById("analysis-modal-body");
   const analysisModalCloseEl = document.getElementById("analysis-modal-close");
+  const analysisOverlapToggleEl = document.getElementById("analysis-overlap-toggle");
+  const analysisCopyButtonEl = document.getElementById("analysis-copy-button");
   const mapWrapEl = document.querySelector(".map-wrap");
   const mapSearchPanelEl = document.getElementById("map-search-panel");
   const mapSearchToggleEl = document.getElementById("map-search-toggle");
@@ -246,6 +249,8 @@
   let latestRidershipAnalysisReport = null;
   let latestRouteTimeSimulationReport = null;
   let analysisActive = false;
+  let analysisOverlapVisible = true;
+  let analysisCopyResetTimer = null;
   let observationAreas = loadJsonArray(OBSERVATION_AREAS_KEY).map(normalizeObservationArea);
   let observationAreaDrawMode = false;
   let observationAreaMoveMode = false;
@@ -2886,71 +2891,746 @@
 
   function detectOverlappingSegments(thresholdMeters = 30, routeNames = getRoutes()) {
     const routeNameSet = new Set(routeNames);
-    const paths = getAllPaths().filter((pathItem) => routeNameSet.has(pathItem.routeName));
-    const overlaps = [];
-    const segments = [];
+    const paths = getAllPaths().filter((pathItem) => (
+      routeNameSet.has(pathItem.routeName) &&
+      Array.isArray(pathItem.coordinates) &&
+      pathItem.coordinates.length >= 2
+    ));
 
-    paths.forEach((pathItem) => {
+    function projectPoint(point, originLat) {
+      const projected = projectCoordinateForDistance(point, originLat);
+      return { x: projected.x, y: projected.y };
+    }
+
+    function projectPointToLine(point, start, end, originLat) {
+      const projectedPoint = projectPoint(point, originLat);
+      const projectedStart = projectPoint(start, originLat);
+      const projectedEnd = projectPoint(end, originLat);
+      const dx = projectedEnd.x - projectedStart.x;
+      const dy = projectedEnd.y - projectedStart.y;
+      const lengthSquared = dx * dx + dy * dy;
+      if (!lengthSquared) {
+        return { distanceMeters: Number.POSITIVE_INFINITY, ratio: 0 };
+      }
+
+      const ratio = (
+        (projectedPoint.x - projectedStart.x) * dx +
+        (projectedPoint.y - projectedStart.y) * dy
+      ) / lengthSquared;
+      const cross = dx * (projectedPoint.y - projectedStart.y) - dy * (projectedPoint.x - projectedStart.x);
+      return {
+        distanceMeters: Math.abs(cross) / Math.sqrt(lengthSquared),
+        ratio,
+      };
+    }
+
+    function buildPathSegments(pathItem) {
+      const segments = [];
+      let cumulativeDistanceMeters = 0;
       for (let index = 0; index < pathItem.coordinates.length - 1; index += 1) {
         const start = pathItem.coordinates[index];
         const end = pathItem.coordinates[index + 1];
+        const lengthMeters = distanceInMeters(start, end);
+        if (!Number.isFinite(lengthMeters) || lengthMeters <= 0) {
+          continue;
+        }
         segments.push({
           id: `${pathItem.id}-${index}`,
+          index,
           routeName: pathItem.routeName,
           pathId: pathItem.id,
           pathName: pathItem.name,
           start,
           end,
-          lengthMeters: distanceInMeters(start, end),
+          lengthMeters,
+          cumulativeStartMeters: cumulativeDistanceMeters,
+          cumulativeEndMeters: cumulativeDistanceMeters + lengthMeters,
         });
+        cumulativeDistanceMeters += lengthMeters;
       }
-    });
+      return segments;
+    }
 
-    for (let index = 0; index < segments.length; index += 1) {
-      for (let otherIndex = index + 1; otherIndex < segments.length; otherIndex += 1) {
-        const current = segments[index];
-        const other = segments[otherIndex];
+    function getCoordinateAtDistance(segments, distanceMeters) {
+      if (!segments.length) {
+        return null;
+      }
 
+      const totalDistanceMeters = segments[segments.length - 1].cumulativeEndMeters;
+      const targetDistanceMeters = Math.max(0, Math.min(totalDistanceMeters, distanceMeters));
+      const segment = segments.find((item) => item.cumulativeEndMeters >= targetDistanceMeters) || segments[segments.length - 1];
+      const ratio = segment.lengthMeters <= 0
+        ? 0
+        : (targetDistanceMeters - segment.cumulativeStartMeters) / segment.lengthMeters;
+
+      return {
+        coordinate: interpolateCoordinate(segment.start, segment.end, Math.max(0, Math.min(1, ratio))),
+        segment,
+      };
+    }
+
+    function buildSampleDistances(segments, stepMeters) {
+      if (!segments.length) {
+        return [];
+      }
+
+      const totalDistanceMeters = segments[segments.length - 1].cumulativeEndMeters;
+      const distances = [0];
+      for (let distance = stepMeters; distance < totalDistanceMeters; distance += stepMeters) {
+        distances.push(distance);
+      }
+      segments.forEach((segment) => {
+        distances.push(segment.cumulativeStartMeters, segment.cumulativeEndMeters);
+      });
+      distances.push(totalDistanceMeters);
+
+      return [...new Set(distances.map((distance) => Number(distance.toFixed(3))))]
+        .sort((left, right) => left - right);
+    }
+
+    function findNearestPathPoint(point, segments, sourceSegment = null) {
+      const candidates = [];
+      segments.forEach((segment) => {
+        const originLat = Number(point.lat) || 0;
+        const projectedPoint = projectPoint(point, originLat);
+        const projectedStart = projectPoint(segment.start, originLat);
+        const projectedEnd = projectPoint(segment.end, originLat);
+        const dx = projectedEnd.x - projectedStart.x;
+        const dy = projectedEnd.y - projectedStart.y;
+        const lengthSquared = dx * dx + dy * dy;
+        if (!lengthSquared) {
+          return;
+        }
+
+        const ratio = Math.max(
+          0,
+          Math.min(
+            1,
+            ((projectedPoint.x - projectedStart.x) * dx + (projectedPoint.y - projectedStart.y) * dy) / lengthSquared
+          )
+        );
+        const nearestPoint = {
+          x: projectedStart.x + dx * ratio,
+          y: projectedStart.y + dy * ratio,
+        };
+        const distanceMeters = Math.hypot(
+          projectedPoint.x - nearestPoint.x,
+          projectedPoint.y - nearestPoint.y
+        );
+        candidates.push({
+          distanceMeters,
+          pathDistanceMeters: segment.cumulativeStartMeters + segment.lengthMeters * ratio,
+          coordinate: interpolateCoordinate(segment.start, segment.end, ratio),
+          segment,
+        });
+      });
+
+      if (!candidates.length) {
+        return null;
+      }
+
+      const compatibleCandidates = sourceSegment
+        ? candidates.filter((candidate) => getDirectionSimilarity(sourceSegment, candidate.segment) >= 0.45)
+        : candidates;
+      return (compatibleCandidates.length ? compatibleCandidates : candidates)
+        .sort((left, right) => left.distanceMeters - right.distanceMeters)[0];
+    }
+
+    function getDirectionSimilarity(sourceSegment, targetSegment) {
+      if (!sourceSegment || !targetSegment) {
+        return 0;
+      }
+
+      const originLat = (
+        Number(sourceSegment.start.lat) + Number(sourceSegment.end.lat) +
+        Number(targetSegment.start.lat) + Number(targetSegment.end.lat)
+      ) / 4;
+      const sourceStart = projectPoint(sourceSegment.start, originLat);
+      const sourceEnd = projectPoint(sourceSegment.end, originLat);
+      const targetStart = projectPoint(targetSegment.start, originLat);
+      const targetEnd = projectPoint(targetSegment.end, originLat);
+      const sourceVector = {
+        x: sourceEnd.x - sourceStart.x,
+        y: sourceEnd.y - sourceStart.y,
+      };
+      const targetVector = {
+        x: targetEnd.x - targetStart.x,
+        y: targetEnd.y - targetStart.y,
+      };
+      const sourceLength = Math.hypot(sourceVector.x, sourceVector.y);
+      const targetLength = Math.hypot(targetVector.x, targetVector.y);
+      if (!sourceLength || !targetLength) {
+        return 0;
+      }
+
+      return Math.abs(
+        (sourceVector.x * targetVector.x + sourceVector.y * targetVector.y) /
+        (sourceLength * targetLength)
+      );
+    }
+
+    function getPathDirectionSimilarity(sourceSegments, sourceDistanceMeters, targetSegments, targetDistanceMeters) {
+      const windowMeters = 12;
+      const sourceTotalDistanceMeters = sourceSegments[sourceSegments.length - 1]?.cumulativeEndMeters || 0;
+      const targetTotalDistanceMeters = targetSegments[targetSegments.length - 1]?.cumulativeEndMeters || 0;
+      const sourceBefore = getCoordinateAtDistance(
+        sourceSegments,
+        Math.max(0, sourceDistanceMeters - windowMeters)
+      )?.coordinate;
+      const sourceAfter = getCoordinateAtDistance(
+        sourceSegments,
+        Math.min(sourceTotalDistanceMeters, sourceDistanceMeters + windowMeters)
+      )?.coordinate;
+      const targetBefore = getCoordinateAtDistance(
+        targetSegments,
+        Math.max(0, targetDistanceMeters - windowMeters)
+      )?.coordinate;
+      const targetAfter = getCoordinateAtDistance(
+        targetSegments,
+        Math.min(targetTotalDistanceMeters, targetDistanceMeters + windowMeters)
+      )?.coordinate;
+      if (!sourceBefore || !sourceAfter || !targetBefore || !targetAfter) {
+        return 0;
+      }
+
+      const originLat = (
+        Number(sourceBefore.lat) + Number(sourceAfter.lat) +
+        Number(targetBefore.lat) + Number(targetAfter.lat)
+      ) / 4;
+      const sourceStart = projectPoint(sourceBefore, originLat);
+      const sourceEnd = projectPoint(sourceAfter, originLat);
+      const targetStart = projectPoint(targetBefore, originLat);
+      const targetEnd = projectPoint(targetAfter, originLat);
+      const sourceVector = {
+        x: sourceEnd.x - sourceStart.x,
+        y: sourceEnd.y - sourceStart.y,
+      };
+      const targetVector = {
+        x: targetEnd.x - targetStart.x,
+        y: targetEnd.y - targetStart.y,
+      };
+      const sourceLength = Math.hypot(sourceVector.x, sourceVector.y);
+      const targetLength = Math.hypot(targetVector.x, targetVector.y);
+      if (!sourceLength || !targetLength) {
+        return 0;
+      }
+
+      return Math.abs(
+        (sourceVector.x * targetVector.x + sourceVector.y * targetVector.y) /
+        (sourceLength * targetLength)
+      );
+    }
+
+    function buildSampledOverlapRuns(sourceSegments, targetSegments, stepMeters) {
+      const evaluateDistance = (distanceMeters) => {
+        const sourcePoint = getCoordinateAtDistance(sourceSegments, distanceMeters);
+        const nearestTarget = findNearestPathPoint(sourcePoint.coordinate, targetSegments, sourcePoint.segment);
+        const directionSimilarity = nearestTarget
+          ? getPathDirectionSimilarity(
+            sourceSegments,
+            distanceMeters,
+            targetSegments,
+            nearestTarget.pathDistanceMeters
+          )
+          : 0;
+        return {
+          distanceMeters,
+          coordinate: sourcePoint.coordinate,
+          nearestTarget,
+          directionSimilarity,
+          isMatch: Boolean(
+            nearestTarget &&
+            nearestTarget.distanceMeters <= thresholdMeters &&
+            directionSimilarity >= 0.65
+          ),
+        };
+      };
+      const samples = buildSampleDistances(sourceSegments, stepMeters).map(evaluateDistance);
+
+      // A vertex can make the local direction change abruptly even though the
+      // road remains continuous. Bridge one such sample only when both sides
+      // are already matching and the point is still close to the target line.
+      for (let index = 1; index < samples.length - 1; index += 1) {
+        const sample = samples[index];
+        if (
+          sample.isMatch ||
+          !samples[index - 1].isMatch ||
+          !samples[index + 1].isMatch ||
+          !sample.nearestTarget ||
+          sample.nearestTarget.distanceMeters > thresholdMeters * 1.35 ||
+          sample.directionSimilarity < 0.35
+        ) {
+          continue;
+        }
+        sample.isMatch = true;
+      }
+
+      const runs = [];
+      let runStartIndex = null;
+      const refineBoundary = (outsideSample, insideSample) => {
+        if (!outsideSample || !insideSample) {
+          return insideSample?.distanceMeters || 0;
+        }
+
+        let low = Math.min(outsideSample.distanceMeters, insideSample.distanceMeters);
+        let high = Math.max(outsideSample.distanceMeters, insideSample.distanceMeters);
+        const insideIsAfterOutside = insideSample.distanceMeters > outsideSample.distanceMeters;
+        for (let iteration = 0; iteration < 8; iteration += 1) {
+          const midpoint = (low + high) / 2;
+          const midpointIsMatch = evaluateDistance(midpoint).isMatch;
+          if (midpointIsMatch === insideSample.isMatch) {
+            if (insideIsAfterOutside) {
+              high = midpoint;
+            } else {
+              low = midpoint;
+            }
+          } else if (insideIsAfterOutside) {
+            low = midpoint;
+          } else {
+            high = midpoint;
+          }
+        }
+        return (low + high) / 2;
+      };
+      const finishRun = (runEndIndex) => {
+        if (runStartIndex == null) {
+          return;
+        }
+
+        const first = samples[runStartIndex];
+        const last = samples[runEndIndex];
+        const previous = samples[runStartIndex - 1];
+        const next = samples[runEndIndex + 1];
+        const startMeters = previous
+          ? refineBoundary(previous, first)
+          : first.distanceMeters;
+        const endMeters = next
+          ? refineBoundary(next, last)
+          : last.distanceMeters;
+        const matchedSamples = samples.slice(runStartIndex, runEndIndex + 1);
+        const targetDistances = matchedSamples
+          .map((sample) => sample.nearestTarget?.pathDistanceMeters)
+          .filter((distance) => Number.isFinite(distance));
+        const runLengthMeters = endMeters - startMeters;
+        const minimumLengthMeters = Math.max(20, thresholdMeters * 1.2);
+
+        if (targetDistances.length >= 2 && runLengthMeters >= minimumLengthMeters) {
+          runs.push({
+            startMeters,
+            endMeters,
+            targetStartMeters: Math.min(...targetDistances),
+            targetEndMeters: Math.max(...targetDistances),
+            averageDistanceMeters: matchedSamples.reduce(
+              (sum, sample) => sum + (sample.nearestTarget?.distanceMeters || 0),
+              0
+            ) / matchedSamples.length,
+          });
+        }
+        runStartIndex = null;
+      };
+
+      samples.forEach((sample, index) => {
+        if (sample.isMatch) {
+          if (runStartIndex == null) {
+            runStartIndex = index;
+          }
+          return;
+        }
+        finishRun(index - 1);
+      });
+      finishRun(samples.length - 1);
+      return runs;
+    }
+
+    function buildSampledOverlapCandidates(leftPath, rightPath, leftSegments, rightSegments) {
+      const sampleStepMeters = Math.max(8, Math.min(12, thresholdMeters * 0.75));
+      const leftRuns = buildSampledOverlapRuns(leftSegments, rightSegments, sampleStepMeters);
+      const rightRuns = buildSampledOverlapRuns(rightSegments, leftSegments, sampleStepMeters);
+      const targetRangeToleranceMeters = Math.max(sampleStepMeters * 2, thresholdMeters * 2);
+      const candidates = [];
+
+      leftRuns.forEach((leftRun, runIndex) => {
+        const leftMidpoint = getCoordinateAtDistance(
+          leftSegments,
+          (leftRun.startMeters + leftRun.endMeters) / 2
+        )?.coordinate;
+        const matchingRightRun = rightRuns
+          .map((rightRun) => {
+            const rightMidpoint = getCoordinateAtDistance(
+              rightSegments,
+              (rightRun.startMeters + rightRun.endMeters) / 2
+            )?.coordinate;
+            return {
+              rightRun,
+              intervalGapMeters: intervalGap(
+                leftRun.targetStartMeters,
+                leftRun.targetEndMeters,
+                rightRun.startMeters,
+                rightRun.endMeters
+              ),
+              midpointDistanceMeters: leftMidpoint && rightMidpoint
+                ? distanceInMeters(leftMidpoint, rightMidpoint)
+                : Number.POSITIVE_INFINITY,
+            };
+          })
+          .filter((item) => (
+            item.intervalGapMeters <= targetRangeToleranceMeters &&
+            item.midpointDistanceMeters <= thresholdMeters * 1.35 &&
+            item.rightRun.averageDistanceMeters <= thresholdMeters * 1.1
+          ))
+          .sort((left, right) => (
+            left.intervalGapMeters - right.intervalGapMeters ||
+            left.midpointDistanceMeters - right.midpointDistanceMeters
+          ))[0];
+
+        if (!matchingRightRun) {
+          return;
+        }
+
+        const leftStart = getCoordinateAtDistance(leftSegments, leftRun.startMeters)?.coordinate;
+        const leftEnd = getCoordinateAtDistance(leftSegments, leftRun.endMeters)?.coordinate;
+        if (!leftStart || !leftEnd) {
+          return;
+        }
+
+        candidates.push({
+          leftPathId: leftPath.id,
+          rightPathId: rightPath.id,
+          leftSegmentId: `sampled-${runIndex}-${leftRun.startMeters.toFixed(1)}`,
+          rightSegmentId: `sampled-${runIndex}-${matchingRightRun.rightRun.startMeters.toFixed(1)}`,
+          leftIntervalStartMeters: leftRun.startMeters,
+          leftIntervalEndMeters: leftRun.endMeters,
+          rightIntervalStartMeters: matchingRightRun.rightRun.startMeters,
+          rightIntervalEndMeters: matchingRightRun.rightRun.endMeters,
+          coordinates: [leftStart, leftEnd],
+        });
+      });
+
+      return candidates;
+    }
+
+    function getSegmentOverlap(left, right) {
+      const originLat = (
+        Number(left.start.lat) + Number(left.end.lat) + Number(right.start.lat) + Number(right.end.lat)
+      ) / 4;
+      const leftStart = projectPoint(left.start, originLat);
+      const leftEnd = projectPoint(left.end, originLat);
+      const rightStart = projectPoint(right.start, originLat);
+      const rightEnd = projectPoint(right.end, originLat);
+      const leftVector = { x: leftEnd.x - leftStart.x, y: leftEnd.y - leftStart.y };
+      const rightVector = { x: rightEnd.x - rightStart.x, y: rightEnd.y - rightStart.y };
+      const leftPlanarLength = Math.hypot(leftVector.x, leftVector.y);
+      const rightPlanarLength = Math.hypot(rightVector.x, rightVector.y);
+      if (!leftPlanarLength || !rightPlanarLength) {
+        return null;
+      }
+
+      const directionSimilarity = Math.abs(
+        (leftVector.x * rightVector.x + leftVector.y * rightVector.y) /
+        (leftPlanarLength * rightPlanarLength)
+      );
+      if (directionSimilarity < 0.8) {
+        return null;
+      }
+
+      const rightStartOnLeft = projectPointToLine(right.start, left.start, left.end, originLat);
+      const rightEndOnLeft = projectPointToLine(right.end, left.start, left.end, originLat);
+      const leftStartOnRight = projectPointToLine(left.start, right.start, right.end, originLat);
+      const leftEndOnRight = projectPointToLine(left.end, right.start, right.end, originLat);
+      const lineDistances = [
+        rightStartOnLeft.distanceMeters,
+        rightEndOnLeft.distanceMeters,
+        leftStartOnRight.distanceMeters,
+        leftEndOnRight.distanceMeters,
+      ];
+      if (lineDistances.some((distance) => distance > thresholdMeters)) {
+        return null;
+      }
+
+      const leftRatioStart = Math.max(0, Math.min(rightStartOnLeft.ratio, rightEndOnLeft.ratio));
+      const leftRatioEnd = Math.min(1, Math.max(rightStartOnLeft.ratio, rightEndOnLeft.ratio));
+      const rightRatioStart = Math.max(0, Math.min(leftStartOnRight.ratio, leftEndOnRight.ratio));
+      const rightRatioEnd = Math.min(1, Math.max(leftStartOnRight.ratio, leftEndOnRight.ratio));
+      if (leftRatioEnd <= leftRatioStart || rightRatioEnd <= rightRatioStart) {
+        return null;
+      }
+
+      const leftOverlapStart = interpolateCoordinate(left.start, left.end, leftRatioStart);
+      const leftOverlapEnd = interpolateCoordinate(left.start, left.end, leftRatioEnd);
+      const rightOverlapStart = interpolateCoordinate(right.start, right.end, rightRatioStart);
+      const rightOverlapEnd = interpolateCoordinate(right.start, right.end, rightRatioEnd);
+      const midpointLeft = interpolateCoordinate(leftOverlapStart, leftOverlapEnd, 0.5);
+      const midpointRight = interpolateCoordinate(rightOverlapStart, rightOverlapEnd, 0.5);
+      if (
+        pointToSegmentMetrics(midpointLeft, right.start, right.end).distanceMeters > thresholdMeters ||
+        pointToSegmentMetrics(midpointRight, left.start, left.end).distanceMeters > thresholdMeters
+      ) {
+        return null;
+      }
+
+      return {
+        leftRatioStart,
+        leftRatioEnd,
+        rightRatioStart,
+        rightRatioEnd,
+        leftIntervalStartMeters: left.cumulativeStartMeters + left.lengthMeters * leftRatioStart,
+        leftIntervalEndMeters: left.cumulativeStartMeters + left.lengthMeters * leftRatioEnd,
+        rightIntervalStartMeters: right.cumulativeStartMeters + right.lengthMeters * rightRatioStart,
+        rightIntervalEndMeters: right.cumulativeStartMeters + right.lengthMeters * rightRatioEnd,
+        coordinates: [leftOverlapStart, leftOverlapEnd],
+      };
+    }
+
+    function intervalGap(leftStart, leftEnd, rightStart, rightEnd) {
+      if (leftEnd < rightStart) {
+        return rightStart - leftEnd;
+      }
+      if (rightEnd < leftStart) {
+        return leftStart - rightEnd;
+      }
+      return 0;
+    }
+
+    function mergeIntervals(intervals) {
+      const sorted = intervals
+        .map((interval) => ({ start: interval.start, end: interval.end }))
+        .filter((interval) => interval.end > interval.start)
+        .sort((left, right) => left.start - right.start);
+      const merged = [];
+      sorted.forEach((interval) => {
+        const previous = merged[merged.length - 1];
+        if (!previous || interval.start > previous.end) {
+          merged.push({ ...interval });
+          return;
+        }
+        previous.end = Math.max(previous.end, interval.end);
+      });
+      return merged;
+    }
+
+    function buildOverlapGroups(leftPath, rightPath) {
+      const leftSegments = buildPathSegments(leftPath);
+      const rightSegments = buildPathSegments(rightPath);
+      const candidates = [];
+
+      function slicePathCoordinates(segments, startMeters, endMeters) {
+        const sliced = [];
+        segments.forEach((segment) => {
+          const sliceStartMeters = Math.max(startMeters, segment.cumulativeStartMeters);
+          const sliceEndMeters = Math.min(endMeters, segment.cumulativeEndMeters);
+          if (sliceEndMeters <= sliceStartMeters) {
+            return;
+          }
+
+          const startRatio = (sliceStartMeters - segment.cumulativeStartMeters) / segment.lengthMeters;
+          const endRatio = (sliceEndMeters - segment.cumulativeStartMeters) / segment.lengthMeters;
+          const sliceStart = interpolateCoordinate(segment.start, segment.end, startRatio);
+          const sliceEnd = interpolateCoordinate(segment.start, segment.end, endRatio);
+          const previous = sliced[sliced.length - 1];
+          if (!previous || distanceInMeters(previous, sliceStart) > 0.5) {
+            sliced.push(sliceStart);
+          }
+          if (!sliced.length || distanceInMeters(sliced[sliced.length - 1], sliceEnd) > 0.5) {
+            sliced.push(sliceEnd);
+          }
+        });
+        return sliced;
+      }
+
+      leftSegments.forEach((leftSegment) => {
+        rightSegments.forEach((rightSegment) => {
+          const overlap = getSegmentOverlap(leftSegment, rightSegment);
+          if (!overlap) {
+            return;
+          }
+          candidates.push({
+            leftPathId: leftPath.id,
+            rightPathId: rightPath.id,
+            leftSegmentId: leftSegment.id,
+            rightSegmentId: rightSegment.id,
+            leftIntervalStartMeters: overlap.leftIntervalStartMeters,
+            leftIntervalEndMeters: overlap.leftIntervalEndMeters,
+            rightIntervalStartMeters: overlap.rightIntervalStartMeters,
+            rightIntervalEndMeters: overlap.rightIntervalEndMeters,
+            coordinates: overlap.coordinates,
+          });
+        });
+      });
+
+      candidates.push(...buildSampledOverlapCandidates(leftPath, rightPath, leftSegments, rightSegments));
+
+      const groups = [];
+      candidates.forEach((candidate) => {
+        const matchingGroupIndexes = [];
+        groups.forEach((group, groupIndex) => {
+          const connected = group.some((item) => (
+            intervalGap(
+              item.leftIntervalStartMeters,
+              item.leftIntervalEndMeters,
+              candidate.leftIntervalStartMeters,
+              candidate.leftIntervalEndMeters
+            ) <= thresholdMeters &&
+            intervalGap(
+              item.rightIntervalStartMeters,
+              item.rightIntervalEndMeters,
+              candidate.rightIntervalStartMeters,
+              candidate.rightIntervalEndMeters
+            ) <= thresholdMeters
+          ));
+          if (connected) {
+            matchingGroupIndexes.push(groupIndex);
+          }
+        });
+
+        if (!matchingGroupIndexes.length) {
+          groups.push([candidate]);
+          return;
+        }
+
+        const mergedGroup = [candidate];
+        matchingGroupIndexes.slice().reverse().forEach((groupIndex) => {
+          mergedGroup.push(...groups[groupIndex]);
+          groups.splice(groupIndex, 1);
+        });
+        groups.push(mergedGroup);
+      });
+
+      return groups.map((group, groupIndex) => {
+        const leftIntervals = mergeIntervals(group.map((item) => ({
+          start: item.leftIntervalStartMeters,
+          end: item.leftIntervalEndMeters,
+        })));
+        const rightIntervals = mergeIntervals(group.map((item) => ({
+          start: item.rightIntervalStartMeters,
+          end: item.rightIntervalEndMeters,
+        })));
+        const leftLengthMeters = leftIntervals.reduce((sum, interval) => sum + interval.end - interval.start, 0);
+        const rightLengthMeters = rightIntervals.reduce((sum, interval) => sum + interval.end - interval.start, 0);
+        const overlapLengthMeters = Math.min(leftLengthMeters, rightLengthMeters);
+        const first = group.reduce((current, item) => (
+          item.leftIntervalStartMeters < current.leftIntervalStartMeters ? item : current
+        ), group[0]);
+        const last = group.reduce((current, item) => (
+          item.leftIntervalEndMeters > current.leftIntervalEndMeters ? item : current
+        ), group[0]);
+        const coordinateGroups = leftIntervals
+          .map((interval) => slicePathCoordinates(leftSegments, interval.start, interval.end))
+          .filter((coordinates) => coordinates.length >= 2);
+        const rightCoordinateGroups = rightIntervals
+          .map((interval) => slicePathCoordinates(rightSegments, interval.start, interval.end))
+          .filter((coordinates) => coordinates.length >= 2);
+        return {
+          id: `overlap-group-${groupIndex}-${leftPath.id}-${rightPath.id}`,
+          routeNames: [leftPath.routeName, rightPath.routeName].sort((left, right) => left.localeCompare(right, "ko")),
+          pathNames: [leftPath.name, rightPath.name],
+          matchedFragmentCount: new Set(group.map((item) => item.leftSegmentId)).size,
+          overlapLengthMeters: Number(overlapLengthMeters.toFixed(1)),
+          averageLengthMeters: Number(overlapLengthMeters.toFixed(1)),
+          coordinates: [first.coordinates[0], last.coordinates[1]],
+          coordinateGroups,
+          rightCoordinateGroups,
+        };
+      }).filter((item) => item.overlapLengthMeters > 0);
+    }
+
+    const overlaps = [];
+    for (let index = 0; index < paths.length; index += 1) {
+      for (let otherIndex = index + 1; otherIndex < paths.length; otherIndex += 1) {
+        const current = paths[index];
+        const other = paths[otherIndex];
         if (current.routeName === other.routeName) {
           continue;
         }
-
-        const directMatch =
-          distanceInMeters(current.start, other.start) <= thresholdMeters &&
-          distanceInMeters(current.end, other.end) <= thresholdMeters;
-        const reverseMatch =
-          distanceInMeters(current.start, other.end) <= thresholdMeters &&
-          distanceInMeters(current.end, other.start) <= thresholdMeters;
-
-        if (!directMatch && !reverseMatch) {
-          continue;
-        }
-
-        overlaps.push({
-          id: `${current.id}__${other.id}`,
-          routeNames: [current.routeName, other.routeName],
-          pathNames: [current.pathName, other.pathName],
-          averageLengthMeters: Number(((current.lengthMeters + other.lengthMeters) / 2).toFixed(1)),
-          coordinates: [
-            { lat: current.start.lat, lng: current.start.lng },
-            { lat: current.end.lat, lng: current.end.lng },
-          ],
-        });
+        overlaps.push(...buildOverlapGroups(current, other));
       }
     }
 
-    return overlaps;
+    function getCoordinateGroups(item) {
+      if (Array.isArray(item?.coordinateGroups) && item.coordinateGroups.length) {
+        return item.coordinateGroups;
+      }
+      return Array.isArray(item?.coordinates) && item.coordinates.length >= 2 ? [item.coordinates] : [];
+    }
+
+    function getPolylineDistances(sourceGroups, targetGroups) {
+      return sourceGroups
+        .flatMap((sourceGroup) => sourceGroup)
+        .map((point) => {
+          let minimumDistanceMeters = Number.POSITIVE_INFINITY;
+          targetGroups.forEach((targetGroup) => {
+            for (let index = 0; index < targetGroup.length - 1; index += 1) {
+              minimumDistanceMeters = Math.min(
+                minimumDistanceMeters,
+                pointToSegmentMetrics(point, targetGroup[index], targetGroup[index + 1]).distanceMeters
+              );
+            }
+          });
+          return minimumDistanceMeters;
+        })
+        .filter((distance) => Number.isFinite(distance));
+    }
+
+    function areSpatiallyDuplicateOverlaps(left, right) {
+      if (!left?.routeNames || !right?.routeNames || left.routeNames.join("\u0000") !== right.routeNames.join("\u0000")) {
+        return false;
+      }
+
+      const mergeToleranceMeters = Math.max(4, thresholdMeters * 0.5);
+      const leftGroups = getCoordinateGroups(left);
+      const rightGroups = getCoordinateGroups(right);
+      if (!leftGroups.length || !rightGroups.length) {
+        return false;
+      }
+
+      const hasSimilarPolyline = (sourceGroups, targetGroups) => {
+        const distances = getPolylineDistances(sourceGroups, targetGroups);
+        if (distances.length < 2) {
+          return false;
+        }
+        const averageDistanceMeters = distances.reduce((sum, distance) => sum + distance, 0) / distances.length;
+        const closeVertexRatio = distances.filter((distance) => distance <= mergeToleranceMeters).length / distances.length;
+        return averageDistanceMeters <= mergeToleranceMeters && closeVertexRatio >= 0.6;
+      };
+
+      return hasSimilarPolyline(leftGroups, rightGroups) && hasSimilarPolyline(rightGroups, leftGroups);
+    }
+
+    function consolidateSpatiallyDuplicateOverlaps(items) {
+      const consolidated = [];
+      items.forEach((item) => {
+        const existing = consolidated.find((candidate) => areSpatiallyDuplicateOverlaps(candidate, item));
+        if (!existing) {
+          consolidated.push(item);
+          return;
+        }
+
+        if (item.overlapLengthMeters > existing.overlapLengthMeters) {
+          existing.coordinates = item.coordinates;
+          existing.coordinateGroups = item.coordinateGroups;
+          existing.rightCoordinateGroups = item.rightCoordinateGroups;
+          existing.overlapLengthMeters = item.overlapLengthMeters;
+          existing.averageLengthMeters = item.averageLengthMeters;
+        }
+        existing.matchedFragmentCount = Math.max(existing.matchedFragmentCount, item.matchedFragmentCount);
+      });
+      return consolidated;
+    }
+
+    return consolidateSpatiallyDuplicateOverlaps(overlaps)
+      .sort((left, right) => right.overlapLengthMeters - left.overlapLengthMeters);
   }
 
   function summarizeLocalAnalysis(routeNames = getRoutes()) {
     const duplicatePoints = detectDuplicatePoints(30, routeNames);
-    const overlappingSegments = detectOverlappingSegments(30, routeNames);
+    const overlappingSegments = detectOverlappingSegments(OVERLAP_DISTANCE_THRESHOLD_METERS, routeNames);
+    const overlapRouteSummary = summarizeOverlapRoutes(overlappingSegments);
 
     return {
       analyzedAt: new Date().toISOString(),
       routeNames: Array.isArray(routeNames) ? routeNames.slice() : [],
       duplicatePointCount: duplicatePoints.length,
       overlappingSegmentCount: overlappingSegments.length,
+      ...overlapRouteSummary,
       duplicatePoints,
       overlappingSegments,
     };
@@ -8853,6 +9533,154 @@
     analysisInfoWindows = [];
   }
 
+  function getAnalysisOverlapItems(report) {
+    if (Array.isArray(report?.local?.overlappingSegments)) {
+      return report.local.overlappingSegments;
+    }
+    return Array.isArray(report?.overlappingSegments) ? report.overlappingSegments : [];
+  }
+
+  function updateAnalysisOverlapToggle(report = latestAnalysisReport) {
+    if (!analysisOverlapToggleEl) {
+      return;
+    }
+
+    const hasOverlaps = getAnalysisOverlapItems(report).length > 0;
+    analysisOverlapToggleEl.disabled = !hasOverlaps;
+    analysisOverlapToggleEl.textContent = hasOverlaps
+      ? (analysisOverlapVisible ? "중복 경로 숨김" : "중복 경로 표시")
+      : "중복 경로 없음";
+    analysisOverlapToggleEl.setAttribute("aria-pressed", String(hasOverlaps && analysisOverlapVisible));
+  }
+
+  function updateAnalysisCopyButton(report = latestAnalysisReport) {
+    if (!analysisCopyButtonEl) {
+      return;
+    }
+    analysisCopyButtonEl.disabled = !report?.local;
+    analysisCopyButtonEl.textContent = "분석 텍스트 복사";
+  }
+
+  function getAnalysisScopeLabel(report) {
+    const routeNames = Array.isArray(report?.local?.routeNames) ? report.local.routeNames : [];
+    const groupKeys = new Set(routeNames.map((routeName) => getRouteSetting(routeName).routeGroup));
+    if (groupKeys.size === 1 && groupKeys.has("default")) {
+      return "기존 노선";
+    }
+    if (groupKeys.size === 1 && groupKeys.has("merged")) {
+      return "개선 노선";
+    }
+    return "선택 노선";
+  }
+
+  function buildAnalysisCopyText(report) {
+    const routeNames = Array.isArray(report?.local?.routeNames) ? report.local.routeNames : [];
+    const routeList = routeNames.length
+      ? routeNames.map((routeName, index) => `${index + 1}. ${routeName}`).join("\n")
+      : "없음";
+    const bodyText = analysisModalBodyEl?.innerText?.trim() || "분석 결과가 없습니다.";
+    return [
+      "WONDER Linx 노선 분석 결과",
+      `분석 범위: ${getAnalysisScopeLabel(report)}`,
+      `분석 노선 수: ${routeNames.length}개`,
+      "분석 노선:",
+      routeList,
+      `생성 시각: ${report.generatedAt || report.local?.analyzedAt || "미상"}`,
+      "",
+      bodyText,
+    ].join("\n");
+  }
+
+  async function writeTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) {
+      throw new Error("클립보드에 복사하지 못했습니다.");
+    }
+  }
+
+  async function handleCopyAnalysisText() {
+    if (!latestAnalysisReport?.local) {
+      setStatus("복사할 분석 결과가 없습니다.", true);
+      return;
+    }
+
+    try {
+      await writeTextToClipboard(buildAnalysisCopyText(latestAnalysisReport));
+      analysisCopyButtonEl.textContent = "복사 완료";
+      if (analysisCopyResetTimer) {
+        window.clearTimeout(analysisCopyResetTimer);
+      }
+      analysisCopyResetTimer = window.setTimeout(() => {
+        if (analysisCopyButtonEl) {
+          analysisCopyButtonEl.textContent = "분석 텍스트 복사";
+        }
+      }, 1800);
+      setStatus("분석 결과 전체 내용을 클립보드에 복사했습니다. 기존/개선 노선 결과를 각각 복사해 AI 프롬프트에 붙여 넣을 수 있습니다.", false);
+    } catch (error) {
+      setStatus(error.message || "분석 결과 복사에 실패했습니다.", true);
+    }
+  }
+
+  function setAnalysisOverlapVisible(visible) {
+    analysisOverlapVisible = Boolean(visible);
+    analysisPolylines.forEach((polyline) => {
+      polyline.setMap(analysisOverlapVisible && mapReady ? map : null);
+    });
+    updateAnalysisOverlapToggle();
+  }
+
+  function renderAnalysisOverlapOverlays(report) {
+    if (!mapReady || !report) {
+      return;
+    }
+
+    getAnalysisOverlapItems(report).forEach((item) => {
+      const coordinateGroups = [
+        ...(Array.isArray(item.coordinateGroups) && item.coordinateGroups.length
+          ? item.coordinateGroups
+          : [item.coordinates]),
+        ...(Array.isArray(item.rightCoordinateGroups) ? item.rightCoordinateGroups : []),
+      ];
+
+      coordinateGroups.forEach((coordinates) => {
+        if (!Array.isArray(coordinates) || coordinates.length < 2) {
+          return;
+        }
+
+        const path = coordinates
+          .filter((point) => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lng)))
+          .map((point) => new window.kakao.maps.LatLng(Number(point.lat), Number(point.lng)));
+        if (path.length < 2) {
+          return;
+        }
+
+        const polyline = new window.kakao.maps.Polyline({
+          map: analysisOverlapVisible ? map : null,
+          path,
+          strokeWeight: 8,
+          strokeColor: "#d94841",
+          strokeOpacity: 0.88,
+          strokeStyle: "solid",
+          zIndex: 7,
+        });
+        analysisPolylines.push(polyline);
+      });
+    });
+  }
+
   function clearRidershipFocusOverlays() {
     ridershipFocusMarkers.forEach((item) => item.setMap(null));
     ridershipFocusInfoWindows.forEach((item) => item.close());
@@ -8864,9 +9692,12 @@
     latestAnalysisReport = null;
     analysisActive = false;
     activeAnalysisGroup = null;
+    analysisOverlapVisible = true;
     clearAnalysisOverlays();
     clearRidershipFocusOverlays();
     closeAnalysisModal();
+    updateAnalysisOverlapToggle();
+    updateAnalysisCopyButton();
     updateAnalyzeButtonState();
     refreshUI();
   }
@@ -8887,6 +9718,10 @@
       });
       analysisMarkers.push(marker);
     });
+
+    renderAnalysisOverlapOverlays(report);
+    updateAnalysisOverlapToggle(report);
+    updateAnalysisCopyButton();
 
   }
 
@@ -8947,6 +9782,10 @@
       analysisMarkers.push(marker);
       analysisInfoWindows.push(infoWindow);
     });
+
+    renderAnalysisOverlapOverlays(report);
+    updateAnalysisOverlapToggle(report);
+    updateAnalysisCopyButton();
 
   }
 
@@ -9090,6 +9929,75 @@
     }
   }
 
+  function formatOverlapLengthLabel(item) {
+    const lengthMeters = Number(item?.overlapLengthMeters ?? item?.averageLengthMeters ?? 0);
+    const segmentCount = Number(item?.segmentCount || 0);
+    const segmentLabel = segmentCount > 1 ? `, 연결 구간 ${segmentCount}개` : "";
+    return `약 ${lengthMeters}m${segmentLabel}`;
+  }
+
+  function summarizeOverlapRoutes(overlaps) {
+    const routeNames = new Set();
+    const routePairs = new Set();
+    (Array.isArray(overlaps) ? overlaps : []).forEach((item) => {
+      const names = Array.isArray(item?.routeNames) ? item.routeNames.filter(Boolean) : [];
+      names.forEach((name) => routeNames.add(name));
+      if (names.length >= 2) {
+        routePairs.add(names.slice().sort((left, right) => left.localeCompare(right, "ko")).join("\u0000"));
+      }
+    });
+    return {
+      overlappingRouteCount: routeNames.size,
+      overlappingRoutePairCount: routePairs.size,
+    };
+  }
+
+  function buildOverlapItemsHtml(overlaps) {
+    const grouped = new Map();
+    (Array.isArray(overlaps) ? overlaps : []).slice(0, 20).forEach((item) => {
+      const routeNames = Array.isArray(item?.routeNames) ? item.routeNames : [];
+      const key = routeNames.join("\u0000");
+      if (!grouped.has(key)) {
+        grouped.set(key, { routeNames, items: [] });
+      }
+      grouped.get(key).items.push(item);
+    });
+
+    return Array.from(grouped.values())
+      .map(({ routeNames, items }) => {
+        const pairLabel = `${escapeHtml(routeNames[0] || "노선")} ↔ ${escapeHtml(routeNames[1] || "노선")}`;
+        const lengthLabels = items.map((item) => escapeHtml(formatOverlapLengthLabel(item))).join(", ");
+        const detail = items.length > 1
+          ? `<br><span class="analysis-inline-meta">중복 확인 구간 ${items.length}곳: ${lengthLabels}</span>`
+          : ` (${lengthLabels})`;
+        return `<li>${pairLabel}${detail}</li>`;
+      })
+      .join("");
+  }
+
+  function buildOverlapInsightsHtml(overlaps) {
+    const grouped = new Map();
+    (Array.isArray(overlaps) ? overlaps : []).slice(0, 10).forEach((item) => {
+      const routeNames = Array.isArray(item?.routeNames) ? item.routeNames : [];
+      const key = routeNames.join("\u0000");
+      if (!grouped.has(key)) {
+        grouped.set(key, { routeNames, items: [] });
+      }
+      grouped.get(key).items.push(item);
+    });
+
+    return Array.from(grouped.values())
+      .map(({ routeNames, items }) => {
+        const pairLabel = `${escapeHtml(routeNames[0] || "노선")} 와 ${escapeHtml(routeNames[1] || "노선")}`;
+        if (items.length === 1) {
+          return `<li>${pairLabel} 사이에 ${escapeHtml(formatOverlapLengthLabel(items[0]))} 중복 구간 후보가 있습니다.</li>`;
+        }
+        const lengths = items.map((item) => escapeHtml(formatOverlapLengthLabel(item))).join(", ");
+        return `<li>${pairLabel} 사이에 ${items.length}곳의 중복 구간 후보가 있습니다. (${lengths})</li>`;
+      })
+      .join("");
+  }
+
   function renderAnalysisModal(report) {
     const gpt = report.gpt || {};
     const duplicateItems = report.local.duplicatePoints
@@ -9101,15 +10009,8 @@
           )} / ${escapeHtml(item.points[1].name)} (${escapeHtml(String(item.distanceMeters))}m)</li>`
       )
       .join("");
-    const overlapItems = report.local.overlappingSegments
-      .slice(0, 20)
-      .map(
-        (item) =>
-          `<li>${escapeHtml(item.routeNames[0])} ↔ ${escapeHtml(item.routeNames[1])} (${escapeHtml(
-            String(item.averageLengthMeters)
-          )}m)</li>`
-      )
-      .join("");
+    const overlapItems = buildOverlapItemsHtml(report.local.overlappingSegments);
+    const overlapRouteSummary = summarizeOverlapRoutes(report.local.overlappingSegments);
     const gptActions = (gpt.optimization_actions || [])
       .map((item) => `<li>${escapeHtml(item)}</li>`)
       .join("");
@@ -9128,8 +10029,9 @@
           <strong>${escapeHtml(String(report.local.duplicatePointCount))}건</strong>
         </div>
         <div class="analysis-stat">
-          <span>중복 경로 구간</span>
-          <strong>${escapeHtml(String(report.local.overlappingSegmentCount))}건</strong>
+          <span>중복 노선</span>
+          <strong>${escapeHtml(String(overlapRouteSummary.overlappingRouteCount))}개</strong>
+          <span class="analysis-inline-meta">노선쌍 ${escapeHtml(String(overlapRouteSummary.overlappingRoutePairCount))}건 · 경로 구간 ${escapeHtml(String(report.local.overlappingSegmentCount))}건</span>
         </div>
         <div class="analysis-stat">
           <span>저이용 후보</span>
@@ -9147,6 +10049,7 @@
       </div>
       <div class="analysis-list-card">
         <h3>중복 경로 구간 목록</h3>
+        <p class="analysis-inline-meta">지도 위 붉은 선으로 실제 노선 경로에서 확인된 중복 구간을 표시합니다. 경로 좌표를 일정 간격으로 샘플링해 노선 중심선 간 20m 이내이고 진행 방향이 이어지는 구간만 중복으로 판정합니다.</p>
         <ul>${overlapItems || "<li>중복 경로 구간이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
@@ -9388,15 +10291,7 @@
           )} / ${escapeHtml(item.points[1].name)} (${escapeHtml(String(item.distanceMeters))}m)</li>`
       )
       .join("");
-    const overlapItems = report.local.overlappingSegments
-      .slice(0, 20)
-      .map(
-        (item) =>
-          `<li>${escapeHtml(item.routeNames[0])} ↔ ${escapeHtml(item.routeNames[1])} (${escapeHtml(
-            String(item.averageLengthMeters)
-          )}m)</li>`
-      )
-      .join("");
+    const overlapItems = buildOverlapItemsHtml(report.local.overlappingSegments);
     const duplicateInsights = report.local.duplicatePoints
       .slice(0, 10)
       .map(
@@ -9406,15 +10301,8 @@
           )}m 이내에서 중복됩니다.</li>`
       )
       .join("");
-    const overlapInsights = report.local.overlappingSegments
-      .slice(0, 10)
-      .map(
-        (item) =>
-          `<li>${escapeHtml(item.routeNames[0])} 와 ${escapeHtml(item.routeNames[1])} 사이에 ${escapeHtml(
-            String(item.averageLengthMeters)
-          )}m 중복 구간 후보가 있습니다.</li>`
-      )
-      .join("");
+    const overlapInsights = buildOverlapInsightsHtml(report.local.overlappingSegments);
+    const overlapRouteSummary = summarizeOverlapRoutes(report.local.overlappingSegments);
     const actionItems = localActions.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
     const riskItems = localRisks.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
 
@@ -9425,8 +10313,9 @@
           <strong>${escapeHtml(String(report.local.duplicatePointCount))}건</strong>
         </div>
         <div class="analysis-stat">
-          <span>중복 경로 구간</span>
-          <strong>${escapeHtml(String(report.local.overlappingSegmentCount))}건</strong>
+          <span>중복 노선</span>
+          <strong>${escapeHtml(String(overlapRouteSummary.overlappingRouteCount))}개</strong>
+          <span class="analysis-inline-meta">노선쌍 ${escapeHtml(String(overlapRouteSummary.overlappingRoutePairCount))}건 · 경로 구간 ${escapeHtml(String(report.local.overlappingSegmentCount))}건</span>
         </div>
         <div class="analysis-stat">
           <span>저이용 후보</span>
@@ -9444,6 +10333,7 @@
       </div>
       <div class="analysis-list-card">
         <h3>중복 경로 구간 목록</h3>
+        <p class="analysis-inline-meta">지도 위 붉은 선으로 실제 노선 경로에서 확인된 중복 구간을 표시합니다. 경로 좌표를 일정 간격으로 샘플링해 노선 중심선 간 20m 이내이고 진행 방향이 이어지는 구간만 중복으로 판정합니다.</p>
         <ul>${overlapItems || "<li>중복 경로 구간이 없습니다.</li>"}</ul>
       </div>
       <div class="analysis-list-card">
@@ -9940,6 +10830,7 @@
       };
 
       latestAnalysisReport = report;
+      analysisOverlapVisible = true;
       renderAnalysisRangeOverlays(localReport);
       renderAnalysisModal(report);
       await saveAnalysisReport(report);
@@ -9985,6 +10876,7 @@
 
       latestAnalysisReport = report;
       analysisActive = true;
+      analysisOverlapVisible = true;
       renderAnalysisRangeOverlays(localReport);
       renderLocalAnalysisModal(report);
       await saveAnalysisReport(report);
@@ -10004,7 +10896,9 @@
       return;
     }
 
-    const routeNames = getRouteNamesByGroup(groupKey);
+    const routeNames = getRouteNamesByGroup(groupKey).filter((routeName) => (
+      getRouteSetting(routeName).visible
+    ));
     const pointCount = getAllPoints().filter((point) => routeNames.includes(point.routeName)).length;
     const pathCount = getAllPaths().filter((pathItem) => routeNames.includes(pathItem.routeName)).length;
     const groupLabel = groupKey === "merged" ? "신규 노선" : "기존 노선";
@@ -10039,6 +10933,7 @@
       latestAnalysisReport = report;
       analysisActive = true;
       activeAnalysisGroup = groupKey;
+      analysisOverlapVisible = true;
       renderAnalysisRangeOverlays(localReport);
       renderLocalAnalysisModal(report);
       await saveAnalysisReport(report);
@@ -14912,6 +15807,10 @@
       optimizeRoutesButtonEl.addEventListener("click", handleOptimizeRoutes);
     }
     analysisModalCloseEl.addEventListener("click", closeAnalysisModal);
+    analysisOverlapToggleEl?.addEventListener("click", () => {
+      setAnalysisOverlapVisible(!analysisOverlapVisible);
+    });
+    analysisCopyButtonEl?.addEventListener("click", handleCopyAnalysisText);
     analysisModalEl.addEventListener("click", (event) => {
       if (event.target === analysisModalEl) {
         closeAnalysisModal();
@@ -15114,5 +16013,3 @@
 
   bootstrap();
 })();
-
-

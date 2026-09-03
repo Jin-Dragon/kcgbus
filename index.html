@@ -329,7 +329,21 @@
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="analysis-modal-title">
       <div class="modal-head">
         <h2 id="analysis-modal-title" class="section-title">노선 분석 결과</h2>
-        <button id="analysis-modal-close" class="secondary-button" type="button">닫기</button>
+        <div class="modal-head-actions">
+          <button
+            id="analysis-overlap-toggle"
+            class="secondary-button analysis-overlap-toggle-button"
+            type="button"
+            aria-pressed="true"
+            disabled
+          >
+            중복 경로 숨김
+          </button>
+          <button id="analysis-copy-button" class="secondary-button analysis-copy-button" type="button" disabled>
+            분석 텍스트 복사
+          </button>
+          <button id="analysis-modal-close" class="secondary-button" type="button">닫기</button>
+        </div>
       </div>
       <div id="analysis-modal-body" class="modal-body"></div>
     </div>
