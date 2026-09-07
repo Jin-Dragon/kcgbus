@@ -19,6 +19,8 @@
   const OPTIMIZATION_FEATURE_ENABLED = false;
   const ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT = 5;
   const ROUTE_TIME_SIMULATION_BASE_STOP_COUNT = ROUTE_TIME_SIMULATION_CHUNK_STOP_COUNT - 1;
+  const ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN = "drawn";
+  const ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO = "kakao";
   const RESEARCH_BASE_DWELL_SECONDS = 26;
   const DEFAULT_BUS_DELAY_PERCENT = 9;
   const OVERLAP_DISTANCE_THRESHOLD_METERS = 20;
@@ -286,6 +288,7 @@
   let routeTimeResultsWindowRef = null;
   let routeTimeSettingsWindowRef = null;
   let routeTimeInlineWindowMode = "";
+  let routeTimeInlineFrameEl = null;
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -4206,6 +4209,10 @@
 
   function normalizeRouteTimeSimulationOptions(value = {}) {
     const current = value && typeof value === "object" ? value : {};
+    const requestedPathMode = String(current.pathMode || ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN).trim().toLowerCase();
+    const pathMode = requestedPathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO
+      ? ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO
+      : ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
     const startHour = Number.isFinite(Number(current.startHour))
       ? Math.min(23, Math.max(0, Math.round(Number(current.startHour))))
       : 6;
@@ -4223,6 +4230,10 @@
       : DEFAULT_BUS_DELAY_PERCENT;
 
     return {
+      pathMode,
+      selectedRouteNames: Array.isArray(current.selectedRouteNames)
+        ? current.selectedRouteNames.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
       selectedDate,
       startHour,
       endHour: Math.max(startHour, endHour),
@@ -4358,6 +4369,7 @@
       };
     });
     return {
+      pathMode: options.pathMode || ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN,
       selectedDate: options.selectedDate || formatDateInputValue(new Date()),
       dayTypeLabel: dayType.label,
       region,
@@ -4379,6 +4391,7 @@
     return getRouteNamesByGroup(groupKey)
       .map((routeName) => {
         const points = getPointsInRoute(routeName);
+        const hasDrawnPath = buildRouteSimulationAnchorCoordinates(routeName).length >= 2;
         const operationalPoints = points.filter((point) => !isVirtualRoutingPoint(point));
         return {
           routeName,
@@ -4386,18 +4399,20 @@
           chunkCount: points.length >= 2
             ? Math.max(1, 1 + Math.ceil(Math.max(0, points.length - ROUTE_TIME_SIMULATION_BASE_STOP_COUNT) / Math.max(1, ROUTE_TIME_SIMULATION_BASE_STOP_COUNT - 1)))
             : 0,
-          disabled: points.length < 2 || operationalPoints.length < 2,
+          disabled: points.length < 2 || operationalPoints.length < 2 || !hasDrawnPath,
+          disabledReason: !hasDrawnPath ? " / 지도 경로 없음" : "",
         };
       });
   }
 
   function buildRouteTimeSimulationSettingsWindowHtml(groupKey, groupLabel, routeItems, defaults) {
+    const isDrawnPathMode = defaults.pathMode !== ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO;
     const routeItemsHtml = routeItems.map((item) => `
       <label class="route-item${item.disabled ? " is-disabled" : ""}">
         <input name="routeNames" type="checkbox" value="${escapeHtml(item.routeName)}" ${item.disabled ? "disabled" : "checked"}>
         <span>
           <strong>${escapeHtml(item.routeName)}</strong>
-          <small>정류장 ${escapeHtml(String(item.stopCount))}개 / 예상 청크 ${escapeHtml(String(item.chunkCount))}개${item.disabled ? " / 시뮬레이션 불가" : ""}</small>
+          <small>정류장 ${escapeHtml(String(item.stopCount))}개 / 예상 청크 ${escapeHtml(String(item.chunkCount))}개${item.disabled ? ` / 시뮬레이션 불가${escapeHtml(item.disabledReason || "")}` : ""}</small>
         </span>
       </label>
     `).join("");
@@ -4419,7 +4434,7 @@
     p { margin:0; color:var(--muted); }
     .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
     label.field { display:grid; gap:6px; font-weight:600; }
-    input[type="number"] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; }
+    input[type="number"], select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; background:#fff; color:var(--text); }
     .readonly { padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#f8fbff; color:var(--muted); }
     .route-actions { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
     .route-items { display:grid; gap:10px; max-height:360px; overflow:auto; padding-right:4px; }
@@ -4442,7 +4457,7 @@
   <div class="wrap">
     <div class="card">
       <h1>${escapeHtml(groupLabel)} 운행시간 시뮬레이션</h1>
-      <p>선택한 노선을 정류장 기준 청크로 나눠 카카오 길찾기 API의 미래 운행 정보로 시간대별 예상 주행시간을 계산합니다.</p>
+      <p>${isDrawnPathMode ? "사용자가 그린 KML 경로를 그대로 유지하고, 선형 거리와 권역 평균 버스속도를 기준으로 시간대별 예상 주행시간을 계산합니다." : "선택한 노선을 정류장 기준 청크로 나눠 카카오 길찾기 API의 미래 운행 정보로 시간대별 예상 주행시간을 계산합니다."}</p>
     </div>
     <form id="route-time-simulation-form" class="card">
       <div class="card" style="padding:0; border:none; box-shadow:none; background:transparent;">
@@ -4470,6 +4485,12 @@
         </label>
       </div>
       <div class="grid" style="margin-top:14px;">
+        <label class="field">경로 적용 방식
+          <select name="pathMode">
+            <option value="drawn"${isDrawnPathMode ? " selected" : ""}>내가 그린 경로 고정</option>
+            <option value="kakao"${isDrawnPathMode ? "" : " selected"}>카카오 미래 길찾기 경로</option>
+          </select>
+        </label>
         <label class="field">버스지체보정률(%)
           <input name="busDelayPercent" type="number" min="0" max="30" step="0.5" value="${escapeHtml(String(defaults.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT))}">
         </label>
@@ -4478,7 +4499,7 @@
         <button class="primary" type="submit">시뮬레이션 실행</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <div class="note">기본 청크 크기는 정류장 5개이며, 긴 노선은 마지막 정류장을 겹치게 이어 붙여 계산합니다. 실무에서는 평균 운행시간에 10~15% 정도의 여유를 더해 편차를 흡수하며, 현재 기본 버스지체보정률은 실측 분석 기준 9%입니다.</div>
+      <div class="note">내가 그린 경로 고정은 KML 선형을 지도와 계산에 그대로 사용합니다. 이 모드에서는 카카오가 다른 도로로 재탐색하지 않으며, 시간은 권역 평균 버스속도와 지체보정률을 적용해 추정합니다. 카카오 미래 길찾기 경로를 선택하면 기존처럼 정류장 기준으로 경로를 재탐색합니다.</div>
       <div id="route-time-log" class="log-box"></div>
     </form>
   </div>
@@ -4540,6 +4561,7 @@
         .map((checkbox) => checkbox.value);
       const options = {
         selectedRouteNames,
+        pathMode: String(data.get("pathMode") || "drawn"),
         selectedDate: String(data.get("selectedDate") || ""),
         startHour: Number(data.get("startHour")),
         endHour: Number(data.get("endHour")),
@@ -4799,8 +4821,9 @@
     return mergeSegmentPointsWithCorrections(segmentPoints, correctionPoints);
   }
 
-  function buildRouteTimeSimulationSegments(routeName) {
+  function buildRouteTimeSimulationSegments(routeName, options = {}) {
     const points = getPointsInRoute(routeName);
+    const pathCoordinates = buildRouteSimulationAnchorCoordinates(routeName);
     const normalizedPoints = [];
     points.forEach((point) => {
       const lat = Number(point.lat);
@@ -4826,6 +4849,9 @@
     if (normalizedPoints.length < 2) {
       throw new Error(`노선 "${routeName}" 은(는) 시뮬레이션할 정류장이 부족합니다.`);
     }
+    if (pathCoordinates.length < 2) {
+      throw new Error(`노선 "${routeName}" 은(는) 지도에 그려진 경로가 없어 시뮬레이션할 수 없습니다.`);
+    }
 
     const preparedPoints = normalizedPoints.map((point) => {
       const snapped = snapPointToRoutePathCoordinate(routeName, point);
@@ -4844,18 +4870,205 @@
     for (let startIndex = 0; startIndex < preparedPoints.length - 1; startIndex += step) {
       const segmentPoints = preparedPoints.slice(startIndex, startIndex + baseStopCount);
       if (segmentPoints.length >= 2) {
-        segments.push(applyRouteSimulationCorrection(routeName, segmentPoints, segments.length + 1));
+        segments.push(options.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO
+          ? applyRouteSimulationCorrection(routeName, segmentPoints, segments.length + 1)
+          : segmentPoints);
       }
     }
     if (!segments.length) {
-      segments.push(applyRouteSimulationCorrection(routeName, preparedPoints, 1));
+      segments.push(options.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO
+        ? applyRouteSimulationCorrection(routeName, preparedPoints, 1)
+        : preparedPoints);
     }
     return {
       routeName,
       stopCount: getOperationalPointsInRoute(routeName).length,
       segmentCount: segments.length,
       segments,
+      pathCoordinates,
+      totalDistanceMeters: Number(measureCoordinatePathDistance(pathCoordinates).toFixed(1)),
       snappedPointCount: preparedPoints.filter((point) => point.snappedToPath).length,
+    };
+  }
+
+  function buildOrderedDrawnPathCoordinateIndices(routeCoordinates, stops, toleranceMeters = 360) {
+    if (!Array.isArray(routeCoordinates) || routeCoordinates.length < 2 || !Array.isArray(stops) || stops.length < 2) {
+      return [];
+    }
+    const candidateSets = stops.map((stop) => {
+      const candidates = routeCoordinates
+        .map((coordinate, index) => ({
+          index,
+          distanceMeters: distanceInMeters(coordinate, stop),
+        }))
+        .filter((candidate) => candidate.distanceMeters <= toleranceMeters);
+      if (candidates.length) {
+        return candidates;
+      }
+      const nearest = findNearestCoordinateIndex(routeCoordinates, stop);
+      return nearest.index >= 0 ? [nearest] : [];
+    });
+    if (candidateSets.some((candidates) => !candidates.length)) {
+      return [];
+    }
+
+    let states = candidateSets[0].map((candidate) => ({
+      ...candidate,
+      cost: candidate.distanceMeters,
+      previous: null,
+    }));
+    for (let stopIndex = 1; stopIndex < candidateSets.length; stopIndex += 1) {
+      const nextStates = [];
+      candidateSets[stopIndex].forEach((candidate) => {
+        let bestPrevious = null;
+        states.forEach((state) => {
+          if (state.index >= candidate.index) {
+            return;
+          }
+          const transitionPenalty = (candidate.index - state.index) * 0.0005;
+          const cost = state.cost + candidate.distanceMeters + transitionPenalty;
+          if (!bestPrevious || cost < bestPrevious.cost) {
+            bestPrevious = { state, cost };
+          }
+        });
+        if (bestPrevious) {
+          nextStates.push({
+            ...candidate,
+            cost: bestPrevious.cost,
+            previous: bestPrevious.state,
+          });
+        }
+      });
+      if (!nextStates.length) {
+        return [];
+      }
+      states = nextStates;
+    }
+
+    let current = states.reduce((best, state) => (!best || state.cost < best.cost ? state : best), null);
+    const indices = [];
+    while (current) {
+      indices.unshift(current.index);
+      current = current.previous;
+    }
+    return indices.length === stops.length ? indices : [];
+  }
+
+  function buildDrawnPathCoordinateGroups(routeCoordinates, stops) {
+    if (!Array.isArray(routeCoordinates) || routeCoordinates.length < 2) {
+      return [];
+    }
+    const normalizedStops = (Array.isArray(stops) ? stops : [])
+      .map((stop) => {
+        const coordinate = getSimulationStopCoordinate(stop);
+        return {
+          ...stop,
+          lat: coordinate.lat,
+          lng: coordinate.lng,
+        };
+      })
+      .filter((stop) => Number.isFinite(stop?.lat) && Number.isFinite(stop?.lng));
+    if (normalizedStops.length < 2) {
+      return [];
+    }
+
+    const coordinateOrders = [routeCoordinates, routeCoordinates.slice().reverse()];
+    for (const orderedCoordinates of coordinateOrders) {
+      const indices = buildOrderedDrawnPathCoordinateIndices(orderedCoordinates, normalizedStops);
+      if (indices.length !== normalizedStops.length) {
+        continue;
+      }
+      const groups = [];
+      for (let index = 0; index < indices.length - 1; index += 1) {
+        const group = orderedCoordinates.slice(indices[index], indices[index + 1] + 1);
+        if (group.length < 2) {
+          break;
+        }
+        groups.push(group);
+      }
+      if (groups.length === normalizedStops.length - 1) {
+        return groups;
+      }
+    }
+    return [];
+  }
+
+  function buildDrawnRouteSimulationChunk(segment, segmentIndex, routeCoordinates, averageSpeedKmh) {
+    const coordinateGroups = buildDrawnPathCoordinateGroups(routeCoordinates, segment);
+    if (coordinateGroups.length < Math.max(1, segment.length - 1)) {
+      throw new Error(`그린 경로에서 시뮬레이션 구간 ${segmentIndex}의 선형을 확인하지 못했습니다.`);
+    }
+    const coordinates = flattenCoordinateGroups(coordinateGroups);
+    const distanceMeters = Number(Math.max(0, measureCoordinatePathDistance(coordinates)).toFixed(1));
+    const speed = Number(averageSpeedKmh);
+    const driveSeconds = speed > 0 && distanceMeters > 0
+      ? Math.round((distanceMeters / 1000 / speed) * 3600)
+      : 0;
+    const origin = segment[0];
+    const destination = segment[segment.length - 1];
+    return {
+      chunkIndex: Number(segmentIndex || 1),
+      originParam: `${origin.lng},${origin.lat}`,
+      destinationParam: `${destination.lng},${destination.lat}`,
+      waypointsParam: segment.slice(1, -1).map((point) => `${point.lng},${point.lat}`).join("|"),
+      attempts: 0,
+      distanceMeters,
+      driveSeconds,
+      sectionCount: 1,
+      coordinates,
+      stops: segment.map((point) => ({
+        name: point.name,
+        lat: point.lat,
+        lng: point.lng,
+        originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
+        originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
+        snappedLat: point.lat,
+        snappedLng: point.lng,
+        snappedToPath: Boolean(point.snappedToPath),
+        snapDistanceMeters: point.snapDistanceMeters == null ? null : Number(point.snapDistanceMeters),
+        isVirtual: point.isVirtual === true,
+        isSimulationCorrection: point.isSimulationCorrection === true,
+        pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+        routeStopIndex: Number.isFinite(point.routeStopIndex) ? Number(point.routeStopIndex) : null,
+        requestedOrder: Number.isFinite(point.requestedOrder) ? Number(point.requestedOrder) : null,
+      })),
+    };
+  }
+
+  function buildDrawnRouteTimeSimulationResponse(routePayload, departureSlots, options) {
+    const routes = routePayload.map((route) => {
+      const researchProfile = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, options);
+      const simulations = departureSlots.map((slot) => {
+        const chunks = route.segments.map((segment, index) => buildDrawnRouteSimulationChunk(
+          segment,
+          index + 1,
+          route.pathCoordinates,
+          researchProfile.regionAverageSpeedKmh
+        ));
+        const driveSeconds = chunks.reduce((sum, chunk) => sum + Number(chunk.driveSeconds || 0), 0);
+        const distanceMeters = Number(chunks.reduce((sum, chunk) => sum + Number(chunk.distanceMeters || 0), 0).toFixed(1));
+        return {
+          label: slot.label,
+          departureTime: slot.departureTime,
+          driveSeconds,
+          dwellSecondsTotal: 0,
+          totalSeconds: driveSeconds,
+          distanceMeters,
+          chunks,
+        };
+      });
+      return {
+        routeName: route.routeName,
+        stopCount: route.stopCount,
+        segmentCount: route.segmentCount,
+        simulations,
+      };
+    });
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      departureSlots,
+      routes,
     };
   }
 
@@ -5390,7 +5603,9 @@
     const rawDriveSeconds = Math.round(simulation.chunks.reduce((sum, item) => sum + Number(item.driveSeconds || 0), 0));
     const baseDriveSeconds = rawDriveSeconds;
     const busDelaySeconds = Math.round(baseDriveSeconds * (Number(simulation.researchProfile.busDelayPercent || 0) / 100));
-    simulation.researchProfile.kakaoDriveSeconds = rawDriveSeconds;
+    const isDrawnPathMode = simulation.researchProfile.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
+    simulation.researchProfile.drawnPathDriveSeconds = isDrawnPathMode ? rawDriveSeconds : 0;
+    simulation.researchProfile.kakaoDriveSeconds = isDrawnPathMode ? 0 : rawDriveSeconds;
     simulation.researchProfile.baseAppliedDriveSeconds = Math.round(baseDriveSeconds);
     simulation.researchProfile.busDelaySeconds = Math.round(busDelaySeconds);
     simulation.researchProfile.appliedDriveSeconds = Math.round(baseDriveSeconds + busDelaySeconds);
@@ -5409,10 +5624,13 @@
       route.simulations = (route.simulations || []).map((item) => {
         const researchProfile = buildRouteResearchProfile(route.routeName, item.distanceMeters, options);
         const baseDriveSeconds = Number(item.driveSeconds || 0);
+        const isDrawnPathMode = options.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
         const busDelaySeconds = Math.round(baseDriveSeconds * (Number(researchProfile.busDelayPercent || 0) / 100));
         const adjustedDriveSeconds = baseDriveSeconds + busDelaySeconds;
         const adjustedDwellSeconds = Number(researchProfile.totalDwellSeconds || 0);
-        researchProfile.kakaoDriveSeconds = Math.round(Number(item.driveSeconds || 0));
+        researchProfile.pathMode = options.pathMode || ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
+        researchProfile.drawnPathDriveSeconds = isDrawnPathMode ? Math.round(baseDriveSeconds) : 0;
+        researchProfile.kakaoDriveSeconds = isDrawnPathMode ? 0 : Math.round(Number(item.driveSeconds || 0));
         researchProfile.baseAppliedDriveSeconds = Math.round(baseDriveSeconds);
         researchProfile.busDelaySeconds = Math.round(busDelaySeconds);
         researchProfile.appliedDriveSeconds = Math.round(adjustedDriveSeconds);
@@ -5538,7 +5756,7 @@
 
   function buildRouteTimeSimulationExcelWorkbook(report) {
     const summaryRows = [
-      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "kakao_drive_minutes", "kakao_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km"],
+      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "base_drive_minutes", "base_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km"],
     ];
     const stopRows = [
       ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "applied_dwell_time", "is_terminal"],
@@ -5548,7 +5766,9 @@
     ];
 
     report.rows.forEach((row) => {
-      const kakaoDriveSeconds = Number(row.researchProfile?.kakaoDriveSeconds || 0);
+      const baseDriveSeconds = row.researchProfile?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN
+        ? Number(row.researchProfile?.drawnPathDriveSeconds || 0)
+        : Number(row.researchProfile?.kakaoDriveSeconds || 0);
       const dwellSeconds = Number(row.dwellSecondsTotal || 0);
       const busDelaySeconds = Number(row.researchProfile?.busDelaySeconds || 0);
       const totalSeconds = Number(row.totalSeconds || 0);
@@ -5558,8 +5778,8 @@
         row.departureTime,
         Number(row.stopCount || 0),
         Number(row.segmentCount || 0),
-        Number((kakaoDriveSeconds / 60).toFixed(1)),
-        formatSimulationDurationLabel(kakaoDriveSeconds),
+        Number((baseDriveSeconds / 60).toFixed(1)),
+        formatSimulationDurationLabel(baseDriveSeconds),
         Number((dwellSeconds / 60).toFixed(1)),
         formatSimulationDurationLabel(dwellSeconds),
         Number((busDelaySeconds / 60).toFixed(1)),
@@ -5644,11 +5864,15 @@
   }
 
   function buildRouteTimeSimulationRowsHtml(route) {
-    return (route.simulations || []).map((item) => `
+    return (route.simulations || []).map((item) => {
+      const baseDriveSeconds = item.researchProfile?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN
+        ? Number(item.researchProfile?.drawnPathDriveSeconds || 0)
+        : Number(item.researchProfile?.kakaoDriveSeconds || 0);
+      return `
       <tr class="simulation-row">
         <td>${escapeHtml(item.label)}</td>
         <td>${escapeHtml(item.departureTime)}</td>
-        <td>${escapeHtml(formatSimulationDurationLabel(item.researchProfile?.kakaoDriveSeconds || 0))}</td>
+        <td>${escapeHtml(formatSimulationDurationLabel(baseDriveSeconds))}</td>
         <td>${escapeHtml(formatSimulationDurationLabel(item.dwellSecondsTotal))}</td>
         <td>${escapeHtml(formatSimulationDurationLabel(item.researchProfile?.busDelaySeconds || 0))}</td>
         <td><strong>${escapeHtml(formatSimulationDurationLabel(item.totalSeconds))}</strong></td>
@@ -5664,7 +5888,8 @@
           ${buildStopTimelinePanelHtml(item.stopTimeline || [])}
         </td>
       </tr>
-    `).join("");
+    `;
+    }).join("");
   }
 
   function buildRouteTimeSimulationLogText(simulation) {
@@ -5684,6 +5909,7 @@
       `총 거리: ${(Number(simulation.distanceMeters || 0) / 1000).toFixed(2)}km`,
       "",
       "[연구 기반 적용값]",
+      `경로 기준: ${research.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO ? "카카오 미래 길찾기 경로" : "사용자 KML 그린 경로 고정"}`,
       `기준 날짜: ${research.selectedDate || "-"}`,
       `요일 유형: ${research.dayTypeLabel || "-"}`,
       `자동 감지 권역: ${research.region || "-"}`,
@@ -5693,11 +5919,11 @@
       `탑승자 입력 정류장: ${research.ridershipStopCount || 0}개 / 총합 ${Number(research.totalRidership || 0).toLocaleString("ko-KR")}`,
       `가상정류장 수: ${research.virtualStopCount || 0}개`,
       `권역 속도 기준 주행시간: ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
-      `기준 주행시간: 카카오 미래 길찾기 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)} / 권역속도 참고값 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
+      `기준 주행시간: ${research.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO ? `카카오 미래 길찾기 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)}` : `KML 선형거리 / 권역 평균속도 ${formatSimulationDurationLabel(research.drawnPathDriveSeconds || 0)}`} / 권역속도 참고값 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
       `버스지체보정 추가시간: ${formatSimulationDurationLabel(research.busDelaySeconds || 0)}`,
       `최종 적용 주행시간: 기준 주행시간 + 버스지체보정 = ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
       `최종 적용 정차보정: 마지막 정류장 제외, 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
-      `적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정`,
+      `적용식: ${research.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO ? "(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률))" : "(KML 그린 경로 거리 / 권역 평균 버스속도 x (1 + 버스지체보정률))"} + 정류장별 정차보정`,
       "",
       "[구간별 계산 로그]",
     ];
@@ -5767,6 +5993,7 @@
   }
 
   function buildRouteTimeSimulationResultsWindowHtml(report) {
+    const isDrawnPathMode = report.options?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
     const routeCards = (report.routes || []).map((route) => `
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -5828,7 +6055,8 @@
       <h1>운행시간 시뮬레이션 결과</h1>
       <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 시간대 ${escapeHtml(String(report.summary.timeSlotCount))}개 / 결과 ${escapeHtml(String(report.summary.simulationRowCount))}행</p>
       <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
-      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 계산식: <code>(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정</code></p>
+      <p class="meta">경로 기준: ${isDrawnPathMode ? "사용자 KML 그린 경로 고정 · 카카오 경로 재탐색 없음" : "카카오 미래 길찾기 경로"}</p>
+      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 계산식: <code>${isDrawnPathMode ? "(KML 그린 경로 거리 / 권역 평균 버스속도 x (1 + 버스지체보정률)) + 정류장별 정차보정" : "(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정"}</code></p>
     </div>
     <div class="cards">
       <div class="card stat"><strong>${escapeHtml(String(report.summary.routeCount))}</strong><p>분석 노선</p></div>
@@ -5840,7 +6068,7 @@
         <button class="primary" type="button" id="download-simulation-csv-button">엑셀 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <p class="note" style="margin-top:12px;">결과는 카카오 미래 길찾기 주행시간에 버스지체보정률과 정류장별 승객 비중 기반 정차보정을 함께 적용한 값입니다. 권역 평균 버스속도는 계산 로그의 참고 기준으로 남기며, 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
+      <p class="note" style="margin-top:12px;">${isDrawnPathMode ? "결과는 사용자가 그린 KML 선형의 정류장 구간별 거리에 권역 평균 버스속도와 버스지체보정률을 적용한 값입니다." : "결과는 카카오 미래 길찾기 주행시간에 버스지체보정률을 적용한 값입니다."} 정류장별 승객 비중 기반 정차보정을 함께 적용하며, 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
     </div>
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
@@ -5905,6 +6133,7 @@
     routeTimeSettingsWindowRef = null;
     routeTimeResultsWindowRef = null;
     routeTimeInlineWindowMode = "";
+    routeTimeInlineFrameEl = null;
   }
 
   function openRouteTimeInlineWindow(html, title, mode = "generic") {
@@ -5916,11 +6145,35 @@
     frame.setAttribute("aria-label", title);
     routeTimeInlineModalTitleEl && (routeTimeInlineModalTitleEl.textContent = title);
     routeTimeInlineModalBodyEl.replaceChildren(frame);
+    routeTimeInlineFrameEl = frame;
     routeTimeInlineModalEl.classList.remove("is-hidden");
     routeTimeInlineModalEl.setAttribute("aria-hidden", "false");
     routeTimeInlineWindowMode = String(mode || "generic");
     frame.srcdoc = String(html || "").replace(/\bwindow\.opener\b/g, "window.parent");
     return frame.contentWindow;
+  }
+
+  function runRouteTimeSimulationInHost(groupKey, options) {
+    const run = () => window.__wonderLinxRouteTime.run(groupKey, options);
+    if (!routeTimeInlineWindowMode || !routeTimeInlineFrameEl) {
+      run();
+      return;
+    }
+    let attempts = 0;
+    const waitForConsoleApi = () => {
+      const consoleWindow = routeTimeResultsWindowRef;
+      if (consoleWindow && typeof consoleWindow.__setSimulationConsoleState === "function") {
+        run();
+        return;
+      }
+      attempts += 1;
+      if (attempts >= 40) {
+        run();
+        return;
+      }
+      window.setTimeout(waitForConsoleApi, 50);
+    };
+    waitForConsoleApi();
   }
 
   function startRouteTimeSimulationFromSettings(groupKey, options) {
@@ -5932,7 +6185,9 @@
     const pendingHtml = buildRouteTimeSimulationPendingWindowHtml({
       routeCount: selectedRouteNames.length,
       timeSlotCount: estimatedSlotCount,
-      requestCount: selectedRouteNames.length * estimatedSlotCount,
+      requestCount: normalizedOptions.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN
+        ? 0
+        : selectedRouteNames.length * estimatedSlotCount,
       activeLabel: "실행 요청 접수",
       statusText: "시뮬레이션 세션을 초기화하는 중입니다.",
       progress: 6,
@@ -5954,7 +6209,7 @@
       resultsWindow.document.close();
       resultsWindow.focus();
     }
-    window.__wonderLinxRouteTime.run(groupKey, options);
+    runRouteTimeSimulationInHost(groupKey, options);
   }
 
   function openRouteTimeSimulationSettingsWindow(groupKey) {
@@ -6054,6 +6309,7 @@
 
   function buildRouteTimeSimulationMapWindowHtml(reportId, routeName, simulation) {
     const appKey = String(config.appKey || "");
+    const isDrawnPathMode = simulation?.researchProfile?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
     const payload = getRouteTimeSimulationMapWindowPayload(reportId, routeName, simulation?.departureTime || "") || {
       reportId,
       routeName,
@@ -6136,10 +6392,10 @@
   <div class="layout">
     <aside class="side">
       <h1>${escapeHtml(routeName)}</h1>
-      <p>출발시각 ${escapeHtml(simulation?.departureTime || "-")} 기준입니다. 각 구간 카드에서 원본구간과 분석구간을 비교하고, 차이가 큰 구간만 재설정할 수 있습니다.</p>
+      <p>출발시각 ${escapeHtml(simulation?.departureTime || "-")} 기준입니다. ${isDrawnPathMode ? "사용자가 그린 KML 선형을 그대로 표시하고, 같은 선형으로 거리를 계산했습니다." : "각 구간 카드에서 원본구간과 분석구간을 비교하고, 차이가 큰 구간만 재설정할 수 있습니다."}</p>
       <div class="legend">
         <div class="legend-item"><span class="line dashed" style="border-top-color:#94a3b8;"></span><span>원본 전체 경로</span></div>
-        <div class="legend-item"><span class="line" style="border-top-color:#111827;"></span><span>분석 전체 경로</span></div>
+        <div class="legend-item"><span class="line" style="border-top-color:#111827;"></span><span>${isDrawnPathMode ? "계산 기준 경로(그린 경로 고정)" : "분석 전체 경로"}</span></div>
         <div class="legend-item"><span class="line" style="border-top-color:#2563eb;"></span><span>원본구간</span></div>
         <div class="legend-item"><span class="line" style="border-top-color:#111827;border-top-width:7px;opacity:.55;"></span><span>분석구간</span></div>
       </div>
@@ -6148,7 +6404,7 @@
         <label class="toggle-item"><input id="toggle-analysis-path" type="checkbox" checked><span class="swatch" style="background:#111827;"></span>분석 전체 경로</label>
         <label class="toggle-item"><input id="toggle-sections" type="checkbox" checked><span class="swatch" style="background:#2563eb;"></span>구간별 경로</label>
       </div>
-      <div id="section-status" class="status">문제가 있는 분석구간에 <strong>강제 포인트 추가</strong>로 점을 찍고, 숫자를 조정한 뒤 <strong>경로 재설정</strong>을 누르세요.</div>
+      <div id="section-status" class="status">${isDrawnPathMode ? "경로 고정 모드에서는 KML 선형을 기준으로만 거리와 시간을 계산합니다." : "문제가 있는 분석구간에 <strong>강제 포인트 추가</strong>로 점을 찍고, 숫자를 조정한 뒤 <strong>경로 재설정</strong>을 누르세요."}</div>
       <div class="section-list">
         ${payload.sections.map((section, index) => `
           <div class="section-card" data-section-card="${index}">
@@ -6188,9 +6444,9 @@
             </div>
             <div class="order-editor" data-order-editor="${index}"></div>
             <div class="actions">
-              <button type="button" data-force-point-section="${index}">강제 포인트 추가</button>
+              ${isDrawnPathMode ? "" : `<button type="button" data-force-point-section="${index}">강제 포인트 추가</button>
               <button class="primary" type="button" data-recalc-section="${index}">경로 재설정</button>
-              <button type="button" data-clear-point-section="${index}">포인트 초기화</button>
+              <button type="button" data-clear-point-section="${index}">포인트 초기화</button>`}
               <button type="button" data-focus-section="${index}">이 구간만 보기</button>
             </div>
           </div>
@@ -6968,21 +7224,24 @@
 
   async function runRouteTimeSimulation(groupKey, options = {}) {
     const normalizedOptions = normalizeRouteTimeSimulationOptions(options);
+    const isDrawnPathMode = normalizedOptions.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
     const selectedRouteNames = Array.isArray(options.selectedRouteNames)
       ? options.selectedRouteNames.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
     if (!selectedRouteNames.length) {
       throw new Error("운행시간 시뮬레이션할 노선을 하나 이상 선택하세요.");
     }
-    const routePayload = selectedRouteNames.map(buildRouteTimeSimulationSegments);
+    const routePayload = selectedRouteNames.map((routeName) => buildRouteTimeSimulationSegments(routeName, normalizedOptions));
     const departureSlots = buildSimulationDepartureSlots(normalizedOptions);
     if (!departureSlots.length) {
       throw new Error("시뮬레이션 시간대를 만들지 못했습니다. 시작 시각과 종료 시각을 확인하세요.");
     }
-    const estimatedRequests = routePayload.reduce(
-      (sum, route) => sum + ((Array.isArray(route.segments) ? route.segments.length : 0) * departureSlots.length),
-      0
-    );
+    const estimatedRequests = isDrawnPathMode
+      ? 0
+      : routePayload.reduce(
+        (sum, route) => sum + ((Array.isArray(route.segments) ? route.segments.length : 0) * departureSlots.length),
+        0
+      );
     let fetchHeartbeat = null;
     let fetchHeartbeatIndex = 0;
     const heartbeatMessages = [
@@ -7005,9 +7264,11 @@
       currentChunk: "-",
       progress: 10,
     });
-    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / 예상 호출 ${estimatedRequests}회`);
+    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / ${isDrawnPathMode ? "카카오 호출 없이 KML 선형으로 계산" : `예상 카카오 호출 ${estimatedRequests}회`}`);
     appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분 / 버스지체보정=${Number(normalizedOptions.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`);
-    appendRouteTimeSimulationLog(`적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)`);
+    appendRouteTimeSimulationLog(isDrawnPathMode
+      ? "적용식: (KML 그린 경로 거리 / 권역 평균 버스속도) x (1 + 버스지체보정률) + 정류장별 정차보정"
+      : "적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)");
     routePayload.forEach((route, routeIndex) => {
       const routeResearch = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, normalizedOptions);
       appendRouteTimeSimulationLog(
@@ -7036,37 +7297,48 @@
       }
     }
     setRouteTimeSimulationConsoleState({
-      activeLabel: "Dispatch Ready",
-      statusText: "카카오 미래 길찾기 요청 배치를 전송할 준비가 완료되었습니다.",
+      activeLabel: isDrawnPathMode ? "Path Locked" : "Dispatch Ready",
+      statusText: isDrawnPathMode
+        ? "사용자 KML 경로를 고정하고 선형 거리 기반 계산을 준비하고 있습니다."
+        : "카카오 미래 길찾기 요청 배치를 전송할 준비가 완료되었습니다.",
       currentRoute: routePayload[0]?.routeName || "-",
       currentSlot: departureSlots[0]?.label || "-",
       currentChunk: routePayload[0]?.segments?.length ? `1 / ${routePayload[0].segments.length}` : "-",
       progress: 18,
     });
     setStatus(`운행시간 시뮬레이션을 시작합니다. 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개`, false);
-    appendRouteTimeSimulationLog("카카오 미래 길찾기 배치 요청을 전송했습니다.");
+    appendRouteTimeSimulationLog(isDrawnPathMode
+      ? "사용자 KML 경로를 고정했습니다. 카카오 경로 재탐색 없이 계산합니다."
+      : "카카오 미래 길찾기 배치 요청을 전송했습니다.");
     setRouteTimeSimulationConsoleState({
-      activeLabel: "Dispatching Kakao Jobs",
-      statusText: "청크별 미래 길찾기 요청을 전송하고 응답을 대기하는 중입니다.",
+      activeLabel: isDrawnPathMode ? "Calculating Drawn Path" : "Dispatching Kakao Jobs",
+      statusText: isDrawnPathMode
+        ? "KML 경로의 정류장 구간별 거리와 운행시간을 계산하는 중입니다."
+        : "청크별 미래 길찾기 요청을 전송하고 응답을 대기하는 중입니다.",
       progress: 24,
     });
     try {
-      fetchHeartbeat = window.setInterval(() => {
-        const nextProgress = 32 + (fetchHeartbeatIndex % 6) * 8;
-        setRouteTimeSimulationConsoleState({
-          activeLabel: "Collecting Route Telemetry",
-          statusText: heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length],
-          progress: Math.min(82, nextProgress),
+      let responsePayload;
+      if (isDrawnPathMode) {
+        responsePayload = buildDrawnRouteTimeSimulationResponse(routePayload, departureSlots, normalizedOptions);
+      } else {
+        fetchHeartbeat = window.setInterval(() => {
+          const nextProgress = 32 + (fetchHeartbeatIndex % 6) * 8;
+          setRouteTimeSimulationConsoleState({
+            activeLabel: "Collecting Route Telemetry",
+            statusText: heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length],
+            progress: Math.min(82, nextProgress),
+          });
+          appendRouteTimeSimulationLog(heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length]);
+          fetchHeartbeatIndex += 1;
+        }, 1400);
+        responsePayload = await requestRouteTimeSimulation({
+          groupKey,
+          options: normalizedOptions,
+          departureSlots,
+          routes: routePayload,
         });
-        appendRouteTimeSimulationLog(heartbeatMessages[fetchHeartbeatIndex % heartbeatMessages.length]);
-        fetchHeartbeatIndex += 1;
-      }, 1400);
-      const responsePayload = await requestRouteTimeSimulation({
-        groupKey,
-        options: normalizedOptions,
-        departureSlots,
-        routes: routePayload,
-      });
+      }
       if (fetchHeartbeat) {
         window.clearInterval(fetchHeartbeat);
         fetchHeartbeat = null;
