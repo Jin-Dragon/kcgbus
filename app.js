@@ -6511,10 +6511,34 @@
       statusEl.classList.toggle("error", Boolean(isError));
     }
 
+    function createKakaoLatLng(lat, lng) {
+      const normalizedLat = Number(lat);
+      const normalizedLng = Number(lng);
+      const LatLng = window.kakao?.maps?.LatLng;
+      if (typeof LatLng !== "function") {
+        throw new Error("카카오 지도 SDK의 LatLng 좌표 생성기를 사용할 수 없습니다.");
+      }
+      try {
+        return new LatLng(normalizedLat, normalizedLng);
+      } catch (constructorError) {
+        try {
+          const coordinate = LatLng(normalizedLat, normalizedLng);
+          if (coordinate) {
+            debugLog('LatLng constructor fallback applied');
+            return coordinate;
+          }
+        } catch (factoryError) {
+          debugLog('LatLng factory fallback failed: ' + String(factoryError.message || factoryError));
+        }
+        throw constructorError;
+      }
+    }
+
     function toLatLngPath(coordinates) {
       return (Array.isArray(coordinates) ? coordinates : []).map((coordinate) => {
-        bounds.extend(new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng));
-        return new window.kakao.maps.LatLng(coordinate.lat, coordinate.lng);
+        const position = createKakaoLatLng(coordinate.lat, coordinate.lng);
+        bounds?.extend(position);
+        return position;
       });
     }
 
@@ -6551,7 +6575,7 @@
         if (!from || !to) continue;
         const angle = Math.atan2(to.lat - from.lat, to.lng - from.lng) * (180 / Math.PI);
         overlays.push(new window.kakao.maps.CustomOverlay({
-          position: new window.kakao.maps.LatLng(to.lat, to.lng),
+          position: createKakaoLatLng(to.lat, to.lng),
           yAnchor: 0.5,
           xAnchor: 0.5,
           content: '<div class="dir-arrow" style="transform:rotate(' + angle + 'deg);">▲</div>',
@@ -6565,7 +6589,7 @@
         return null;
       }
       return new window.kakao.maps.CustomOverlay({
-        position: new window.kakao.maps.LatLng(stop.lat, stop.lng),
+        position: createKakaoLatLng(stop.lat, stop.lng),
         yAnchor: 0.5,
         xAnchor: 0.5,
         content: '<div class="stop-pin" style="border-color:' + color + ';color:' + color + ';">' + String(stopIndex + 1) + '</div>',
@@ -6727,7 +6751,7 @@
       }
       container.innerHTML = '';
       map = new window.kakao.maps.Map(container, {
-        center: new window.kakao.maps.LatLng(37.5665, 126.9780),
+        center: createKakaoLatLng(37.5665, 126.9780),
         level: 6,
       });
       bounds = typeof map.getBounds === "function" ? map.getBounds() : null;
@@ -6795,7 +6819,7 @@
         stopMarkers[index].forEach((overlay) => overlay.setMap(map));
         const labelPoint = section.stops[0] || section.stops[section.stops.length - 1];
         if (labelPoint) {
-          const position = new window.kakao.maps.LatLng(labelPoint.lat, labelPoint.lng);
+          const position = createKakaoLatLng(labelPoint.lat, labelPoint.lng);
           bounds?.extend(position);
           const label = new window.kakao.maps.CustomOverlay({
             position,
@@ -7082,7 +7106,39 @@
 
     syncPendingForcedPointsFromPayload();
     renderSectionOrderEditors();
-    renderMap();
+
+    function renderMapWhenReady(attempt = 0) {
+      const maps = window.kakao?.maps;
+      const isReady = maps
+        && typeof maps.Map === "function"
+        && typeof maps.LatLng === "function";
+      if (!isReady) {
+        if (attempt >= 40) {
+          const message = "카카오 지도 SDK 좌표 기능을 준비하지 못했습니다.";
+          debugLog(message);
+          setStatus(message, true);
+          return;
+        }
+        if (attempt === 0 || attempt % 10 === 0) {
+          debugLog('waiting for kakao maps coordinate API');
+        }
+        window.setTimeout(() => renderMapWhenReady(attempt + 1), 100);
+        return;
+      }
+      try {
+        renderMap();
+      } catch (error) {
+        if (attempt >= 40) {
+          debugLog('map render failed: ' + String(error.message || error));
+          setStatus(error.message || "카카오 지도 표시 중 오류가 발생했습니다.", true);
+          return;
+        }
+        debugLog('map render retry: ' + String(error.message || error));
+        window.setTimeout(() => renderMapWhenReady(attempt + 1), 100);
+      }
+    }
+
+    renderMapWhenReady();
   </script>
 </body>
 </html>`;
