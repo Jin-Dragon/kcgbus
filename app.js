@@ -6153,6 +6153,28 @@
     return frame.contentWindow;
   }
 
+  function openRouteTimePopupWindow(html, windowName, features) {
+    const popup = window.open("", windowName, features);
+    if (!popup) {
+      return null;
+    }
+    try {
+      popup.document.open();
+      popup.document.write(String(html || ""));
+      popup.document.close();
+      popup.focus();
+      return popup;
+    } catch (error) {
+      try {
+        popup.close();
+      } catch (_closeError) {
+        // Ignore cleanup failures from a blocked or closed popup.
+      }
+      setStatus(error.message || "새 창을 열지 못했습니다.", true);
+      return null;
+    }
+  }
+
   function runRouteTimeSimulationInHost(groupKey, options) {
     const run = () => window.__wonderLinxRouteTime.run(groupKey, options);
     if (!routeTimeInlineWindowMode || !routeTimeInlineFrameEl) {
@@ -6194,7 +6216,11 @@
     });
     const resultsWindow = routeTimeInlineWindowMode
       ? null
-      : window.open("", "route-time-simulation-console", "width=1320,height=940,resizable=yes,scrollbars=yes");
+      : openRouteTimePopupWindow(
+        pendingHtml,
+        "route-time-simulation-console",
+        "width=1320,height=940,resizable=yes,scrollbars=yes"
+      );
     if (!resultsWindow) {
       routeTimeResultsWindowRef = openRouteTimeInlineWindow(pendingHtml, "운행시간 시뮬레이션 실행 콘솔", "console");
       if (!routeTimeResultsWindowRef) {
@@ -6204,10 +6230,6 @@
       setStatus("Codex 인앱 창에서 운행시간 시뮬레이션을 실행 중입니다.", false);
     } else {
       routeTimeResultsWindowRef = resultsWindow;
-      resultsWindow.document.open();
-      resultsWindow.document.write(pendingHtml);
-      resultsWindow.document.close();
-      resultsWindow.focus();
     }
     runRouteTimeSimulationInHost(groupKey, options);
   }
@@ -6221,26 +6243,27 @@
       routeItems,
       normalizeRouteTimeSimulationOptions()
     );
+    const settingsWindow = openRouteTimePopupWindow(
+      settingsHtml,
+      `route-time-simulation-settings-${groupKey}`,
+      "width=980,height=860,resizable=yes,scrollbars=yes"
+    );
+    if (settingsWindow) {
+      routeTimeSettingsWindowRef = settingsWindow;
+      setStatus("새 창에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
+      return;
+    }
     const inlineWindow = openRouteTimeInlineWindow(
       settingsHtml,
       `${groupLabel} 운행시간 시뮬레이션`,
       "settings"
     );
-    if (inlineWindow) {
-      routeTimeSettingsWindowRef = inlineWindow;
-      setStatus("Codex 인앱 창에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
-      return;
-    }
-    const settingsWindow = window.open("", `route-time-simulation-settings-${groupKey}`, "width=980,height=860,resizable=yes,scrollbars=yes");
-    if (!settingsWindow) {
+    if (!inlineWindow) {
       setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
       return;
     }
-    routeTimeSettingsWindowRef = settingsWindow;
-    settingsWindow.document.open();
-    settingsWindow.document.write(settingsHtml);
-    settingsWindow.document.close();
-    settingsWindow.focus();
+    routeTimeSettingsWindowRef = inlineWindow;
+    setStatus("팝업이 차단되어 Codex 인앱 창에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
   }
 
   function appendRouteTimeSimulationLog(message, isError = false, replace = false) {
@@ -6290,7 +6313,11 @@
     const resultsHtml = buildRouteTimeSimulationResultsWindowHtml(report);
     const resultsWindow = routeTimeInlineWindowMode
       ? null
-      : window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
+      : openRouteTimePopupWindow(
+        resultsHtml,
+        "route-time-simulation-results",
+        "width=1560,height=980,resizable=yes,scrollbars=yes"
+      );
     if (!resultsWindow) {
       routeTimeResultsWindowRef = openRouteTimeInlineWindow(resultsHtml, "운행시간 시뮬레이션 결과", "results");
       if (!routeTimeResultsWindowRef) {
@@ -6300,10 +6327,6 @@
       setStatus("Codex 인앱 창에서 운행시간 시뮬레이션 결과를 열었습니다.", false);
       return true;
     }
-    resultsWindow.document.open();
-    resultsWindow.document.write(resultsHtml);
-    resultsWindow.document.close();
-    resultsWindow.focus();
     return true;
   }
 
@@ -6458,7 +6481,6 @@
     </main>
   </div>
   <div class="debug-panel" id="route-time-debug"><strong>경로보기 디버그</strong><div id="route-time-debug-lines"></div></div>
-  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${escapeHtml(appKey)}"></script>
   <script>
     const debugLinesEl = document.getElementById("route-time-debug-lines");
     function debugLog(message) {
@@ -6484,6 +6506,30 @@
       const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason || 'unknown rejection');
       debugLog('unhandledrejection: ' + reason);
     });
+
+    function loadKakaoMapSdk() {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        const sdkAppKey = ${JSON.stringify(appKey)};
+        if (!sdkAppKey) {
+          reject(new Error('카카오 지도 JavaScript 키가 설정되지 않았습니다.'));
+          return;
+        }
+        script.async = true;
+        script.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + encodeURIComponent(sdkAppKey) + '&autoload=false';
+        script.onload = () => {
+          const maps = window.kakao?.maps;
+          if (!maps || typeof maps.load !== 'function') {
+            reject(new Error('카카오 지도 SDK 초기화 함수를 사용할 수 없습니다.'));
+            return;
+          }
+          maps.load(() => resolve(window.kakao));
+        };
+        script.onerror = () => reject(new Error('카카오 지도 SDK를 불러오지 못했습니다.'));
+        document.head.appendChild(script);
+      });
+    }
+
     debugLog('map window html loaded');
     let payload = ${JSON.stringify(payload)};
     debugLog('payload sections=' + String((payload.sections || []).length) + ', originalPath=' + String((payload.originalPath || []).length) + ', analysisPath=' + String((payload.analysisPath || []).length));
@@ -7138,7 +7184,15 @@
       }
     }
 
-    renderMapWhenReady();
+    loadKakaoMapSdk()
+      .then(() => {
+        debugLog('kakao maps SDK loaded / LatLng=' + String(typeof window.kakao?.maps?.LatLng));
+        renderMapWhenReady();
+      })
+      .catch((error) => {
+        debugLog('kakao maps SDK load failed: ' + String(error.message || error));
+        setStatus(error.message || '카카오 지도 SDK를 불러오지 못했습니다.', true);
+      });
   </script>
 </body>
 </html>`;
