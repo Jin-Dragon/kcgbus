@@ -6726,11 +6726,15 @@
         return;
       }
       container.innerHTML = '';
-      bounds = new window.kakao.maps.LatLngBounds();
       map = new window.kakao.maps.Map(container, {
         center: new window.kakao.maps.LatLng(37.5665, 126.9780),
         level: 6,
       });
+      bounds = typeof map.getBounds === "function" ? map.getBounds() : null;
+      if (!bounds || typeof bounds.extend !== "function" || typeof bounds.isEmpty !== "function") {
+        bounds = null;
+        debugLog('map bounds object unavailable; keeping default map view');
+      }
       debugLog('kakao map created');
 
       if (payload.originalPath.length >= 2) {
@@ -6792,7 +6796,7 @@
         const labelPoint = section.stops[0] || section.stops[section.stops.length - 1];
         if (labelPoint) {
           const position = new window.kakao.maps.LatLng(labelPoint.lat, labelPoint.lng);
-          bounds.extend(position);
+          bounds?.extend(position);
           const label = new window.kakao.maps.CustomOverlay({
             position,
             yAnchor: 1.8,
@@ -6805,7 +6809,7 @@
 
       applySectionState();
       debugLog('section state applied');
-      if (!bounds.isEmpty()) {
+      if (bounds && !bounds.isEmpty()) {
         map.setBounds(bounds, 40, 40, 40, 40);
         debugLog('bounds applied');
       } else {
