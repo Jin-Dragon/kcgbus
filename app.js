@@ -4831,10 +4831,6 @@
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
         return;
       }
-      const previous = normalizedPoints[normalizedPoints.length - 1];
-      if (previous && Math.abs(previous.lat - lat) < 0.000001 && Math.abs(previous.lng - lng) < 0.000001) {
-        return;
-      }
       normalizedPoints.push({
         name: point.name,
         lat,
@@ -4853,8 +4849,28 @@
       throw new Error(`노선 "${routeName}" 은(는) 지도에 그려진 경로가 없어 시뮬레이션할 수 없습니다.`);
     }
 
-    const preparedPoints = normalizedPoints.map((point) => {
-      const snapped = snapPointToRoutePathCoordinate(routeName, point);
+    const isDrawnPath = options.pathMode !== ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO;
+    if (isDrawnPath) {
+      const paths = getPathsInRoute(routeName);
+      for (let index = 1; index < paths.length; index += 1) {
+        const previous = paths[index - 1].coordinates;
+        const next = paths[index].coordinates;
+        if (!previous?.length || !next?.length || distanceInMeters(previous[previous.length - 1], next[0]) > 1) {
+          throw new Error(`노선 "${routeName}"의 경로 선들이 연결되지 않았습니다. 경로 연결과 진행 방향을 확인하세요.`);
+        }
+      }
+    }
+    // Match the entire itinerary once. Chunk boundaries must not restart route selection.
+    const drawnPathMatch = isDrawnPath ? matchDrawnRoutePath(pathCoordinates, normalizedPoints) : null;
+
+    const preparedPoints = normalizedPoints.map((point, index) => {
+      const projection = drawnPathMatch?.matches[index];
+      const snapped = projection ? {
+        candidateCoordinates: [projection.coordinate],
+        snappedToPath: true,
+        snapDistanceMeters: Number(projection.distanceMeters.toFixed(1)),
+        pathIndex: projection.segmentIndex,
+      } : snapPointToRoutePathCoordinate(routeName, point);
       return {
         ...point,
         candidateCoordinates: Array.isArray(snapped.candidateCoordinates) ? snapped.candidateCoordinates : [{ lat: point.lat, lng: point.lng }],
@@ -4888,113 +4904,152 @@
       pathCoordinates,
       totalDistanceMeters: Number(measureCoordinatePathDistance(pathCoordinates).toFixed(1)),
       snappedPointCount: preparedPoints.filter((point) => point.snappedToPath).length,
+      drawnPathMatch,
     };
   }
 
-  function buildOrderedDrawnPathCoordinateIndices(routeCoordinates, stops, toleranceMeters = 360) {
-    if (!Array.isArray(routeCoordinates) || routeCoordinates.length < 2 || !Array.isArray(stops) || stops.length < 2) {
-      return [];
-    }
-    const candidateSets = stops.map((stop) => {
-      const candidates = routeCoordinates
-        .map((coordinate, index) => ({
-          index,
-          distanceMeters: distanceInMeters(coordinate, stop),
-        }))
-        .filter((candidate) => candidate.distanceMeters <= toleranceMeters);
-      if (candidates.length) {
-        return candidates;
-      }
-      const nearest = findNearestCoordinateIndex(routeCoordinates, stop);
-      return nearest.index >= 0 ? [nearest] : [];
-    });
-    if (candidateSets.some((candidates) => !candidates.length)) {
-      return [];
-    }
-
-    let states = candidateSets[0].map((candidate) => ({
-      ...candidate,
-      cost: candidate.distanceMeters,
-      previous: null,
-    }));
-    for (let stopIndex = 1; stopIndex < candidateSets.length; stopIndex += 1) {
-      const nextStates = [];
-      candidateSets[stopIndex].forEach((candidate) => {
-        let bestPrevious = null;
-        states.forEach((state) => {
-          if (state.index >= candidate.index) {
-            return;
-          }
-          const transitionPenalty = (candidate.index - state.index) * 0.0005;
-          const cost = state.cost + candidate.distanceMeters + transitionPenalty;
-          if (!bestPrevious || cost < bestPrevious.cost) {
-            bestPrevious = { state, cost };
-          }
-        });
-        if (bestPrevious) {
-          nextStates.push({
-            ...candidate,
-            cost: bestPrevious.cost,
-            previous: bestPrevious.state,
-          });
-        }
-      });
-      if (!nextStates.length) {
-        return [];
-      }
-      states = nextStates;
-    }
-
-    let current = states.reduce((best, state) => (!best || state.cost < best.cost ? state : best), null);
-    const indices = [];
-    while (current) {
-      indices.unshift(current.index);
-      current = current.previous;
-    }
-    return indices.length === stops.length ? indices : [];
+  function projectSimulationStopToSegment(stop, start, end, segmentIndex, offsetMeters) {
+    const scale = Math.cos(toRadians((start.lat + end.lat + stop.lat) / 3));
+    const dx = (end.lng - start.lng) * scale;
+    const dy = end.lat - start.lat;
+    const px = (stop.lng - start.lng) * scale;
+    const py = stop.lat - start.lat;
+    const squaredLength = dx * dx + dy * dy;
+    const fraction = squaredLength > 0 ? Math.max(0, Math.min(1, (px * dx + py * dy) / squaredLength)) : 0;
+    const coordinate = {
+      lat: start.lat + (end.lat - start.lat) * fraction,
+      lng: start.lng + (end.lng - start.lng) * fraction,
+    };
+    return {
+      coordinate,
+      segmentIndex,
+      fraction,
+      measure: offsetMeters + distanceInMeters(start, end) * fraction,
+      distanceMeters: distanceInMeters(stop, coordinate),
+    };
   }
 
-  function buildDrawnPathCoordinateGroups(routeCoordinates, stops) {
-    if (!Array.isArray(routeCoordinates) || routeCoordinates.length < 2) {
-      return [];
+  function sliceMatchedDrawnPath(coordinates, start, end) {
+    const group = [start.coordinate];
+    for (let index = start.segmentIndex + 1; index <= end.segmentIndex; index += 1) {
+      appendUniqueCoordinates(group, [coordinates[index]]);
     }
-    const normalizedStops = (Array.isArray(stops) ? stops : [])
-      .map((stop) => {
-        const coordinate = getSimulationStopCoordinate(stop);
-        return {
-          ...stop,
-          lat: coordinate.lat,
-          lng: coordinate.lng,
-        };
-      })
-      .filter((stop) => Number.isFinite(stop?.lat) && Number.isFinite(stop?.lng));
-    if (normalizedStops.length < 2) {
-      return [];
-    }
+    appendUniqueCoordinates(group, [end.coordinate]);
+    return group;
+  }
 
-    const coordinateOrders = [routeCoordinates, routeCoordinates.slice().reverse()];
-    for (const orderedCoordinates of coordinateOrders) {
-      const indices = buildOrderedDrawnPathCoordinateIndices(orderedCoordinates, normalizedStops);
-      if (indices.length !== normalizedStops.length) {
+  function buildDrawnCoordinateOrders(routeCoordinates, stops) {
+    const orders = [];
+    for (const coordinates of [routeCoordinates, routeCoordinates.slice().reverse()]) {
+      orders.push({ coordinates, closureMeters: 0 });
+      const closureMeters = distanceInMeters(coordinates[0], coordinates[coordinates.length - 1]);
+      const endpointGap = Math.min(distanceInMeters(stops[0], coordinates[0]), distanceInMeters(stops[0], coordinates[coordinates.length - 1]));
+      // Closed KMLs may begin at an arbitrary vertex instead of the first stop.
+      // Rotate one lap at the first stop; never duplicate a whole loop per chunk.
+      if (closureMeters > 30 || endpointGap <= 30 || distanceInMeters(stops[0], stops[stops.length - 1]) > 150) continue;
+      let offset = 0;
+      const projections = coordinates.slice(0, -1).map((start, index) => {
+        const projection = projectSimulationStopToSegment(stops[0], start, coordinates[index + 1], index, offset);
+        offset += distanceInMeters(start, coordinates[index + 1]);
+        return projection;
+      });
+      const nearest = projections.reduce((value, candidate) => Math.min(value, candidate.distanceMeters), Infinity);
+      for (const candidate of projections.filter(item => item.distanceMeters <= nearest + 10)) {
+        const rotated = [candidate.coordinate];
+        appendUniqueCoordinates(rotated, coordinates.slice(candidate.segmentIndex + 1));
+        appendUniqueCoordinates(rotated, coordinates.slice(0, candidate.segmentIndex + 1));
+        appendUniqueCoordinates(rotated, [candidate.coordinate]);
+        orders.push({ coordinates: rotated, closureMeters });
+      }
+    }
+    return orders;
+  }
+
+  function matchDrawnRoutePath(routeCoordinates, stops, toleranceMeters = 150) {
+    if (routeCoordinates.length < 2 || stops.length < 2 || [...routeCoordinates, ...stops].some(point => (
+      !Number.isFinite(point.lat) || !Number.isFinite(point.lng) || Math.abs(point.lat) > 90 || Math.abs(point.lng) > 180
+    ))) {
+      throw new Error("그린 경로와 정류장의 좌표를 확인하세요.");
+    }
+    if (measureCoordinatePathDistance(routeCoordinates) <= 0) throw new Error("그린 경로의 길이가 0m입니다. 경로 좌표를 확인하세요.");
+    let best = null;
+    const failures = [];
+    for (const { coordinates, closureMeters } of buildDrawnCoordinateOrders(routeCoordinates, stops)) {
+      const offsets = [0];
+      for (let index = 1; index < coordinates.length; index += 1) {
+        offsets.push(offsets[index - 1] + distanceInMeters(coordinates[index - 1], coordinates[index]));
+      }
+      const candidateSets = stops.map((stop, stopIndex) => {
+        const candidates = coordinates.slice(0, -1).map((start, index) => (
+          projectSimulationStopToSegment(stop, start, coordinates[index + 1], index, offsets[index])
+        )).filter(candidate => candidate.distanceMeters <= toleranceMeters);
+        // Preserve a route's start/end and a full circular trip when the stops are at its ends.
+        const endpointIndex = stopIndex === 0 ? 0 : stopIndex === stops.length - 1 ? coordinates.length - 1 : -1;
+        if (endpointIndex >= 0 && candidates.length) {
+          const endpoint = coordinates[endpointIndex];
+          const gap = distanceInMeters(stop, endpoint);
+          const nearest = candidates.reduce((value, candidate) => Math.min(value, candidate.distanceMeters), Infinity);
+          if (gap <= 30 && gap <= nearest + 10) {
+            return [{ coordinate: endpoint, segmentIndex: endpointIndex === 0 ? 0 : endpointIndex - 1,
+              fraction: endpointIndex === 0 ? 0 : 1, measure: offsets[endpointIndex], distanceMeters: gap }];
+          }
+        }
+        return candidates.filter((candidate, index) => index === 0 || Math.abs(candidate.measure - candidates[index - 1].measure) > 0.001);
+      });
+      let states = candidateSets[0].map(candidate => ({ ...candidate, cost: candidate.distanceMeters ** 2, previous: null }));
+      let failedIndex = 0;
+      for (let stopIndex = 1; states.length && stopIndex < stops.length; stopIndex += 1) {
+        const nextStates = [];
+        // Candidates are ordered by distance along the line. A prefix minimum avoids quadratic matching.
+        let cursor = 0;
+        let previousBest = null;
+        for (const candidate of candidateSets[stopIndex]) {
+          while (cursor < states.length && states[cursor].measure <= candidate.measure + 0.001) {
+            const state = states[cursor++];
+            if (!previousBest || state.cost - state.measure * 0.0001 < previousBest.cost - previousBest.measure * 0.0001) previousBest = state;
+          }
+          if (previousBest) nextStates.push({ ...candidate, previous: previousBest,
+            cost: previousBest.cost + candidate.distanceMeters ** 2 + Math.max(0, candidate.measure - previousBest.measure) * 0.0001 });
+        }
+        states = nextStates;
+        failedIndex = stopIndex;
+      }
+      if (!states.length) {
+        failures.push(failedIndex);
         continue;
       }
-      const groups = [];
-      for (let index = 0; index < indices.length - 1; index += 1) {
-        const group = orderedCoordinates.slice(indices[index], indices[index + 1] + 1);
-        if (group.length < 2) {
-          break;
-        }
-        groups.push(group);
+      const last = states.reduce((a, b) => a.cost <= b.cost ? a : b);
+      const matches = [];
+      for (let state = last; state; state = state.previous) {
+        const { previous, cost, ...match } = state;
+        matches.unshift(match);
       }
-      if (groups.length === normalizedStops.length - 1) {
-        return groups;
-      }
+      const groups = matches.slice(1).map((match, index) => sliceMatchedDrawnPath(coordinates, matches[index], match));
+      const warnings = [];
+      if (closureMeters > 1) warnings.push(`순환 경로의 시작점을 첫 정류장에 맞췄습니다. KML 양 끝의 ${closureMeters.toFixed(1)}m 간격을 연결했습니다.`);
+      const unusedMeters = matches[0].measure + offsets[offsets.length - 1] - matches[matches.length - 1].measure;
+      if (unusedMeters > 50) warnings.push(`첫·마지막 정류장 바깥의 경로 ${Math.round(unusedMeters)}m는 운행시간에서 제외했습니다. 정류장 위치를 확인하세요.`);
+      matches.forEach((match, index) => {
+        if (match.distanceMeters > 50) warnings.push(`${stops[index].name || `정류장 ${index + 1}`}: 경로와 ${Math.round(match.distanceMeters)}m 떨어져 있습니다.`);
+        if (!index) return;
+        const length = match.measure - matches[index - 1].measure;
+        const direct = distanceInMeters(stops[index - 1], stops[index]);
+        if (length > 1000 && length > Math.max(100, direct) * 5) warnings.push(`${stops[index - 1].name} → ${stops[index].name}: 그린 경로가 크게 돌아갑니다. 의도한 순환 구간인지 확인하세요.`);
+      });
+      if (!best || last.cost < best.cost) best = { matches, groups, warnings, cost: last.cost };
     }
-    return [];
+    if (!best) {
+      const index = Math.max(...failures, 0);
+      throw new Error(`정류장 "${stops[index]?.name || index + 1}"까지 그린 경로를 순서대로 연결할 수 없습니다. 정류장 순서·위치와 경로 진행 방향을 확인하세요(경로 허용 거리 ${toleranceMeters}m).`);
+    }
+    return best;
   }
 
-  function buildDrawnRouteSimulationChunk(segment, segmentIndex, routeCoordinates, averageSpeedKmh) {
-    const coordinateGroups = buildDrawnPathCoordinateGroups(routeCoordinates, segment);
+  function buildDrawnRouteSimulationChunk(segment, segmentIndex, routeCoordinates, averageSpeedKmh, drawnPathMatch) {
+    const startIndex = Number(segment[0]?.routeStopIndex || 0);
+    const match = drawnPathMatch || matchDrawnRoutePath(routeCoordinates, segment);
+    const offset = drawnPathMatch ? startIndex : 0;
+    const coordinateGroups = match.groups.slice(offset, offset + segment.length - 1);
     if (coordinateGroups.length < Math.max(1, segment.length - 1)) {
       throw new Error(`그린 경로에서 시뮬레이션 구간 ${segmentIndex}의 선형을 확인하지 못했습니다.`);
     }
@@ -5016,19 +5071,21 @@
       driveSeconds,
       sectionCount: 1,
       coordinates,
-      stops: segment.map((point) => ({
+      coordinateGroups,
+      pathMode: ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN,
+      stops: segment.map((point, index) => ({
         name: point.name,
         lat: point.lat,
         lng: point.lng,
         originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
         originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
-        snappedLat: point.lat,
-        snappedLng: point.lng,
-        snappedToPath: Boolean(point.snappedToPath),
-        snapDistanceMeters: point.snapDistanceMeters == null ? null : Number(point.snapDistanceMeters),
+        snappedLat: match.matches[offset + index].coordinate.lat,
+        snappedLng: match.matches[offset + index].coordinate.lng,
+        snappedToPath: true,
+        snapDistanceMeters: Number(match.matches[offset + index].distanceMeters.toFixed(1)),
         isVirtual: point.isVirtual === true,
         isSimulationCorrection: point.isSimulationCorrection === true,
-        pathIndex: Number.isFinite(point.pathIndex) ? Number(point.pathIndex) : null,
+        pathIndex: match.matches[offset + index].segmentIndex,
         routeStopIndex: Number.isFinite(point.routeStopIndex) ? Number(point.routeStopIndex) : null,
         requestedOrder: Number.isFinite(point.requestedOrder) ? Number(point.requestedOrder) : null,
       })),
@@ -5043,7 +5100,8 @@
           segment,
           index + 1,
           route.pathCoordinates,
-          researchProfile.regionAverageSpeedKmh
+          researchProfile.regionAverageSpeedKmh,
+          route.drawnPathMatch
         ));
         const driveSeconds = chunks.reduce((sum, chunk) => sum + Number(chunk.driveSeconds || 0), 0);
         const distanceMeters = Number(chunks.reduce((sum, chunk) => sum + Number(chunk.distanceMeters || 0), 0).toFixed(1));
@@ -5055,6 +5113,7 @@
           totalSeconds: driveSeconds,
           distanceMeters,
           chunks,
+          pathWarnings: route.drawnPathMatch?.warnings || [],
         };
       });
       return {
@@ -5168,13 +5227,16 @@
       const toStop = routingStops[index + 1];
       const fromCoordinate = getSimulationStopCoordinate(fromStop);
       const toCoordinate = getSimulationStopCoordinate(toStop);
-      const sliced = sliceCoordinatesBetweenPointsForward(coordinates, fromCoordinate, toCoordinate, searchIndex, 250);
-      const slicedCoordinates = Array.isArray(sliced.coordinates) && sliced.coordinates.length >= 2
+      const storedGroup = chunk.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN ? chunk.coordinateGroups?.[index] : null;
+      const sliced = storedGroup ? { coordinates: storedGroup, endIndex: -1 }
+        : sliceCoordinatesBetweenPointsForward(coordinates, fromCoordinate, toCoordinate, searchIndex, 250);
+      const slicedCoordinates = storedGroup || (Array.isArray(sliced.coordinates) && sliced.coordinates.length >= 2
         ? sliced.coordinates
-        : [fromCoordinate, toCoordinate];
+        : [fromCoordinate, toCoordinate]);
       const distanceMeters = Math.max(
-        1,
-        measureCoordinatePathDistance(slicedCoordinates) || distanceInMeters(fromCoordinate, toCoordinate) || 1
+        0,
+        storedGroup ? measureCoordinatePathDistance(storedGroup)
+          : measureCoordinatePathDistance(slicedCoordinates) || distanceInMeters(fromCoordinate, toCoordinate)
       );
       if (sliced.endIndex >= 0) {
         searchIndex = sliced.endIndex;
@@ -5636,7 +5698,7 @@
         researchProfile.appliedDriveSeconds = Math.round(adjustedDriveSeconds);
         const chunks = (Array.isArray(item.chunks) ? item.chunks : []).map((chunk, index) => {
           const stops = Array.isArray(chunk?.stops) ? chunk.stops : [];
-          const originalChunkCoordinateGroups = buildOriginalChunkPathGroups(originalPathCoordinates, stops);
+          const originalChunkCoordinateGroups = isDrawnPathMode ? chunk.coordinateGroups : buildOriginalChunkPathGroups(originalPathCoordinates, stops);
           const originalChunkCoordinates = [];
           originalChunkCoordinateGroups.forEach((group) => appendUniqueCoordinates(originalChunkCoordinates, group));
           return {
@@ -5659,6 +5721,7 @@
           chunks,
           originalPathCoordinates,
           researchProfile,
+          pathWarnings: item.pathWarnings || [],
         };
         hydrateSimulationStopTimeline(simulationRow);
         rows.push(simulationRow);
@@ -5756,7 +5819,7 @@
 
   function buildRouteTimeSimulationExcelWorkbook(report) {
     const summaryRows = [
-      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "base_drive_minutes", "base_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km"],
+      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "base_drive_minutes", "base_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km", "path_warnings"],
     ];
     const stopRows = [
       ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "applied_dwell_time", "is_terminal"],
@@ -5787,6 +5850,7 @@
         Number((totalSeconds / 60).toFixed(1)),
         formatSimulationDurationLabel(totalSeconds),
         Number((Number(row.distanceMeters || 0) / 1000).toFixed(2)),
+        (row.pathWarnings || []).join("\n"),
       ]);
 
       (row.researchProfile?.stopDetails || []).forEach((stop, index) => {
@@ -5927,6 +5991,7 @@
       "",
       "[구간별 계산 로그]",
     ];
+    (simulation.pathWarnings || []).forEach(warning => lines.push(`경로 확인: ${warning}`));
     (simulation.chunks || []).forEach((chunk, index) => {
       const stopLines = (chunk.stops || []).map((stop, stopIndex) => (
         `  ${stopIndex + 1}. ${stop.name || "-"}${stop.isSimulationCorrection ? " [보정포인트]" : (stop.isVirtual ? " [가상]" : "")}`
@@ -6000,6 +6065,7 @@
           <div>
             <h2>${escapeHtml(route.routeName)}</h2>
             <p class="meta">정류장 ${escapeHtml(String(route.stopCount))}개 / 청크 ${escapeHtml(String(route.segmentCount))}개</p>
+            ${(route.simulations?.[0]?.pathWarnings || []).map(warning => `<p>${escapeHtml(warning)}</p>`).join("")}
           </div>
         </div>
         <div class="table-wrap">
@@ -6416,6 +6482,7 @@
     <aside class="side">
       <h1>${escapeHtml(routeName)}</h1>
       <p>출발시각 ${escapeHtml(simulation?.departureTime || "-")} 기준입니다. ${isDrawnPathMode ? "사용자가 그린 KML 선형을 그대로 표시하고, 같은 선형으로 거리를 계산했습니다." : "각 구간 카드에서 원본구간과 분석구간을 비교하고, 차이가 큰 구간만 재설정할 수 있습니다."}</p>
+      ${(simulation?.pathWarnings || []).map(warning => `<p>${escapeHtml(warning)}</p>`).join("")}
       <div class="legend">
         <div class="legend-item"><span class="line dashed" style="border-top-color:#94a3b8;"></span><span>원본 전체 경로</span></div>
         <div class="legend-item"><span class="line" style="border-top-color:#111827;"></span><span>${isDrawnPathMode ? "계산 기준 경로(그린 경로 고정)" : "분석 전체 경로"}</span></div>
@@ -6423,9 +6490,12 @@
         <div class="legend-item"><span class="line" style="border-top-color:#111827;border-top-width:7px;opacity:.55;"></span><span>분석구간</span></div>
       </div>
       <div class="toggle-list">
-        <label class="toggle-item"><input id="toggle-original-path" type="checkbox" checked><span class="swatch" style="background:#94a3b8;"></span>원본 전체 경로</label>
-        <label class="toggle-item"><input id="toggle-analysis-path" type="checkbox" checked><span class="swatch" style="background:#111827;"></span>분석 전체 경로</label>
-        <label class="toggle-item"><input id="toggle-sections" type="checkbox" checked><span class="swatch" style="background:#2563eb;"></span>구간별 경로</label>
+        <label class="toggle-item"><input id="toggle-original-path" type="checkbox" checked><span class="swatch" style="background:#94a3b8;"></span>원본 경로</label>
+        <label class="toggle-item"><input id="toggle-analysis-path" type="checkbox" checked><span class="swatch" style="background:#111827;"></span>분석 경로</label>
+        <label class="toggle-item"><input id="toggle-sections" type="checkbox" checked><span class="swatch" style="background:#2563eb;"></span>체크한 구간만 표시</label>
+        <p>구간 선택을 켜면 아래에서 체크한 구간만 표시합니다. 끄면 전체 경로를 표시합니다.</p>
+        <button id="show-selected-sections" type="button">체크한 구간 모두 보기</button>
+        <span id="section-view-status" aria-live="polite"></span>
       </div>
       <div id="section-status" class="status">${isDrawnPathMode ? "경로 고정 모드에서는 KML 선형을 기준으로만 거리와 시간을 계산합니다." : "문제가 있는 분석구간에 <strong>강제 포인트 추가</strong>로 점을 찍고, 숫자를 조정한 뒤 <strong>경로 재설정</strong>을 누르세요."}</div>
       <div class="section-list">
@@ -6535,7 +6605,6 @@
     debugLog('payload sections=' + String((payload.sections || []).length) + ', originalPath=' + String((payload.originalPath || []).length) + ', analysisPath=' + String((payload.analysisPath || []).length));
     const colors = ${JSON.stringify(sectionColors)};
     let map = null;
-    let bounds = null;
     let originalPolyline = null;
     let analysisPolyline = null;
     let originalSectionPolylines = [];
@@ -6583,7 +6652,6 @@
     function toLatLngPath(coordinates) {
       return (Array.isArray(coordinates) ? coordinates : []).map((coordinate) => {
         const position = createKakaoLatLng(coordinate.lat, coordinate.lng);
-        bounds?.extend(position);
         return position;
       });
     }
@@ -6619,7 +6687,9 @@
         const from = coordinates[Math.max(0, index - 1)];
         const to = coordinates[index];
         if (!from || !to) continue;
-        const angle = Math.atan2(to.lat - from.lat, to.lng - from.lng) * (180 / Math.PI);
+        const east = (to.lng - from.lng) * Math.cos(to.lat * Math.PI / 180);
+        const north = to.lat - from.lat;
+        const angle = Math.atan2(east, north) * (180 / Math.PI);
         overlays.push(new window.kakao.maps.CustomOverlay({
           position: createKakaoLatLng(to.lat, to.lng),
           yAnchor: 0.5,
@@ -6789,6 +6859,7 @@
     }
 
     function renderMap() {
+      clearMapObjects();
       debugLog('creating kakao map');
       const container = document.getElementById("route-time-map");
       if (!container) {
@@ -6800,11 +6871,6 @@
         center: createKakaoLatLng(37.5665, 126.9780),
         level: 6,
       });
-      bounds = typeof map.getBounds === "function" ? map.getBounds() : null;
-      if (!bounds || typeof bounds.extend !== "function" || typeof bounds.isEmpty !== "function") {
-        bounds = null;
-        debugLog('map bounds object unavailable; keeping default map view');
-      }
       debugLog('kakao map created');
 
       if (payload.originalPath.length >= 2) {
@@ -6866,7 +6932,6 @@
         const labelPoint = section.stops[0] || section.stops[section.stops.length - 1];
         if (labelPoint) {
           const position = createKakaoLatLng(labelPoint.lat, labelPoint.lng);
-          bounds?.extend(position);
           const label = new window.kakao.maps.CustomOverlay({
             position,
             yAnchor: 1.8,
@@ -6879,12 +6944,7 @@
 
       applySectionState();
       debugLog('section state applied');
-      if (bounds && !bounds.isEmpty()) {
-        map.setBounds(bounds, 40, 40, 40, 40);
-        debugLog('bounds applied');
-      } else {
-        debugLog('bounds empty');
-      }
+      fitVisiblePaths();
       window.kakao.maps.event.addListener(map, 'click', (mouseEvent) => {
         if (forcePointPickIndex < 0) {
           return;
@@ -6930,6 +6990,8 @@
       while (sectionVisible.length < payload.sections.length) {
         sectionVisible.push(true);
       }
+      sectionVisible.length = payload.sections.length;
+      if (activeSectionIndex >= payload.sections.length) activeSectionIndex = -1;
       clearMapObjects();
       syncPendingForcedPointsFromPayload();
       renderSectionOrderEditors();
@@ -6952,6 +7014,11 @@
 
     function applySectionState() {
       const sectionsEnabled = document.getElementById("toggle-sections")?.checked !== false;
+      const originalEnabled = document.getElementById("toggle-original-path")?.checked !== false;
+      const analysisEnabled = document.getElementById("toggle-analysis-path")?.checked !== false;
+      // Whole-route and section layers are mutually exclusive: hidden sections cannot leak through a full line.
+      if (originalPolyline) originalPolyline.setMap(!sectionsEnabled && originalEnabled ? map : null);
+      if (analysisPolyline) analysisPolyline.setMap(!sectionsEnabled && analysisEnabled ? map : null);
       payload.sections.forEach((section, index) => {
         const originalPolylines = originalSectionPolylines[index] || [];
         const analysisPolylines = analysisSectionPolylines[index] || [];
@@ -6966,8 +7033,8 @@
         const isActive = isVisible && activeSectionIndex === index;
         const isHiddenByFocus = activeSectionIndex >= 0 && activeSectionIndex !== index;
         const shouldShow = isVisible && !isHiddenByFocus;
-        const showOriginal = shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "original");
-        const showAnalysis = shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "analysis");
+        const showOriginal = originalEnabled && shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "original");
+        const showAnalysis = analysisEnabled && shouldShow && (activeSectionView === "both" || !isActive || activeSectionView === "analysis");
         originalPolylines.forEach((polyline) => {
           polyline.setMap(showOriginal ? map : null);
           polyline.setOptions({
@@ -6985,9 +7052,9 @@
           });
         });
         directionOverlays.forEach((overlay) => overlay.setMap(showAnalysis ? map : null));
-        markers.forEach((overlay) => overlay.setMap(shouldShow ? map : null));
+        markers.forEach((overlay) => overlay.setMap(showOriginal || showAnalysis ? map : null));
         if (label) {
-          label.setMap(shouldShow ? map : null);
+          label.setMap(showOriginal || showAnalysis ? map : null);
         }
         if (card) {
           card.style.opacity = sectionsEnabled ? (isVisible ? (isHiddenByFocus ? "0.42" : "1") : "0.32") : "0.32";
@@ -7003,9 +7070,34 @@
           toggle.checked = sectionVisible[index] !== false;
         }
       });
+      const viewStatus = document.getElementById("section-view-status");
+      if (viewStatus) viewStatus.textContent = !originalEnabled && !analysisEnabled ? "표시할 경로 종류를 체크하세요."
+        : !sectionsEnabled ? "전체 경로 표시 중"
+        : activeSectionIndex >= 0 ? '구간 ' + String(activeSectionIndex + 1) + '만 표시 중'
+        : '체크한 ' + String(sectionVisible.filter(Boolean).length) + '개 구간 표시 중';
+    }
+
+    function fitVisiblePaths() {
+      if (!map) return;
+      // getBounds() contains the previous viewport; extending it can only zoom out.
+      const visibleBounds = new window.kakao.maps.LatLngBounds();
+      const include = (coordinates) => (coordinates || []).forEach(point => visibleBounds.extend(createKakaoLatLng(point.lat, point.lng)));
+      if (originalPolyline?.getMap()) include(payload.originalPath);
+      if (analysisPolyline?.getMap()) include(payload.analysisPath);
+      payload.sections.forEach((section, index) => {
+        if ((originalSectionPolylines[index] || []).some(line => line.getMap())) include(section.originalCoordinates);
+        if ((analysisSectionPolylines[index] || []).some(line => line.getMap())) include(section.analysisCoordinates);
+        if ((stopMarkers[index] || []).some(marker => marker.getMap())) include(section.stops);
+      });
+      if (!visibleBounds.isEmpty()) map.setBounds(visibleBounds, 40, 40, 40, 40);
     }
 
     function focusSection(index, view = "both") {
+      if (!payload.sections[index]) return;
+      document.getElementById("toggle-sections").checked = true;
+      sectionVisible[index] = true;
+      if (view !== "analysis") document.getElementById("toggle-original-path").checked = true;
+      if (view !== "original") document.getElementById("toggle-analysis-path").checked = true;
       if (activeSectionIndex === index && activeSectionView === view) {
         activeSectionIndex = -1;
         activeSectionView = "both";
@@ -7014,6 +7106,7 @@
         activeSectionView = view;
       }
       applySectionState();
+      fitVisiblePaths();
     }
 
     async function recalcSection(index) {
@@ -7078,17 +7171,28 @@
     }
 
     document.getElementById("toggle-original-path")?.addEventListener("change", (event) => {
-      if (originalPolyline) originalPolyline.setMap(event.target.checked ? map : null);
-    });
-    document.getElementById("toggle-analysis-path")?.addEventListener("change", (event) => {
-      if (analysisPolyline) analysisPolyline.setMap(event.target.checked ? map : null);
-    });
-    document.getElementById("toggle-sections")?.addEventListener("change", (event) => {
-      if (!event.target.checked) activeSectionIndex = -1;
+      activeSectionView = "both";
       applySectionState();
     });
+    document.getElementById("toggle-analysis-path")?.addEventListener("change", (event) => {
+      activeSectionView = "both";
+      applySectionState();
+    });
+    document.getElementById("toggle-sections")?.addEventListener("change", (event) => {
+      activeSectionIndex = -1;
+      activeSectionView = "both";
+      applySectionState();
+    });
+    document.getElementById("show-selected-sections")?.addEventListener("click", () => {
+      activeSectionIndex = -1;
+      activeSectionView = "both";
+      document.getElementById("toggle-sections").checked = true;
+      applySectionState();
+      fitVisiblePaths();
+    });
     document.querySelectorAll("[data-section-card]").forEach((card) => {
-      card.addEventListener("click", () => {
+      card.addEventListener("click", (event) => {
+        if (event.target.closest("input,button,label,[data-section-view]")) return;
         const index = Number(card.getAttribute("data-section-card"));
         if (!Number.isFinite(index)) return;
         const sectionToggle = document.getElementById("toggle-sections");
@@ -7102,7 +7206,9 @@
         const index = Number(event.target.getAttribute("data-section-toggle"));
         if (!Number.isFinite(index)) return;
         sectionVisible[index] = event.target.checked;
-        if (!event.target.checked && activeSectionIndex === index) activeSectionIndex = -1;
+        activeSectionIndex = -1;
+        activeSectionView = "both";
+        if (event.target.checked) document.getElementById("toggle-sections").checked = true;
         applySectionState();
       });
     });
@@ -7157,7 +7263,8 @@
       const maps = window.kakao?.maps;
       const isReady = maps
         && typeof maps.Map === "function"
-        && typeof maps.LatLng === "function";
+        && typeof maps.LatLng === "function"
+        && typeof maps.LatLngBounds === "function";
       if (!isReady) {
         if (attempt >= 40) {
           const message = "카카오 지도 SDK 좌표 기능을 준비하지 못했습니다.";
@@ -7249,9 +7356,10 @@
         : buildSimulationSectionDisplayStops(chunk?.stops);
       const visibleStops = displayBaseStops;
       const orderMaps = buildDisplayRequestedOrderMaps(rawBaseStops, displayBaseStops);
-      const originalCoordinateGroups = buildOriginalChunkPathGroups(originalPath, visibleStops);
+      const isDrawnPath = chunk.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
+      const originalCoordinateGroups = isDrawnPath ? chunk.coordinateGroups : buildOriginalChunkPathGroups(originalPath, visibleStops);
       const originalCoordinates = flattenCoordinateGroups(originalCoordinateGroups);
-      const analysisCoordinateGroups = buildOriginalChunkPathGroups(
+      const analysisCoordinateGroups = isDrawnPath ? chunk.coordinateGroups : buildOriginalChunkPathGroups(
         Array.isArray(chunk?.coordinates) ? chunk.coordinates : [],
         visibleStops
       );
@@ -7384,6 +7492,7 @@
       ? "적용식: (KML 그린 경로 거리 / 권역 평균 버스속도) x (1 + 버스지체보정률) + 정류장별 정차보정"
       : "적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)");
     routePayload.forEach((route, routeIndex) => {
+      (route.drawnPathMatch?.warnings || []).forEach(warning => appendRouteTimeSimulationLog(`${route.routeName}: ${warning}`));
       const routeResearch = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, normalizedOptions);
       appendRouteTimeSimulationLog(
         `노선 ${routeIndex + 1}/${routePayload.length} 프리플라이트: ${route.routeName} / 정류장 ${route.stopCount}개 / 청크 ${route.segmentCount}개`
