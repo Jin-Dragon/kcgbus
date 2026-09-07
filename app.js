@@ -130,6 +130,10 @@
   const analysisModalCloseEl = document.getElementById("analysis-modal-close");
   const analysisOverlapToggleEl = document.getElementById("analysis-overlap-toggle");
   const analysisCopyButtonEl = document.getElementById("analysis-copy-button");
+  const routeTimeInlineModalEl = document.getElementById("route-time-inline-modal");
+  const routeTimeInlineModalTitleEl = document.getElementById("route-time-inline-modal-title");
+  const routeTimeInlineModalBodyEl = document.getElementById("route-time-inline-modal-body");
+  const routeTimeInlineModalCloseEl = document.getElementById("route-time-inline-modal-close");
   const mapWrapEl = document.querySelector(".map-wrap");
   const mapSearchPanelEl = document.getElementById("map-search-panel");
   const mapSearchToggleEl = document.getElementById("map-search-toggle");
@@ -281,6 +285,7 @@
   let ridershipResultsWindowRef = null;
   let routeTimeResultsWindowRef = null;
   let routeTimeSettingsWindowRef = null;
+  let routeTimeInlineWindowMode = "";
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -4478,6 +4483,7 @@
     </form>
   </div>
   <script>
+    const hostWindow = window.opener || window.parent;
     const form = document.getElementById("route-time-simulation-form");
     const closeButton = document.getElementById("close-window-button");
     const selectAllButton = document.getElementById("select-all-routes-button");
@@ -4502,8 +4508,8 @@
     window.__setRouteTimeLog = appendLog;
     window.__wonderLinxRouteTime = {
       showResults(reportId) {
-        if (window.opener && window.opener.__wonderLinxRouteTime) {
-          window.opener.__wonderLinxRouteTime.showResults(reportId);
+        if (hostWindow && hostWindow.__wonderLinxRouteTime) {
+          hostWindow.__wonderLinxRouteTime.showResults(reportId);
         }
       },
     };
@@ -4519,7 +4525,13 @@
 
     selectAllButton?.addEventListener("click", () => setRoutesChecked(true));
     clearAllButton?.addEventListener("click", () => setRoutesChecked(false));
-    closeButton?.addEventListener("click", () => window.close());
+    closeButton?.addEventListener("click", () => {
+      if (window.opener) {
+        window.close();
+      } else if (hostWindow?.__wonderLinxRouteTime?.closeInlineWindow) {
+        hostWindow.__wonderLinxRouteTime.closeInlineWindow();
+      }
+    });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const data = new FormData(form);
@@ -4535,28 +4547,10 @@
         busDelayPercent: Number(data.get("busDelayPercent") || ${DEFAULT_BUS_DELAY_PERCENT}),
       };
       appendLog("시뮬레이션 실행을 요청했습니다.");
-      const resultsWindow = window.open("", "route-time-simulation-console", "width=1320,height=940,resizable=yes,scrollbars=yes");
-      if (!resultsWindow) {
-        appendLog("팝업이 차단되었습니다. 결과 창을 허용해 주세요.", true);
-        return;
-      }
-      const normalizedOptions = window.opener.__wonderLinxRouteTime.normalizeOptions(options);
-      const estimatedSlotCount = Math.max(1, window.opener.__wonderLinxRouteTime.getDepartureSlotCount(normalizedOptions));
-      if (window.opener && window.opener.__wonderLinxRouteTime && typeof window.opener.__wonderLinxRouteTime.attachConsoleWindow === "function") {
-        window.opener.__wonderLinxRouteTime.attachConsoleWindow(resultsWindow);
-      }
-      resultsWindow.document.open();
-      resultsWindow.document.write(window.opener.__wonderLinxRouteTime.buildPendingWindowHtml({
-        routeCount: selectedRouteNames.length,
-        timeSlotCount: estimatedSlotCount,
-        requestCount: selectedRouteNames.length * estimatedSlotCount,
-        activeLabel: "실행 요청 접수",
-        statusText: "시뮬레이션 세션을 초기화하는 중입니다.",
-        progress: 6,
-      }));
-      resultsWindow.document.close();
-      if (window.opener && window.opener.__wonderLinxRouteTime) {
-        window.opener.__wonderLinxRouteTime.run(${JSON.stringify(groupKey)}, options);
+      if (hostWindow?.__wonderLinxRouteTime?.startFromSettings) {
+        hostWindow.__wonderLinxRouteTime.startFromSettings(${JSON.stringify(groupKey)}, options);
+      } else {
+        appendLog("메인 창과 연결되지 않아 시뮬레이션을 시작할 수 없습니다.", true);
       }
     });
   </script>
@@ -5749,6 +5743,17 @@
       setStatus("표시할 계산 로그 결과를 찾지 못했습니다.", true);
       return;
     }
+    if (routeTimeInlineWindowMode) {
+      const logText = buildRouteTimeSimulationLogText(simulation);
+      const inlineLogHtml = `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${escapeHtml(routeName)} 계산 로그</title><style>:root{color-scheme:light;--line:#d8e1ec;--text:#172033;--muted:#64758d;}*{box-sizing:border-box;}body{margin:0;padding:24px;background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%);color:var(--text);font:14px/1.6 "Segoe UI","Malgun Gothic",sans-serif;}.wrap{max-width:1080px;margin:0 auto;display:grid;gap:16px;}.card{padding:18px;border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);}h1{margin:0 0 6px;font-size:26px;}p{margin:0;color:var(--muted);}.actions{display:flex;gap:10px;flex-wrap:wrap;}button{padding:10px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font:inherit;cursor:pointer;}pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.7 Consolas,"Courier New",monospace;color:#1e293b;background:#f8fbff;border:1px solid var(--line);border-radius:14px;padding:16px;min-height:420px;}</style></head><body><div class="wrap"><div class="card"><h1>${escapeHtml(routeName)} 계산 로그</h1><p>${escapeHtml(departureTime)} 기준 시뮬레이션 세부 계산값입니다.</p></div><div class="card"><div class="actions"><button type="button" id="inline-log-close">닫기</button></div></div><div class="card"><pre>${escapeHtml(logText || "계산 로그가 비어 있습니다.")}</pre></div></div><script>document.getElementById("inline-log-close")?.addEventListener("click",()=>window.parent.__wonderLinxRouteTime?.closeInlineWindow());</script></body></html>`;
+      const inlineWindow = openRouteTimeInlineWindow(inlineLogHtml, `${routeName} 계산 로그`, "log");
+      if (!inlineWindow) {
+        setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
+        return;
+      }
+      setStatus("Codex 인앱 창에서 계산 로그를 열었습니다.", false);
+      return;
+    }
     const logWindow = window.open("", `route-time-log-${routeName}-${departureTime}`, "width=980,height=860,resizable=yes,scrollbars=yes");
     if (!logWindow) {
       setStatus("팝업이 차단되었습니다. 계산 로그 창을 허용해 주세요.", true);
@@ -5840,15 +5845,16 @@
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
   <script>
+    const hostWindow = window.opener || window.parent;
     document.getElementById("download-simulation-csv-button")?.addEventListener("click", () => {
-      if (window.opener && window.opener.__wonderLinxRouteTime) {
-        window.opener.__wonderLinxRouteTime.download(${JSON.stringify(report.id)});
+      if (hostWindow?.__wonderLinxRouteTime) {
+        hostWindow.__wonderLinxRouteTime.download(${JSON.stringify(report.id)});
       }
     });
     document.querySelectorAll("[data-route-map]").forEach((button) => {
       button.addEventListener("click", () => {
-        if (window.opener && window.opener.__wonderLinxRouteTime) {
-          window.opener.__wonderLinxRouteTime.showMap(${JSON.stringify(report.id)}, button.dataset.routeMap, button.dataset.routeTime);
+        if (hostWindow?.__wonderLinxRouteTime) {
+          hostWindow.__wonderLinxRouteTime.showMap(${JSON.stringify(report.id)}, button.dataset.routeMap, button.dataset.routeTime);
         }
       });
     });
@@ -5873,28 +5879,111 @@
     });
     document.querySelectorAll("[data-route-log]").forEach((button) => {
       button.addEventListener("click", () => {
-        if (window.opener && window.opener.__wonderLinxRouteTime) {
-          window.opener.__wonderLinxRouteTime.showLog(${JSON.stringify(report.id)}, button.dataset.routeLog, button.dataset.routeTime);
+        if (hostWindow?.__wonderLinxRouteTime) {
+          hostWindow.__wonderLinxRouteTime.showLog(${JSON.stringify(report.id)}, button.dataset.routeLog, button.dataset.routeTime);
         }
       });
     });
-    document.getElementById("close-window-button")?.addEventListener("click", () => window.close());
+    document.getElementById("close-window-button")?.addEventListener("click", () => {
+      if (window.frameElement && hostWindow?.__wonderLinxRouteTime?.closeInlineWindow) {
+        hostWindow.__wonderLinxRouteTime.closeInlineWindow();
+      } else {
+        window.close();
+      }
+    });
   </script>
 </body>
 </html>`;
   }
 
+  function closeRouteTimeInlineWindow() {
+    if (routeTimeInlineModalBodyEl) {
+      routeTimeInlineModalBodyEl.replaceChildren();
+    }
+    routeTimeInlineModalEl?.classList.add("is-hidden");
+    routeTimeInlineModalEl?.setAttribute("aria-hidden", "true");
+    routeTimeSettingsWindowRef = null;
+    routeTimeResultsWindowRef = null;
+    routeTimeInlineWindowMode = "";
+  }
+
+  function openRouteTimeInlineWindow(html, title, mode = "generic") {
+    if (!routeTimeInlineModalEl || !routeTimeInlineModalBodyEl) {
+      return null;
+    }
+    const frame = document.createElement("iframe");
+    frame.title = title;
+    frame.setAttribute("aria-label", title);
+    routeTimeInlineModalTitleEl && (routeTimeInlineModalTitleEl.textContent = title);
+    routeTimeInlineModalBodyEl.replaceChildren(frame);
+    routeTimeInlineModalEl.classList.remove("is-hidden");
+    routeTimeInlineModalEl.setAttribute("aria-hidden", "false");
+    routeTimeInlineWindowMode = String(mode || "generic");
+    frame.srcdoc = String(html || "").replace(/\bwindow\.opener\b/g, "window.parent");
+    return frame.contentWindow;
+  }
+
+  function startRouteTimeSimulationFromSettings(groupKey, options) {
+    const normalizedOptions = normalizeRouteTimeSimulationOptions(options);
+    const selectedRouteNames = Array.isArray(normalizedOptions.selectedRouteNames)
+      ? normalizedOptions.selectedRouteNames
+      : [];
+    const estimatedSlotCount = Math.max(1, buildSimulationDepartureSlots(normalizedOptions).length);
+    const pendingHtml = buildRouteTimeSimulationPendingWindowHtml({
+      routeCount: selectedRouteNames.length,
+      timeSlotCount: estimatedSlotCount,
+      requestCount: selectedRouteNames.length * estimatedSlotCount,
+      activeLabel: "실행 요청 접수",
+      statusText: "시뮬레이션 세션을 초기화하는 중입니다.",
+      progress: 6,
+    });
+    const resultsWindow = routeTimeInlineWindowMode
+      ? null
+      : window.open("", "route-time-simulation-console", "width=1320,height=940,resizable=yes,scrollbars=yes");
+    if (!resultsWindow) {
+      routeTimeResultsWindowRef = openRouteTimeInlineWindow(pendingHtml, "운행시간 시뮬레이션 실행 콘솔", "console");
+      if (!routeTimeResultsWindowRef) {
+        setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
+        return;
+      }
+      setStatus("Codex 인앱 창에서 운행시간 시뮬레이션을 실행 중입니다.", false);
+    } else {
+      routeTimeResultsWindowRef = resultsWindow;
+      resultsWindow.document.open();
+      resultsWindow.document.write(pendingHtml);
+      resultsWindow.document.close();
+      resultsWindow.focus();
+    }
+    window.__wonderLinxRouteTime.run(groupKey, options);
+  }
+
   function openRouteTimeSimulationSettingsWindow(groupKey) {
     const routeItems = getRouteSimulationCandidates(groupKey);
     const groupLabel = groupKey === "merged" ? "개선 노선 리스트" : "기존 노선 리스트";
+    const settingsHtml = buildRouteTimeSimulationSettingsWindowHtml(
+      groupKey,
+      groupLabel,
+      routeItems,
+      normalizeRouteTimeSimulationOptions()
+    );
+    const inlineWindow = openRouteTimeInlineWindow(
+      settingsHtml,
+      `${groupLabel} 운행시간 시뮬레이션`,
+      "settings"
+    );
+    if (inlineWindow) {
+      routeTimeSettingsWindowRef = inlineWindow;
+      setStatus("Codex 인앱 창에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
+      return;
+    }
     const settingsWindow = window.open("", `route-time-simulation-settings-${groupKey}`, "width=980,height=860,resizable=yes,scrollbars=yes");
     if (!settingsWindow) {
-      setStatus("팝업이 차단되었습니다. 운행시간 시뮬레이션 설정 창을 허용해 주세요.", true);
+      setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
       return;
     }
     routeTimeSettingsWindowRef = settingsWindow;
     settingsWindow.document.open();
-    settingsWindow.document.write(buildRouteTimeSimulationSettingsWindowHtml(groupKey, groupLabel, routeItems, normalizeRouteTimeSimulationOptions()));
+    settingsWindow.document.write(settingsHtml);
     settingsWindow.document.close();
     settingsWindow.focus();
   }
@@ -5939,17 +6028,25 @@
       currentSlot: String(meta.currentSlot || "-"),
       currentChunk: String(meta.currentChunk || "-"),
     };
-    return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>운행시간 시뮬레이션 실행 콘솔</title><style>:root{color-scheme:light;--line:#d8e1ec;--text:#172033;--muted:#64758d;--accent:#1f6feb;--soft:#eaf2ff;}*{box-sizing:border-box;}body{margin:0;min-height:100vh;background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%);color:var(--text);font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif;}.wrap{max-width:1360px;margin:0 auto;padding:24px;display:grid;gap:16px;}.hero,.panel{border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);overflow:hidden;}.hero{padding:20px 22px;}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:var(--soft);color:var(--accent);font-size:12px;font-weight:700;}.pulse{width:8px;height:8px;border-radius:999px;background:var(--accent);}h1{margin:12px 0 6px;font-size:28px;line-height:1.15;}.subtitle{margin:0;color:var(--muted);}.hero-grid{margin-top:16px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}.stat{padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:#f8fbff;}.stat b{display:block;margin-bottom:6px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;}.stat strong{font-size:28px;line-height:1;}.layout{display:grid;grid-template-columns:320px 1fr;gap:16px;}.panel-head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center;background:#fbfdff;}.panel-body{padding:18px;}.progress-shell{height:12px;border-radius:999px;background:#edf2f7;overflow:hidden;border:1px solid var(--line);}.progress-bar{height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#1f6feb);transition:width .35s ease;}.stage{margin-top:12px;font-size:16px;font-weight:700;}.status{margin-top:6px;color:var(--muted);min-height:42px;}.meta-list{margin-top:18px;display:grid;gap:10px;}.meta-row{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:12px;background:#f8fbff;border:1px solid var(--line);}.meta-row span{color:var(--muted);}.console-lines{height:620px;overflow:auto;padding:16px 18px 18px;font:13px/1.65 Consolas,"Courier New",monospace;background:#f8fbff;}.console-line{padding:4px 0;color:#1e293b;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed rgba(216,225,236,.8);}.console-line.error{color:#b42318;}.console-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;}button{padding:10px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font:inherit;cursor:pointer;}.primary{border-color:#bcd3ff;background:#eaf2ff;color:var(--accent);font-weight:700;}.primary.ready{background:#1f6feb;color:#fff;border-color:#1f6feb;box-shadow:0 10px 22px rgba(31,111,235,.2);}@media (max-width:1024px){.layout{grid-template-columns:1fr;}.hero-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.console-lines{height:420px;}}</style></head><body><div class="wrap"><section class="hero"><div class="eyebrow"><span class="pulse"></span><span>Simulation Console</span></div><h1 id="sim-console-headline">${escapeHtml(initialState.headline)}</h1><p class="subtitle" id="sim-console-status">${escapeHtml(initialState.statusText)}</p><div class="hero-grid"><div class="stat"><b>Selected Routes</b><strong id="sim-console-route-count">${escapeHtml(String(initialState.routeCount))}</strong></div><div class="stat"><b>Departure Slots</b><strong id="sim-console-slot-count">${escapeHtml(String(initialState.timeSlotCount))}</strong></div><div class="stat"><b>Estimated Calls</b><strong id="sim-console-request-count">${escapeHtml(String(initialState.requestCount))}</strong></div><div class="stat"><b>Status</b><strong id="sim-console-stage">${escapeHtml(initialState.activeLabel)}</strong></div></div></section><section class="layout"><div class="panel"><div class="panel-head"><strong>실행 상태</strong><span id="sim-console-progress-label">${escapeHtml(String(initialState.progress))}%</span></div><div class="panel-body"><div class="progress-shell"><div class="progress-bar" id="sim-console-progress"></div></div><div class="stage" id="sim-console-active">${escapeHtml(initialState.activeLabel)}</div><div class="status" id="sim-console-detail">${escapeHtml(initialState.statusText)}</div><div class="meta-list"><div class="meta-row"><span>현재 노선</span><strong id="sim-console-current-route">${escapeHtml(initialState.currentRoute)}</strong></div><div class="meta-row"><span>현재 시간대</span><strong id="sim-console-current-slot">${escapeHtml(initialState.currentSlot)}</strong></div><div class="meta-row"><span>현재 청크</span><strong id="sim-console-current-chunk">${escapeHtml(initialState.currentChunk)}</strong></div></div><div class="console-actions"><button type="button" id="sim-console-open-results" class="primary" disabled>결과 보기</button><button type="button" id="sim-console-close">닫기</button></div></div></div><div class="panel"><div class="panel-head"><strong>실행 로그</strong><span>실시간 업데이트</span></div><div class="console-lines" id="sim-console-lines"></div></div></section></div><script>const linesEl=document.getElementById("sim-console-lines");const openResultsButton=document.getElementById("sim-console-open-results");const stateEls={headline:document.getElementById("sim-console-headline"),status:document.getElementById("sim-console-status"),routeCount:document.getElementById("sim-console-route-count"),slotCount:document.getElementById("sim-console-slot-count"),requestCount:document.getElementById("sim-console-request-count"),stage:document.getElementById("sim-console-stage"),active:document.getElementById("sim-console-active"),detail:document.getElementById("sim-console-detail"),currentRoute:document.getElementById("sim-console-current-route"),currentSlot:document.getElementById("sim-console-current-slot"),currentChunk:document.getElementById("sim-console-current-chunk"),progress:document.getElementById("sim-console-progress"),progressLabel:document.getElementById("sim-console-progress-label")};let latestReportId=null;function appendLine(message,isError=false,replace=false){if(!linesEl)return;if(replace)linesEl.innerHTML="";const line=document.createElement("div");line.className="console-line"+(isError?" error":"");line.textContent="["+new Date().toLocaleTimeString("ko-KR",{hour12:false})+"] "+String(message||"");linesEl.appendChild(line);linesEl.scrollTop=linesEl.scrollHeight;}function setState(nextState={}){if(nextState.headline!=null&&stateEls.headline)stateEls.headline.textContent=String(nextState.headline);if(nextState.statusText!=null&&stateEls.status)stateEls.status.textContent=String(nextState.statusText);if(nextState.routeCount!=null&&stateEls.routeCount)stateEls.routeCount.textContent=String(nextState.routeCount);if(nextState.timeSlotCount!=null&&stateEls.slotCount)stateEls.slotCount.textContent=String(nextState.timeSlotCount);if(nextState.requestCount!=null&&stateEls.requestCount)stateEls.requestCount.textContent=String(nextState.requestCount);if(nextState.activeLabel!=null&&stateEls.stage)stateEls.stage.textContent=String(nextState.activeLabel);if(nextState.activeLabel!=null&&stateEls.active)stateEls.active.textContent=String(nextState.activeLabel);if(nextState.statusText!=null&&stateEls.detail)stateEls.detail.textContent=String(nextState.statusText);if(nextState.currentRoute!=null&&stateEls.currentRoute)stateEls.currentRoute.textContent=String(nextState.currentRoute);if(nextState.currentSlot!=null&&stateEls.currentSlot)stateEls.currentSlot.textContent=String(nextState.currentSlot);if(nextState.currentChunk!=null&&stateEls.currentChunk)stateEls.currentChunk.textContent=String(nextState.currentChunk);if(nextState.progress!=null){const progress=Math.max(0,Math.min(100,Number(nextState.progress)||0));if(stateEls.progress)stateEls.progress.style.width=progress+"%";if(stateEls.progressLabel)stateEls.progressLabel.textContent=progress+"%";}}function setResultReady(reportId){latestReportId=reportId?String(reportId):null;if(openResultsButton){openResultsButton.disabled=!latestReportId;openResultsButton.classList.toggle("ready",Boolean(latestReportId));}}window.__appendSimulationConsoleLog=appendLine;window.__setSimulationConsoleState=setState;window.__setSimulationConsoleResultReady=setResultReady;setState(${JSON.stringify(initialState)});setResultReady(null);openResultsButton?.addEventListener("click",()=>{if(latestReportId&&window.opener?.__wonderLinxRouteTime){window.opener.__wonderLinxRouteTime.showResults(latestReportId);}});document.getElementById("sim-console-close")?.addEventListener("click",()=>window.close());appendLine("시뮬레이션 콘솔을 준비했습니다.",false,true);appendLine("실행 요청을 기다리고 있습니다.");</script></body></html>`;
+    return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>운행시간 시뮬레이션 실행 콘솔</title><style>:root{color-scheme:light;--line:#d8e1ec;--text:#172033;--muted:#64758d;--accent:#1f6feb;--soft:#eaf2ff;}*{box-sizing:border-box;}body{margin:0;min-height:100vh;background:linear-gradient(180deg,#fbfdff 0%,#eef3f9 100%);color:var(--text);font:14px/1.5 "Segoe UI","Malgun Gothic",sans-serif;}.wrap{max-width:1360px;margin:0 auto;padding:24px;display:grid;gap:16px;}.hero,.panel{border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 12px 28px rgba(16,24,40,.06);overflow:hidden;}.hero{padding:20px 22px;}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:var(--soft);color:var(--accent);font-size:12px;font-weight:700;}.pulse{width:8px;height:8px;border-radius:999px;background:var(--accent);}h1{margin:12px 0 6px;font-size:28px;line-height:1.15;}.subtitle{margin:0;color:var(--muted);}.hero-grid{margin-top:16px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}.stat{padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:#f8fbff;}.stat b{display:block;margin-bottom:6px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;}.stat strong{font-size:28px;line-height:1;}.layout{display:grid;grid-template-columns:320px 1fr;gap:16px;}.panel-head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center;background:#fbfdff;}.panel-body{padding:18px;}.progress-shell{height:12px;border-radius:999px;background:#edf2f7;overflow:hidden;border:1px solid var(--line);}.progress-bar{height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#1f6feb);transition:width .35s ease;}.stage{margin-top:12px;font-size:16px;font-weight:700;}.status{margin-top:6px;color:var(--muted);min-height:42px;}.meta-list{margin-top:18px;display:grid;gap:10px;}.meta-row{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:12px;background:#f8fbff;border:1px solid var(--line);}.meta-row span{color:var(--muted);}.console-lines{height:620px;overflow:auto;padding:16px 18px 18px;font:13px/1.65 Consolas,"Courier New",monospace;background:#f8fbff;}.console-line{padding:4px 0;color:#1e293b;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed rgba(216,225,236,.8);}.console-line.error{color:#b42318;}.console-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;}button{padding:10px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font:inherit;cursor:pointer;}.primary{border-color:#bcd3ff;background:#eaf2ff;color:var(--accent);font-weight:700;}.primary.ready{background:#1f6feb;color:#fff;border-color:#1f6feb;box-shadow:0 10px 22px rgba(31,111,235,.2);}@media (max-width:1024px){.layout{grid-template-columns:1fr;}.hero-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.console-lines{height:420px;}}</style></head><body><div class="wrap"><section class="hero"><div class="eyebrow"><span class="pulse"></span><span>Simulation Console</span></div><h1 id="sim-console-headline">${escapeHtml(initialState.headline)}</h1><p class="subtitle" id="sim-console-status">${escapeHtml(initialState.statusText)}</p><div class="hero-grid"><div class="stat"><b>Selected Routes</b><strong id="sim-console-route-count">${escapeHtml(String(initialState.routeCount))}</strong></div><div class="stat"><b>Departure Slots</b><strong id="sim-console-slot-count">${escapeHtml(String(initialState.timeSlotCount))}</strong></div><div class="stat"><b>Estimated Calls</b><strong id="sim-console-request-count">${escapeHtml(String(initialState.requestCount))}</strong></div><div class="stat"><b>Status</b><strong id="sim-console-stage">${escapeHtml(initialState.activeLabel)}</strong></div></div></section><section class="layout"><div class="panel"><div class="panel-head"><strong>실행 상태</strong><span id="sim-console-progress-label">${escapeHtml(String(initialState.progress))}%</span></div><div class="panel-body"><div class="progress-shell"><div class="progress-bar" id="sim-console-progress"></div></div><div class="stage" id="sim-console-active">${escapeHtml(initialState.activeLabel)}</div><div class="status" id="sim-console-detail">${escapeHtml(initialState.statusText)}</div><div class="meta-list"><div class="meta-row"><span>현재 노선</span><strong id="sim-console-current-route">${escapeHtml(initialState.currentRoute)}</strong></div><div class="meta-row"><span>현재 시간대</span><strong id="sim-console-current-slot">${escapeHtml(initialState.currentSlot)}</strong></div><div class="meta-row"><span>현재 청크</span><strong id="sim-console-current-chunk">${escapeHtml(initialState.currentChunk)}</strong></div></div><div class="console-actions"><button type="button" id="sim-console-open-results" class="primary" disabled>결과 보기</button><button type="button" id="sim-console-close">닫기</button></div></div></div><div class="panel"><div class="panel-head"><strong>실행 로그</strong><span>실시간 업데이트</span></div><div class="console-lines" id="sim-console-lines"></div></div></section></div><script>const hostWindow=window.opener||window.parent;const linesEl=document.getElementById("sim-console-lines");const openResultsButton=document.getElementById("sim-console-open-results");const stateEls={headline:document.getElementById("sim-console-headline"),status:document.getElementById("sim-console-status"),routeCount:document.getElementById("sim-console-route-count"),slotCount:document.getElementById("sim-console-slot-count"),requestCount:document.getElementById("sim-console-request-count"),stage:document.getElementById("sim-console-stage"),active:document.getElementById("sim-console-active"),detail:document.getElementById("sim-console-detail"),currentRoute:document.getElementById("sim-console-current-route"),currentSlot:document.getElementById("sim-console-current-slot"),currentChunk:document.getElementById("sim-console-current-chunk"),progress:document.getElementById("sim-console-progress"),progressLabel:document.getElementById("sim-console-progress-label")};let latestReportId=null;function appendLine(message,isError=false,replace=false){if(!linesEl)return;if(replace)linesEl.innerHTML="";const line=document.createElement("div");line.className="console-line"+(isError?" error":"");line.textContent="["+new Date().toLocaleTimeString("ko-KR",{hour12:false})+"] "+String(message||"");linesEl.appendChild(line);linesEl.scrollTop=linesEl.scrollHeight;}function setState(nextState={}){if(nextState.headline!=null&&stateEls.headline)stateEls.headline.textContent=String(nextState.headline);if(nextState.statusText!=null&&stateEls.status)stateEls.status.textContent=String(nextState.statusText);if(nextState.routeCount!=null&&stateEls.routeCount)stateEls.routeCount.textContent=String(nextState.routeCount);if(nextState.timeSlotCount!=null&&stateEls.slotCount)stateEls.slotCount.textContent=String(nextState.timeSlotCount);if(nextState.requestCount!=null&&stateEls.requestCount)stateEls.requestCount.textContent=String(nextState.requestCount);if(nextState.activeLabel!=null&&stateEls.stage)stateEls.stage.textContent=String(nextState.activeLabel);if(nextState.activeLabel!=null&&stateEls.active)stateEls.active.textContent=String(nextState.activeLabel);if(nextState.statusText!=null&&stateEls.detail)stateEls.detail.textContent=String(nextState.statusText);if(nextState.currentRoute!=null&&stateEls.currentRoute)stateEls.currentRoute.textContent=String(nextState.currentRoute);if(nextState.currentSlot!=null&&stateEls.currentSlot)stateEls.currentSlot.textContent=String(nextState.currentSlot);if(nextState.currentChunk!=null&&stateEls.currentChunk)stateEls.currentChunk.textContent=String(nextState.currentChunk);if(nextState.progress!=null){const progress=Math.max(0,Math.min(100,Number(nextState.progress)||0));if(stateEls.progress)stateEls.progress.style.width=progress+"%";if(stateEls.progressLabel)stateEls.progressLabel.textContent=progress+"%";}}function setResultReady(reportId){latestReportId=reportId?String(reportId):null;if(openResultsButton){openResultsButton.disabled=!latestReportId;openResultsButton.classList.toggle("ready",Boolean(latestReportId));}}window.__appendSimulationConsoleLog=appendLine;window.__setSimulationConsoleState=setState;window.__setSimulationConsoleResultReady=setResultReady;setState(${JSON.stringify(initialState)});setResultReady(null);openResultsButton?.addEventListener("click",()=>{if(latestReportId&&hostWindow?.__wonderLinxRouteTime){hostWindow.__wonderLinxRouteTime.showResults(latestReportId);}});document.getElementById("sim-console-close")?.addEventListener("click",()=>{if(window.frameElement&&hostWindow?.__wonderLinxRouteTime?.closeInlineWindow){hostWindow.__wonderLinxRouteTime.closeInlineWindow();}else{window.close();}});appendLine("시뮬레이션 콘솔을 준비했습니다.",false,true);appendLine("실행 요청을 기다리고 있습니다.");</script></body></html>`;
   }
 
   function openRouteTimeSimulationResultsWindow(report) {
-    const resultsWindow = window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
+    const resultsHtml = buildRouteTimeSimulationResultsWindowHtml(report);
+    const resultsWindow = routeTimeInlineWindowMode
+      ? null
+      : window.open("", "route-time-simulation-results", "width=1560,height=980,resizable=yes,scrollbars=yes");
     if (!resultsWindow) {
-      setStatus("팝업이 차단되었습니다. 운행시간 시뮬레이션 결과 창을 허용해 주세요.", true);
-      return false;
+      routeTimeResultsWindowRef = openRouteTimeInlineWindow(resultsHtml, "운행시간 시뮬레이션 결과", "results");
+      if (!routeTimeResultsWindowRef) {
+        setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
+        return false;
+      }
+      setStatus("Codex 인앱 창에서 운행시간 시뮬레이션 결과를 열었습니다.", false);
+      return true;
     }
     resultsWindow.document.open();
-    resultsWindow.document.write(buildRouteTimeSimulationResultsWindowHtml(report));
+    resultsWindow.document.write(resultsHtml);
     resultsWindow.document.close();
     resultsWindow.focus();
     return true;
@@ -6823,6 +6920,24 @@
   function openRouteTimeSimulationMapWindow(reportId, routeName, departureTime) {
     if (!latestRouteTimeSimulationReport || latestRouteTimeSimulationReport.id !== reportId) {
       setStatus("표시할 운행시간 시뮬레이션 결과를 찾지 못했습니다. 다시 실행해 주세요.", true);
+      return;
+    }
+    const simulation = latestRouteTimeSimulationReport.rows.find((item) => item.routeName === routeName && item.departureTime === departureTime);
+    if (!simulation) {
+      setStatus("표시할 시간대 경로 결과를 찾지 못했습니다.", true);
+      return;
+    }
+    if (routeTimeInlineWindowMode) {
+      const inlineWindow = openRouteTimeInlineWindow(
+        buildRouteTimeSimulationMapWindowHtml(reportId, routeName, simulation),
+        `${routeName} 경로보기`,
+        "map"
+      );
+      if (!inlineWindow) {
+        setStatus("팝업과 인앱 창을 모두 열 수 없습니다. 브라우저 창 설정을 확인해 주세요.", true);
+        return;
+      }
+      setStatus("Codex 인앱 창에서 운행시간 경로를 열었습니다.", false);
       return;
     }
     const mapWindow = window.open("", `route-time-map-${routeName}-${departureTime}`, "width=1520,height=980,resizable=yes,scrollbars=yes");
@@ -15816,6 +15931,12 @@
         closeAnalysisModal();
       }
     });
+    routeTimeInlineModalCloseEl?.addEventListener("click", closeRouteTimeInlineWindow);
+    routeTimeInlineModalEl?.addEventListener("click", (event) => {
+      if (event.target === routeTimeInlineModalEl) {
+        closeRouteTimeInlineWindow();
+      }
+    });
     deletePointButtonEl.addEventListener("click", handleDeletePoint);
     movePointButtonEl.addEventListener("click", handleMovePoint);
     pointFormEl.addEventListener("submit", handleFormSubmit);
@@ -15913,6 +16034,12 @@
         });
         setStatus(error.message || "운행시간 시뮬레이션 실행 중 오류가 발생했습니다.", true);
       }
+    },
+    startFromSettings(groupKey, options) {
+      startRouteTimeSimulationFromSettings(groupKey, options);
+    },
+    closeInlineWindow() {
+      closeRouteTimeInlineWindow();
     },
     buildPendingWindowHtml(meta) {
       return buildRouteTimeSimulationPendingWindowHtml(meta);
