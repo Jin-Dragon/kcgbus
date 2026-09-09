@@ -24,6 +24,8 @@
   const RESEARCH_BASE_DWELL_SECONDS = 26;
   const DEFAULT_BUS_DELAY_PERCENT = 9;
   const OVERLAP_DISTANCE_THRESHOLD_METERS = 20;
+  const POINT_CREATION_KIND_STOP = "stop";
+  const POINT_CREATION_KIND_GUIDANCE = "guidance";
   const REGION_AVERAGE_SPEED_KMH = {
     "서울": { weekday: 13.9, saturday: 14.4, sunday: 15.2 },
     "부산": { weekday: 16.4, saturday: 16.8, sunday: 17.4 },
@@ -101,6 +103,7 @@
   const pathDetailsEl = document.getElementById("path-details");
   const pathFormEl = document.getElementById("path-form");
   const addPointButtonEl = document.getElementById("add-point-button");
+  const addGuidancePointButtonEl = document.getElementById("add-guidance-point-button");
   const resetPointButtonEl = document.getElementById("reset-point-button");
   const deletePointButtonEl = document.getElementById("delete-point-button");
   const moveRouteSelectEl = document.getElementById("move-route-select");
@@ -176,6 +179,7 @@
   let map = null;
   let mapReady = false;
   let addPointMode = false;
+  let addPointModeKind = POINT_CREATION_KIND_STOP;
   let drawPathMode = false;
   let editPathMode = false;
   let pathExtendMode = false;
@@ -1394,13 +1398,37 @@
   }
 
   function updatePointModeButtons() {
-    addPointButtonEl.classList.toggle("is-active", addPointMode);
+    const isGuidanceMode = addPointMode && addPointModeKind === POINT_CREATION_KIND_GUIDANCE;
+    const isStopMode = addPointMode && addPointModeKind === POINT_CREATION_KIND_STOP;
+    const canAddGuidancePoint = Boolean(
+      selectedRouteName
+      && getRoutes().includes(selectedRouteName)
+      && isRouteGuidanceVisible(selectedRouteName)
+      && !drawPathMode
+      && !editPathMode
+    );
+
+    addPointButtonEl.classList.toggle("is-active", isStopMode);
     editPointButtonEl.classList.toggle("is-active", Boolean(relocatePointId));
     editPointButtonEl.hidden = true;
     editPointButtonEl.setAttribute("aria-hidden", "true");
-    addPointButtonEl.textContent = addPointMode
+    addPointButtonEl.textContent = isStopMode
       ? "\uC815\uB958\uC7A5 \uCD94\uAC00 \uC885\uB8CC"
       : "\uC815\uB958\uC7A5 \uCD94\uAC00";
+    if (addGuidancePointButtonEl) {
+      addGuidancePointButtonEl.disabled = !canAddGuidancePoint;
+      addGuidancePointButtonEl.classList.toggle("is-active", isGuidanceMode);
+      addGuidancePointButtonEl.textContent = isGuidanceMode
+        ? "경로유도점 추가 종료"
+        : "경로유도점 추가";
+      addGuidancePointButtonEl.setAttribute("aria-pressed", isGuidanceMode ? "true" : "false");
+    }
+    if (formEls.isVirtual) {
+      formEls.isVirtual.disabled = isGuidanceMode;
+      if (isGuidanceMode) {
+        formEls.isVirtual.checked = true;
+      }
+    }
     editPointButtonEl.textContent = relocatePointId
       ? "\uC815\uB958\uC7A5 \uC218\uC815 \uC885\uB8CC"
       : "\uC815\uB958\uC7A5 \uC218\uC815";
@@ -2092,6 +2120,7 @@
     return {
       color: current.color || colorFromRouteName(normalizedRouteName),
       visible: current.visible !== false,
+      guidanceVisible: current.guidanceVisible === true,
       deleted: current.deleted === true,
       createdRoute: current.createdRoute === true,
       routeGroup,
@@ -2124,6 +2153,22 @@
 
   function isRouteVisible(routeName) {
     return getRouteSetting(routeName).visible;
+  }
+
+  function isRouteGuidanceVisible(routeName) {
+    return getRouteSetting(routeName).guidanceVisible;
+  }
+
+  function isMainMapPointVisible(point) {
+    return Boolean(point)
+      && isRouteVisible(point.routeName)
+      && (!isVirtualRoutingPoint(point) || isRouteGuidanceVisible(point.routeName));
+  }
+
+  function getVisiblePointsInRoute(routeName) {
+    return getPointsInRoute(routeName).filter((point) => (
+      !isVirtualRoutingPoint(point) || isRouteGuidanceVisible(routeName)
+    ));
   }
 
   function isRouteDeleted(routeName) {
@@ -2524,7 +2569,7 @@
       return;
     }
 
-    const points = getPointsInSelectedRoute();
+    const points = getVisiblePointsInRoute(selectedRouteName);
     if (!points.length) {
       selectedPointId = null;
       return;
@@ -9776,6 +9821,7 @@
     if (Number.isFinite(Number(setting.routeOrder))) {
       entries.push(`<Data name="routeOrder"><value>${escapeXml(String(setting.routeOrder))}</value></Data>`);
     }
+    entries.push(`<Data name="guidanceVisible"><value>${setting.guidanceVisible ? "true" : "false"}</value></Data>`);
     if (hasSimulationCorrections(setting.simulationCorrections)) {
       const serializedCorrections = JSON.stringify({
         ...setting.simulationCorrections,
@@ -11785,6 +11831,7 @@
     const createdOrderValue = Number(getExtendedDataValue(extendedData, "createdOrder"));
     const routeGroupValue = getExtendedDataValue(extendedData, "routeGroup");
     const routeOrderValue = Number(getExtendedDataValue(extendedData, "routeOrder"));
+    const guidanceVisibleValue = getExtendedDataValue(extendedData, "guidanceVisible").toLowerCase();
 
     return {
       id: `${fileName}-point-${index}`,
@@ -11803,6 +11850,9 @@
       createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
+      guidanceVisible: guidanceVisibleValue === "true" || guidanceVisibleValue === "false"
+        ? guidanceVisibleValue === "true"
+        : null,
       isVirtual: getVirtualFlagFromExtendedData(extendedData),
       ridership: getRidershipFromExtendedData(extendedData),
       simulationCorrections: getSimulationCorrectionsFromExtendedData(extendedData, routeName || fileName),
@@ -11842,6 +11892,7 @@
     const extendedData = getExtendedData(placemark);
     const routeGroupValue = getExtendedDataValue(extendedData, "routeGroup");
     const routeOrderValue = Number(getExtendedDataValue(extendedData, "routeOrder"));
+    const guidanceVisibleValue = getExtendedDataValue(extendedData, "guidanceVisible").toLowerCase();
 
     return {
       id: `${fileName}-path-${index}`,
@@ -11853,6 +11904,9 @@
       styleUrl: directChildText(placemark, "styleUrl"),
       routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
+      guidanceVisible: guidanceVisibleValue === "true" || guidanceVisibleValue === "false"
+        ? guidanceVisibleValue === "true"
+        : null,
       simulationCorrections: getSimulationCorrectionsFromExtendedData(extendedData, routeName || fileName),
       rawCoordinates,
       coordinates,
@@ -11926,6 +11980,9 @@
       if (Number.isFinite(Number(item?.routeOrder)) && !Number.isFinite(Number(next.routeOrder))) {
         next.routeOrder = Number(item.routeOrder);
       }
+      if (typeof item?.guidanceVisible === "boolean" && typeof next.guidanceVisible !== "boolean") {
+        next.guidanceVisible = item.guidanceVisible;
+      }
       if (hasSimulationCorrections(item?.simulationCorrections) && !hasSimulationCorrections(next.simulationCorrections)) {
         next.simulationCorrections = normalizeSimulationCorrections(item.simulationCorrections, routeName);
       }
@@ -11937,6 +11994,7 @@
         ...getRouteSetting(routeName),
         ...(meta.routeGroup ? { routeGroup: meta.routeGroup } : {}),
         ...(Number.isFinite(Number(meta.routeOrder)) ? { routeOrder: Number(meta.routeOrder) } : {}),
+        ...(typeof meta.guidanceVisible === "boolean" ? { guidanceVisible: meta.guidanceVisible } : {}),
         ...(hasSimulationCorrections(meta.simulationCorrections)
           ? { simulationCorrections: normalizeSimulationCorrections(meta.simulationCorrections, routeName) }
           : {}),
@@ -12626,7 +12684,9 @@
       }
 
       const routePaths = getAllPaths().filter((path) => path.routeName === routeName);
-      const pointCount = getAllPoints().filter((point) => point.routeName === routeName).length;
+      const routePoints = getAllPoints().filter((point) => point.routeName === routeName);
+      const pointCount = routePoints.filter((point) => !isVirtualRoutingPoint(point)).length;
+      const guidancePointCount = routePoints.filter((point) => isVirtualRoutingPoint(point)).length;
       const pathCount = routePaths.length;
       const totalRouteDistanceMeters = routePaths.reduce(
         (sum, pathItem) =>
@@ -12742,7 +12802,39 @@
       visibleText.textContent = "표시";
       visibleLabel.appendChild(visibleInput);
       visibleLabel.appendChild(visibleText);
-      titleRow.appendChild(visibleLabel);
+
+      const guidanceLabel = document.createElement("label");
+      guidanceLabel.className = "route-toggle route-toggle-inline route-guidance-toggle";
+      guidanceLabel.title = "경로유도점 표시 여부";
+      guidanceLabel.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      guidanceLabel.addEventListener("mousedown", (event) => {
+        event.stopPropagation();
+      });
+      const guidanceInput = document.createElement("input");
+      guidanceInput.type = "checkbox";
+      guidanceInput.checked = setting.guidanceVisible;
+      guidanceInput.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      guidanceInput.addEventListener("mousedown", (event) => {
+        event.stopPropagation();
+      });
+      guidanceInput.addEventListener("change", (event) => {
+        event.stopPropagation();
+        setRouteGuidanceVisible(routeName, event.target.checked);
+      });
+      const guidanceText = document.createElement("span");
+      guidanceText.textContent = "경로유도";
+      guidanceLabel.appendChild(guidanceInput);
+      guidanceLabel.appendChild(guidanceText);
+
+      const routeVisibilityControls = document.createElement("span");
+      routeVisibilityControls.className = "route-visibility-controls";
+      routeVisibilityControls.appendChild(visibleLabel);
+      routeVisibilityControls.appendChild(guidanceLabel);
+      titleRow.appendChild(routeVisibilityControls);
 
       const routeIconActions = document.createElement("span");
       routeIconActions.className = "route-icon-actions";
@@ -12782,7 +12874,7 @@
       titleRow.appendChild(routeIconActions);
 
       const metaText = document.createElement("span");
-      metaText.textContent = `${pointCount}개 정류장 / ${pathCount}개 경로 / 총 ${formatDistanceKm(totalRouteDistanceMeters)}km`;
+      metaText.textContent = `${pointCount}개 정류장${guidancePointCount ? ` / 경로유도점 ${guidancePointCount}개` : ""} / ${pathCount}개 경로 / 총 ${formatDistanceKm(totalRouteDistanceMeters)}km`;
       button.appendChild(titleRow);
       button.appendChild(metaText);
       const handleRouteSelect = () => {
@@ -12948,6 +13040,52 @@
     refreshUI();
     setStatus(
       visible ? `${groupLabel} 노선 리스트를 표시 상태로 바꿉니다.` : `${groupLabel} 노선 리스트를 숨김 상태로 바꿉니다.`,
+      false
+    );
+  }
+
+  function setRouteGuidanceVisible(routeName, visible) {
+    const normalizedRouteName = normalizeRouteName(routeName);
+    if (!getRoutes().includes(normalizedRouteName)) {
+      return;
+    }
+
+    pushUndoSnapshot();
+    routeSettings[normalizedRouteName] = {
+      ...getRouteSetting(normalizedRouteName),
+      guidanceVisible: Boolean(visible),
+    };
+    saveRouteSettings();
+
+    // 경로유도 표시를 켠 노선을 곧바로 경로유도점 편집 대상으로 삼습니다.
+    // 카드의 체크박스만 눌러도 상단의 "경로유도점 추가"가 활성화되어야 하며,
+    // 기존 선택 노선과 다른 노선을 켠 경우에도 포인트가 엉뚱한 노선에 추가되지 않게 합니다.
+    if (visible) {
+      stopRelocateMode();
+      hasClearedSelection = false;
+      selectedRouteName = normalizedRouteName;
+      addHighlightedRoute(normalizedRouteName);
+      selectedPointId = null;
+      selectedPathId = null;
+    }
+
+    if (!visible && addPointMode && addPointModeKind === POINT_CREATION_KIND_GUIDANCE
+      && selectedRouteName === normalizedRouteName) {
+      setAddPointMode(false);
+    }
+
+    if (!visible && selectedPointId) {
+      const selectedPoint = getPointById(selectedPointId);
+      if (selectedPoint && isVirtualRoutingPoint(selectedPoint) && selectedPoint.routeName === normalizedRouteName) {
+        selectedPointId = null;
+      }
+    }
+
+    refreshUI();
+    setStatus(
+      visible
+        ? `"${normalizedRouteName}" 노선의 경로유도점을 표시합니다.`
+        : `"${normalizedRouteName}" 노선의 경로유도점을 숨겼습니다.`,
       false
     );
   }
@@ -13661,7 +13799,7 @@
     routePointListEl.innerHTML = "";
     ensurePointListSearchInput();
     const query = normalizeSearchText(pointListSearchQuery);
-    const points = getPointsInSelectedRoute()
+    const points = getVisiblePointsInRoute(selectedRouteName)
       .filter((point) => !query || normalizeSearchText(point.name).includes(query));
 
     if (!selectedRouteName) {
@@ -13670,7 +13808,9 @@
     }
 
     if (!points.length) {
-      routePointListEl.innerHTML = '<div class="details-card empty"><p class="details-empty">선택한 노선에는 정류장이 없습니다.</p></div>';
+      routePointListEl.innerHTML = isRouteGuidanceVisible(selectedRouteName)
+        ? '<div class="details-card empty"><p class="details-empty">선택한 노선에는 정류장이나 경로유도점이 없습니다.</p></div>'
+        : '<div class="details-card empty"><p class="details-empty">선택한 노선에는 표시할 정류장이 없습니다. 경로유도점은 노선 카드에서 경로유도를 체크하면 표시됩니다.</p></div>';
       return;
     }
 
@@ -13743,7 +13883,7 @@
       ridershipMeta.className = "point-meta";
       ridershipMeta.textContent =
         point.isVirtual
-          ? "가상 포인트"
+          ? "경로유도점"
           : (normalizeRidershipValue(point.ridership) == null
             ? "탑승객 미입력"
             : `탑승객 ${formatRidershipValue(point.ridership)}명`);
@@ -14523,6 +14663,12 @@
     cancelPathButtonEl.disabled = !(drawing || editing);
     deletePathButtonEl.disabled = !hasSelectedPath;
     addPointButtonEl.disabled = pathEditingActive;
+    if (addGuidancePointButtonEl) {
+      addGuidancePointButtonEl.disabled = pathEditingActive
+        || !selectedRouteName
+        || !getRoutes().includes(selectedRouteName)
+        || !isRouteGuidanceVisible(selectedRouteName);
+    }
     resetPointButtonEl.disabled = pathEditingActive;
     movePointButtonEl.disabled = pathEditingActive || movePointButtonEl.disabled;
     deletePointButtonEl.disabled = pathEditingActive || !getPointById(selectedPointId);
@@ -14681,7 +14827,7 @@
       { label: "위도", value: String(point.lat) },
       { label: "경도", value: String(point.lng) },
       { label: "설명", value: point.description },
-      { label: "가상 포인트", value: point.isVirtual ? "예" : "" },
+      { label: "경로유도점", value: point.isVirtual ? "예" : "" },
       { label: "주소", value: point.address },
       { label: "전화번호", value: point.phoneNumber },
       { label: "탑승객 수", value: normalizeRidershipValue(point.ridership) == null ? "" : `${formatRidershipValue(point.ridership)}명` },
@@ -14782,7 +14928,9 @@
     formEls.fileName.value = point?.fileName || "직접 추가";
     formEls.lat.value = point?.lat ?? "";
     formEls.lng.value = point?.lng ?? "";
-    formEls.isVirtual.checked = point?.isVirtual === true;
+    const isGuidanceCreation = addPointMode && addPointModeKind === POINT_CREATION_KIND_GUIDANCE && !point;
+    formEls.isVirtual.checked = isGuidanceCreation || point?.isVirtual === true;
+    formEls.isVirtual.disabled = isGuidanceCreation;
     formEls.description.value = point?.description || "";
     deletePointButtonEl.disabled = !point;
   }
@@ -14866,8 +15014,62 @@
     renderPoints();
     setStatus("정류장 수정 모드입니다. 지도나 다른 정류장을 클릭하거나, 선택한 정류장 마커를 끌어 위치를 옮기세요. 취소는 Esc입니다.", false);
   }
-  function setAddPointMode(enabled) {
+  function getNextGuidancePointName(routeName) {
+    const guidanceCount = getPointsInRoute(routeName).filter((point) => isVirtualRoutingPoint(point)).length;
+    return `경로유도점 ${guidanceCount + 1}`;
+  }
+
+  function startPointCreationMode(kind = POINT_CREATION_KIND_STOP) {
+    const creationKind = kind === POINT_CREATION_KIND_GUIDANCE
+      ? POINT_CREATION_KIND_GUIDANCE
+      : POINT_CREATION_KIND_STOP;
+    const isGuidance = creationKind === POINT_CREATION_KIND_GUIDANCE;
+
+    if (drawPathMode || editPathMode) {
+      setStatus("경로 편집 중에는 포인트 추가 모드를 사용할 수 없습니다.", true);
+      return;
+    }
+    if (!selectedRouteName || !getRoutes().includes(selectedRouteName)) {
+      setStatus("포인트를 추가할 노선을 먼저 선택하세요.", true);
+      return;
+    }
+    if (isGuidance && !isRouteGuidanceVisible(selectedRouteName)) {
+      setStatus("노선 카드에서 경로유도 표시를 먼저 체크하세요.", true);
+      return;
+    }
+
+    if (addPointMode && addPointModeKind === creationKind) {
+      setAddPointMode(false);
+      setStatus(isGuidance ? "경로유도점 추가 모드를 종료했습니다." : "정류장 추가 모드를 종료했습니다.", false);
+      return;
+    }
+
+    stopRelocateMode();
+    selectedPointId = null;
+    selectedPathId = null;
+    setAddPointMode(true, creationKind);
+    openPointFormSection();
+    clearForm();
+    renderFormRouteOptions(selectedRouteName);
+    if (isGuidance) {
+      formEls.name.value = getNextGuidancePointName(selectedRouteName);
+      formEls.isVirtual.checked = true;
+      formEls.description.value = "정류장이 아닌 경로 유도용 포인트";
+    }
+    formEls.name.focus();
+    setStatus(
+      isGuidance
+        ? `경로유도점 추가 모드입니다. ${selectedRouteName} 노선의 지도 위치를 클릭하세요.`
+        : `정류장 추가 모드입니다. ${selectedRouteName} 노선의 지도 위치를 클릭하세요.`,
+      false
+    );
+  }
+
+  function setAddPointMode(enabled, kind = POINT_CREATION_KIND_STOP) {
     addPointMode = enabled;
+    addPointModeKind = enabled && kind === POINT_CREATION_KIND_GUIDANCE
+      ? POINT_CREATION_KIND_GUIDANCE
+      : POINT_CREATION_KIND_STOP;
     if (enabled) {
       stopObservationAreaDrawMode();
       if (!selectedRouteName) {
@@ -14883,9 +15085,11 @@
 
     if (enabled) {
       setStatus(
-        selectedRouteName
-          ? `정류장 추가 모드입니다. 현재 노선은 ${selectedRouteName === TEMP_NEW_ROUTE_NAME ? "새 노선" : selectedRouteName}입니다. 지도에서 위치를 클릭하세요.`
-          : "정류장 추가 모드입니다. 먼저 노선을 입력한 뒤 지도에서 위치를 클릭하세요.",
+        addPointModeKind === POINT_CREATION_KIND_GUIDANCE
+          ? `경로유도점 추가 모드입니다. 현재 노선은 ${selectedRouteName || "선택되지 않음"}입니다. 지도에서 위치를 클릭하세요.`
+          : (selectedRouteName
+            ? `정류장 추가 모드입니다. 현재 노선은 ${selectedRouteName === TEMP_NEW_ROUTE_NAME ? "새 노선" : selectedRouteName}입니다. 지도에서 위치를 클릭하세요.`
+            : "정류장 추가 모드입니다. 먼저 노선을 입력한 뒤 지도에서 위치를 클릭하세요."),
         false
       );
     } else if (!selectedPointId) {
@@ -14976,13 +15180,20 @@
     saveOverrides();
   }
 
-  function preparePointCreationAtPosition(lat, lng) {
+  function preparePointCreationAtPosition(lat, lng, kind = addPointModeKind) {
+    const creationKind = kind === POINT_CREATION_KIND_GUIDANCE
+      ? POINT_CREATION_KIND_GUIDANCE
+      : POINT_CREATION_KIND_STOP;
     if (!selectedRouteName || !getRoutes().includes(selectedRouteName)) {
-      setStatus("정류장을 추가할 노선을 먼저 선택하세요.", true);
+      setStatus("포인트를 추가할 노선을 먼저 선택하세요.", true);
+      return false;
+    }
+    if (creationKind === POINT_CREATION_KIND_GUIDANCE && !isRouteGuidanceVisible(selectedRouteName)) {
+      setStatus("노선 카드에서 경로유도 표시를 먼저 체크하세요.", true);
       return false;
     }
     if (drawPathMode || editPathMode) {
-      setStatus("경로 편집 중에는 정류장 추가 모드를 사용할 수 없습니다.", true);
+      setStatus("경로 편집 중에는 포인트 추가 모드를 사용할 수 없습니다.", true);
       return false;
     }
 
@@ -14992,11 +15203,21 @@
     selectedPathId = null;
     clearForm(lat, lng);
     renderFormRouteOptions(selectedRouteName);
-    setAddPointMode(true);
+    setAddPointMode(true, creationKind);
     openPointFormSection();
     ensureDraftMarker(lat, lng);
+    if (creationKind === POINT_CREATION_KIND_GUIDANCE) {
+      formEls.name.value = getNextGuidancePointName(selectedRouteName);
+      formEls.isVirtual.checked = true;
+      formEls.description.value = "정류장이 아닌 경로 유도용 포인트";
+    }
     formEls.name.focus();
-    setStatus(`정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`, false);
+    setStatus(
+      creationKind === POINT_CREATION_KIND_GUIDANCE
+        ? `경로유도점 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`
+        : `정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`,
+      false
+    );
     return true;
   }
 
@@ -15186,12 +15407,14 @@
   function renderPoints() {
     const points = getAllPoints();
     const paths = getAllPaths();
+    const visiblePoints = points.filter(isMainMapPointVisible);
+    const visiblePaths = paths.filter((pathItem) => isRouteVisible(pathItem.routeName));
     if (!mapReady) {
       return;
     }
 
     clearMap();
-    if (!points.length && !paths.length) {
+    if (!visiblePoints.length && !visiblePaths.length) {
       setEmptyDetails();
       clearDraftMarker();
       return;
@@ -15201,18 +15424,19 @@
     const routeOrderMap = new Map();
 
     getRoutes().forEach((routeName) => {
-      getPointsInRoute(routeName).forEach((point, index) => {
-        routeOrderMap.set(point.id, index + 1);
+      let stopOrder = 0;
+      getPointsInRoute(routeName).forEach((point) => {
+        if (isVirtualRoutingPoint(point)) {
+          return;
+        }
+        stopOrder += 1;
+        routeOrderMap.set(point.id, stopOrder);
       });
     });
 
     const hasRouteSelection = highlightedRouteNames.length > 0;
 
-    paths.forEach((pathItem) => {
-      if (!isRouteVisible(pathItem.routeName)) {
-        return;
-      }
-
+    visiblePaths.forEach((pathItem) => {
       const routeSetting = getRouteSetting(pathItem.routeName);
       if (editPathMode && pathItem.id === selectedPathId) {
         return;
@@ -15267,11 +15491,7 @@
       polylinePath.forEach((position) => bounds.extend(position));
     });
 
-    points.forEach((point) => {
-      if (!isRouteVisible(point.routeName)) {
-        return;
-      }
-
+    visiblePoints.forEach((point) => {
       const routeSetting = getRouteSetting(point.routeName);
       const position = new window.kakao.maps.LatLng(point.lat, point.lng);
       const isRelocatingPoint = relocatePointId === point.id;
@@ -15738,7 +15958,7 @@
     setStatus(`모든 경로 ${paths.length}개를 삭제했습니다.`, false);
   }
 
-  function buildPointFromForm(basePoint) {
+  function buildPointFromForm(basePoint, forceVirtual = false) {
     const lat = Number(formEls.lat.value);
     const lng = Number(formEls.lng.value);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -15751,6 +15971,7 @@
     }
 
     const altitude = basePoint.altitude ?? null;
+    const isVirtual = forceVirtual === true || formEls.isVirtual.checked === true;
     return {
       ...basePoint,
       routeName,
@@ -15759,7 +15980,7 @@
       lat,
       lng,
       altitude,
-      isVirtual: formEls.isVirtual.checked === true,
+      isVirtual,
       phoneNumber: basePoint.phoneNumber || "",
       address: basePoint.address || "",
       description: formEls.description.value.trim(),
@@ -15767,7 +15988,7 @@
       ridership: normalizeRidershipValue(basePoint.ridership),
       extendedData: withVirtualExtendedData(
         withRidershipExtendedData(basePoint.extendedData, basePoint.ridership),
-        formEls.isVirtual.checked === true
+        isVirtual
       ),
     };
   }
@@ -15874,7 +16095,7 @@
 
   function getVisiblePointsForRidershipExport() {
     return getAllPoints()
-      .filter((point) => isRouteVisible(point.routeName))
+      .filter((point) => !isVirtualRoutingPoint(point) && isRouteVisible(point.routeName))
       .sort((left, right) => {
         const leftRouteOrder = Number(getRouteSetting(left.routeName).routeOrder);
         const rightRouteOrder = Number(getRouteSetting(right.routeName).routeOrder);
@@ -16056,7 +16277,10 @@
 
         const lat = Number(formEls.lat.value);
         const lng = Number(formEls.lng.value);
-        const point = buildPointFromForm(createCustomPoint(lat, lng));
+        const point = buildPointFromForm(
+          createCustomPoint(lat, lng),
+          addPointModeKind === POINT_CREATION_KIND_GUIDANCE
+        );
         customPoints = [...customPoints, point];
         saveCustomPoints();
         selectedPointId = point.id;
@@ -16298,21 +16522,21 @@
     );
     addPointButtonEl.addEventListener("click", () => {
       if (drawPathMode || editPathMode) {
-        setStatus("경로 편집 중에는 정류장 추가 모드를 사용할 수 없습니다.", true);
+        setStatus("경로 편집 중에는 포인트 추가 모드를 사용할 수 없습니다.", true);
         return;
       }
 
-      const next = !addPointMode;
-      if (next) {
-        stopRelocateMode();
+      if (addPointMode && addPointModeKind === POINT_CREATION_KIND_STOP) {
+        setAddPointMode(false);
+        setStatus("정류장 추가 모드를 종료했습니다.", false);
+        return;
       }
-      setAddPointMode(next);
-      if (next) {
-        openPointFormSection();
-        selectedPointId = null;
-        clearForm();
-        renderFormRouteOptions(selectedRouteName || "");
-      }
+
+      startPointCreationMode(POINT_CREATION_KIND_STOP);
+    });
+
+    addGuidancePointButtonEl?.addEventListener("click", () => {
+      startPointCreationMode(POINT_CREATION_KIND_GUIDANCE);
     });
 
     editPointButtonEl.addEventListener("click", () => {
@@ -16340,7 +16564,7 @@
       stopRelocateMode();
       clearForm();
       renderFormRouteOptions(selectedRouteName);
-      setAddPointMode(true);
+      setAddPointMode(true, POINT_CREATION_KIND_STOP);
       openPointFormSection();
       setStatus(`새 정류장 정보를 입력하세요. 현재 노선은 ${selectedRouteName} 입니다.`, false);
     });

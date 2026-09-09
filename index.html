@@ -65,6 +65,7 @@
             </div>
             <div class="action-group">
               <button id="add-point-button" class="secondary-button" type="button">정류장 추가</button>
+              <button id="add-guidance-point-button" class="secondary-button" type="button" disabled>경로유도점 추가</button>
               <button id="edit-point-button" class="secondary-button" type="button">정류장 수정</button>
             </div>
           </div>
@@ -239,8 +240,8 @@
             </div>
             <label class="checkbox-field">
               <input id="form-is-virtual" name="isVirtual" type="checkbox">
-              <span>가상</span>
-              <small>정류장이 아닌 경로 유도용 포인트로 사용합니다.</small>
+              <span>경로유도점</span>
+              <small>정류장 정차·승객 집계 없이 경로 유도에만 사용합니다.</small>
             </label>
             <label class="field">
               <span>설명</span>
@@ -360,6 +361,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260907-route-visibility"></script>
+  <script src="./app.js?v=20260907-route-guidance"></script>
 </body>
 </html>

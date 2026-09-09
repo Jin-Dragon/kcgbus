@@ -1057,11 +1057,25 @@ h1::before {
 
 .route-toggle-inline {
   padding: 0;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .route-toggle-inline span {
   margin-top: 0;
+}
+
+.route-visibility-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.route-guidance-toggle {
+  color: #7a5b1a;
+  white-space: nowrap;
 }
 
 .route-icon-actions {
