@@ -1954,6 +1954,10 @@
     return point?.isVirtual === true;
   }
 
+  function getOperationalPoints() {
+    return getAllPoints().filter((point) => !isVirtualRoutingPoint(point));
+  }
+
   function getOperationalPointsInRoute(routeName) {
     return getPointsInRoute(routeName).filter((point) => !isVirtualRoutingPoint(point));
   }
@@ -2582,7 +2586,7 @@
 
   function updateCounts() {
     const routes = getRoutes();
-    const points = getAllPoints();
+    const points = getOperationalPoints();
     const existingRouteCount = routes.filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged").length;
     const newRouteCount = routes.length - existingRouteCount;
     const existingPointCount = points.filter((point) => getRouteSetting(point.routeName).routeGroup !== "merged").length;
@@ -2817,7 +2821,7 @@
 
   function buildAnalysisDataset(routeNames = getRoutes()) {
     const routeNameSet = new Set(routeNames);
-    const points = getAllPoints().filter((point) => routeNameSet.has(point.routeName));
+    const points = getOperationalPoints().filter((point) => routeNameSet.has(point.routeName));
     const paths = getAllPaths().filter((pathItem) => routeNameSet.has(pathItem.routeName));
 
     return {
@@ -2847,7 +2851,7 @@
 
   function detectDuplicatePoints(thresholdMeters = 30, routeNames = getRoutes()) {
     const routeNameSet = new Set(routeNames);
-    const points = getAllPoints().filter((point) => routeNameSet.has(point.routeName));
+    const points = getOperationalPoints().filter((point) => routeNameSet.has(point.routeName));
     const pointMap = new Map(
       points.map((point) => [
         point.id,
@@ -3692,7 +3696,7 @@
   function buildRidershipCandidateAnalysis(routeNames = getRoutes()) {
     const routeList = Array.isArray(routeNames) && routeNames.length ? routeNames : getRoutes();
     const routeNameSet = new Set(routeList);
-    const points = getAllPoints().filter((point) => routeNameSet.has(point.routeName));
+    const points = getOperationalPoints().filter((point) => routeNameSet.has(point.routeName));
     const thresholds = {
       maxRidership: 20,
       maxUtilizationRate: 0.03,
@@ -3795,7 +3799,7 @@
     const duplicatePointIds = buildDuplicatePointIdSet(routeNames, options.duplicateRadiusMeters);
     const routes = routeNames
       .map((routeName) => {
-        const routePoints = getAllPoints()
+        const routePoints = getOperationalPoints()
           .filter((point) => point.routeName === routeName)
           .sort(comparePointsByOrder)
           .map((point) => ({
@@ -4252,6 +4256,17 @@
     return `${remainingSeconds}초`;
   }
 
+  function normalizeStopDwellSeconds(value) {
+    if (value == null || (typeof value === "string" && value.trim() === "")) {
+      return RESEARCH_BASE_DWELL_SECONDS;
+    }
+    const seconds = Number(value);
+    if (!["number", "string"].includes(typeof value) || !Number.isFinite(seconds) || seconds < 0) {
+      throw new Error("정류장별 기본 대기시간은 0 이상의 숫자(초)로 입력하세요.");
+    }
+    return seconds;
+  }
+
   function normalizeRouteTimeSimulationOptions(value = {}) {
     const current = value && typeof value === "object" ? value : {};
     const requestedPathMode = String(current.pathMode || ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN).trim().toLowerCase();
@@ -4284,6 +4299,7 @@
       endHour: Math.max(startHour, endHour),
       intervalMinutes,
       busDelayPercent: Math.round(busDelayPercent * 10) / 10,
+      stopDwellSeconds: normalizeStopDwellSeconds(current.stopDwellSeconds),
     };
   }
 
@@ -4385,6 +4401,7 @@
   }
 
   function buildRouteResearchProfile(routeName, distanceMeters, options = {}) {
+    const baseDwellSeconds = normalizeStopDwellSeconds(options.stopDwellSeconds);
     const ridershipProfile = getRouteRidershipProfile(routeName);
     const virtualStopCount = getPointsInRoute(routeName).filter((point) => isVirtualRoutingPoint(point)).length;
     const dayType = getSimulationDayType(options.selectedDate);
@@ -4399,7 +4416,7 @@
       const dwellWeight = getRidershipDwellWeight(ridership, ridershipProfile.totalRidership);
       const dwellSeconds = index === lastOperationalIndex
         ? 0
-        : Math.round(RESEARCH_BASE_DWELL_SECONDS * dwellWeight);
+        : Math.round(baseDwellSeconds * dwellWeight);
       const sharePercent = ridershipProfile.totalRidership > 0 && ridership != null
         ? (ridership / ridershipProfile.totalRidership) * 100
         : null;
@@ -4423,7 +4440,7 @@
       busDelayPercent: Number.isFinite(Number(options.busDelayPercent))
         ? Number(options.busDelayPercent)
         : DEFAULT_BUS_DELAY_PERCENT,
-      baseDwellSeconds: RESEARCH_BASE_DWELL_SECONDS,
+      baseDwellSeconds,
       ridershipStopCount: ridershipProfile.ridershipStopCount,
       virtualStopCount,
       totalRidership: ridershipProfile.totalRidership,
@@ -4452,6 +4469,8 @@
 
   function buildRouteTimeSimulationSettingsWindowHtml(groupKey, groupLabel, routeItems, defaults) {
     const isDrawnPathMode = defaults.pathMode !== ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO;
+    const defaultStopDwellSeconds = normalizeStopDwellSeconds(defaults.stopDwellSeconds);
+    const stopDwellInputValue = defaultStopDwellSeconds === RESEARCH_BASE_DWELL_SECONDS ? "" : String(defaultStopDwellSeconds);
     const routeItemsHtml = routeItems.map((item) => `
       <label class="route-item${item.disabled ? " is-disabled" : ""}">
         <input name="routeNames" type="checkbox" value="${escapeHtml(item.routeName)}" ${item.disabled ? "disabled" : "checked"}>
@@ -4540,6 +4559,12 @@
           <input name="busDelayPercent" type="number" min="0" max="30" step="0.5" value="${escapeHtml(String(defaults.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT))}">
         </label>
       </div>
+      <div class="grid" style="margin-top:14px;">
+        <label class="field">정류장별 기본 대기시간(초)
+          <input name="stopDwellSeconds" type="number" min="0" step="any" value="${escapeHtml(stopDwellInputValue)}" placeholder="미입력 시 기본값 ${RESEARCH_BASE_DWELL_SECONDS}초">
+        </label>
+      </div>
+      <div class="note">비워두면 기본 ${RESEARCH_BASE_DWELL_SECONDS}초, 숫자를 입력하면 해당 초를 기준으로 계산합니다. 0초도 적용됩니다. 기존 승객 비중 가중치를 적용해 초 단위로 반올림하며, 마지막 정류장과 경로유도점에는 대기시간을 추가하지 않습니다.</div>
       <div class="actions">
         <button class="primary" type="submit">시뮬레이션 실행</button>
         <button type="button" id="close-window-button">닫기</button>
@@ -4612,6 +4637,7 @@
         endHour: Number(data.get("endHour")),
         intervalMinutes: Number(data.get("intervalMinutes") || 60),
         busDelayPercent: Number(data.get("busDelayPercent") || ${DEFAULT_BUS_DELAY_PERCENT}),
+        stopDwellSeconds: data.get("stopDwellSeconds"),
       };
       appendLog("시뮬레이션 실행을 요청했습니다.");
       if (hostWindow?.__wonderLinxRouteTime?.startFromSettings) {
@@ -4950,6 +4976,7 @@
       pathCoordinates,
       totalDistanceMeters: Number(measureCoordinatePathDistance(pathCoordinates).toFixed(1)),
       snappedPointCount: preparedPoints.filter((point) => point.snappedToPath).length,
+      snappedStopCount: preparedPoints.filter((point) => point.snappedToPath && !isVirtualRoutingPoint(point)).length,
       drawnPathMatch,
     };
   }
@@ -5820,6 +5847,7 @@
   }
 
   function buildRouteTimeSimulationReport(responsePayload, options) {
+    options = normalizeRouteTimeSimulationOptions(options);
     const routes = Array.isArray(responsePayload?.routes) ? responsePayload.routes : [];
     const rows = [];
     routes.forEach((route) => {
@@ -5960,7 +5988,7 @@
 
   function buildRouteTimeSimulationExcelWorkbook(report) {
     const summaryRows = [
-      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "base_drive_minutes", "base_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km", "path_warnings"],
+      ["route_name", "time_label", "departure_time", "stop_count", "segment_count", "base_drive_minutes", "base_drive_time", "dwell_minutes", "dwell_time", "bus_delay_minutes", "bus_delay_time", "total_minutes", "total_time", "distance_km", "path_warnings", "base_dwell_seconds"],
     ];
     const stopRows = [
       ["route_name", "time_label", "departure_time", "stop_order", "stop_name", "ridership", "ridership_share_percent", "dwell_weight", "base_dwell_seconds", "applied_dwell_seconds", "applied_dwell_time", "is_terminal"],
@@ -5992,6 +6020,7 @@
         formatSimulationDurationLabel(totalSeconds),
         Number((Number(row.distanceMeters || 0) / 1000).toFixed(2)),
         (row.pathWarnings || []).join("\n"),
+        Number(row.researchProfile?.baseDwellSeconds ?? normalizeStopDwellSeconds(report.options?.stopDwellSeconds)),
       ]);
 
       (row.researchProfile?.stopDetails || []).forEach((stop, index) => {
@@ -6005,7 +6034,7 @@
           stop.ridership == null ? "" : Number(stop.ridership),
           stop.sharePercent == null ? "" : Number(Number(stop.sharePercent).toFixed(2)),
           stop.dwellWeight == null ? "" : Number(Number(stop.dwellWeight).toFixed(2)),
-          Number(row.researchProfile?.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS),
+          Number(row.researchProfile?.baseDwellSeconds ?? normalizeStopDwellSeconds(report.options?.stopDwellSeconds)),
           appliedDwellSeconds,
           formatSimulationDurationLabel(appliedDwellSeconds),
           stop.isTerminal === true ? "Y" : "",
@@ -6102,6 +6131,7 @@
       return "계산 로그를 찾지 못했습니다.";
     }
     const research = simulation.researchProfile || {};
+    const baseDwellSeconds = normalizeStopDwellSeconds(research.baseDwellSeconds);
     const lines = [
       `노선: ${simulation.routeName || "-"}`,
       `시간대: ${simulation.timeLabel || "-"}`,
@@ -6119,15 +6149,15 @@
       `요일 유형: ${research.dayTypeLabel || "-"}`,
       `자동 감지 권역: ${research.region || "-"}`,
       `권역 평균 버스속도: ${Number(research.regionAverageSpeedKmh || 0).toFixed(1)}km/h`,
-      `버스지체보정률: ${Number(research.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`,
-      `기준 정류장 정차시간: ${research.baseDwellSeconds || RESEARCH_BASE_DWELL_SECONDS}초`,
+      `버스지체보정률: ${Number(research.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`,
+      `기준 정류장 대기시간: ${baseDwellSeconds}초`,
       `탑승자 입력 정류장: ${research.ridershipStopCount || 0}개 / 총합 ${Number(research.totalRidership || 0).toLocaleString("ko-KR")}`,
-      `가상정류장 수: ${research.virtualStopCount || 0}개`,
+      `경로유도점 수: ${research.virtualStopCount || 0}개`,
       `권역 속도 기준 주행시간: ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
       `기준 주행시간: ${research.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO ? `카카오 미래 길찾기 ${formatSimulationDurationLabel(research.kakaoDriveSeconds || 0)}` : `KML 선형거리 / 권역 평균속도 ${formatSimulationDurationLabel(research.drawnPathDriveSeconds || 0)}`} / 권역속도 참고값 ${formatSimulationDurationLabel(research.regionalDriveSeconds || 0)}`,
       `버스지체보정 추가시간: ${formatSimulationDurationLabel(research.busDelaySeconds || 0)}`,
       `최종 적용 주행시간: 기준 주행시간 + 버스지체보정 = ${formatSimulationDurationLabel(simulation.driveSeconds || 0)}`,
-      `최종 적용 정차보정: 마지막 정류장 제외, 정류장별 26초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
+      `최종 적용 정차보정: 마지막 정류장 제외, 정류장별 ${baseDwellSeconds}초 x 승객비중 가중치 = ${formatSimulationDurationLabel(simulation.dwellSecondsTotal || 0)}`,
       `적용식: ${research.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_KAKAO ? "(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률))" : "(KML 그린 경로 거리 / 권역 평균 버스속도 x (1 + 버스지체보정률))"} + 정류장별 정차보정`,
       "",
       "[구간별 계산 로그]",
@@ -6142,7 +6172,8 @@
       ));
       lines.push(
         `구간 ${index + 1}`,
-        `- 포함 정류장: ${(chunk.stops || []).length}개`,
+        `- 포함 정류장: ${(chunk.stops || []).filter(isDisplayableSimulationStop).length}개`,
+        `- 포함 경로유도점: ${(chunk.stops || []).filter((stop) => isVirtualRoutingPoint(stop) && !stop.isSimulationCorrection).length}개`,
         `- origin: ${chunk.originParam || "-"}`,
         `- destination: ${chunk.destinationParam || "-"}`,
         `- waypoints: ${chunk.waypointsParam || "-"}`,
@@ -6200,6 +6231,7 @@
 
   function buildRouteTimeSimulationResultsWindowHtml(report) {
     const isDrawnPathMode = report.options?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
+    const baseDwellSeconds = normalizeStopDwellSeconds(report.options?.stopDwellSeconds);
     const routeCards = (report.routes || []).map((route) => `
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -6263,7 +6295,7 @@
       <p>노선 ${escapeHtml(String(report.summary.routeCount))}개 / 시간대 ${escapeHtml(String(report.summary.timeSlotCount))}개 / 결과 ${escapeHtml(String(report.summary.simulationRowCount))}행</p>
       <p class="meta">생성 시각: ${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
       <p class="meta">경로 기준: ${isDrawnPathMode ? "사용자 KML 그린 경로 고정 · 카카오 경로 재탐색 없음" : "카카오 미래 길찾기 경로"}</p>
-      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 계산식: <code>${isDrawnPathMode ? "(KML 그린 경로 거리 / 권역 평균 버스속도 x (1 + 버스지체보정률)) + 정류장별 정차보정" : "(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정"}</code></p>
+      <p class="meta">기준 날짜: ${escapeHtml(String(report.options?.selectedDate || "-"))} / 버스지체보정률: ${escapeHtml(String(Number(report.options?.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)))}% / 정류장별 기본 대기시간: ${escapeHtml(String(baseDwellSeconds))}초 / 계산식: <code>${isDrawnPathMode ? "(KML 그린 경로 거리 / 권역 평균 버스속도 x (1 + 버스지체보정률)) + 정류장별 정차보정" : "(카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정"}</code></p>
     </div>
     <div class="cards">
       <div class="card stat"><strong>${escapeHtml(String(report.summary.routeCount))}</strong><p>분석 노선</p></div>
@@ -6275,7 +6307,7 @@
         <button class="primary" type="button" id="download-simulation-csv-button">엑셀 다운로드</button>
         <button type="button" id="close-window-button">닫기</button>
       </div>
-      <p class="note" style="margin-top:12px;">${isDrawnPathMode ? "결과는 사용자가 그린 KML 선형의 정류장 구간별 거리에 권역 평균 버스속도와 버스지체보정률을 적용한 값입니다." : "결과는 카카오 미래 길찾기 주행시간에 버스지체보정률을 적용한 값입니다."} 정류장별 승객 비중 기반 정차보정을 함께 적용하며, 마지막 정류장은 도착 시점에서 운행 종료로 보고 정차보정을 제외합니다.</p>
+      <p class="note" style="margin-top:12px;">${isDrawnPathMode ? "결과는 사용자가 그린 KML 선형의 정류장 구간별 거리에 권역 평균 버스속도와 버스지체보정률을 적용한 값입니다." : "결과는 카카오 미래 길찾기 주행시간에 버스지체보정률을 적용한 값입니다."} 정류장별 기본 대기시간 ${escapeHtml(String(baseDwellSeconds))}초에 승객 비중 가중치를 적용하며, 마지막 정류장과 경로유도점은 정차보정에서 제외합니다.</p>
     </div>
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
@@ -7669,10 +7701,10 @@
       progress: 10,
     });
     appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / ${isDrawnPathMode ? "카카오 호출 없이 KML 선형으로 계산" : `예상 카카오 호출 ${estimatedRequests}회`}`);
-    appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분 / 버스지체보정=${Number(normalizedOptions.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}%`);
+    appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분 / 버스지체보정=${Number(normalizedOptions.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}% / 기준대기시간=${normalizedOptions.stopDwellSeconds}초`);
     appendRouteTimeSimulationLog(isDrawnPathMode
-      ? "적용식: (KML 그린 경로 거리 / 권역 평균 버스속도) x (1 + 버스지체보정률) + 정류장별 정차보정"
-      : "적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기본 26초 x 승객비중 가중치)");
+      ? `적용식: (KML 그린 경로 거리 / 권역 평균 버스속도) x (1 + 버스지체보정률) + 정류장별 정차보정(기준 ${normalizedOptions.stopDwellSeconds}초 x 승객비중 가중치)`
+      : `적용식: (카카오 미래 길찾기 주행시간 x (1 + 버스지체보정률)) + 정류장별 정차보정(기준 ${normalizedOptions.stopDwellSeconds}초 x 승객비중 가중치)`);
     routePayload.forEach((route, routeIndex) => {
       (route.drawnPathMatch?.warnings || []).forEach(warning => appendRouteTimeSimulationLog(`${route.routeName}: ${warning}`));
       const routeResearch = buildRouteResearchProfile(route.routeName, route.totalDistanceMeters || 0, normalizedOptions);
@@ -7680,12 +7712,12 @@
         `노선 ${routeIndex + 1}/${routePayload.length} 프리플라이트: ${route.routeName} / 정류장 ${route.stopCount}개 / 청크 ${route.segmentCount}개`
       );
       appendRouteTimeSimulationLog(
-        `연구기준 적용: ${route.routeName} / 권역=${routeResearch.region} / 평균속도=${Number(routeResearch.regionAverageSpeedKmh || 0).toFixed(1)}km/h / 버스지체보정=${Number(routeResearch.busDelayPercent || DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}% / 기준정차=${routeResearch.baseDwellSeconds}초 / 승객입력정류장=${routeResearch.ridershipStopCount}개`
+        `연구기준 적용: ${route.routeName} / 권역=${routeResearch.region} / 평균속도=${Number(routeResearch.regionAverageSpeedKmh || 0).toFixed(1)}km/h / 버스지체보정=${Number(routeResearch.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}% / 기준정차=${routeResearch.baseDwellSeconds}초 / 승객입력정류장=${routeResearch.ridershipStopCount}개`
       );
     });
     if (routePayload[0]) {
       appendRouteTimeSimulationLog(
-        `첫 노선 스냅 보정: ${routePayload[0].snappedPointCount || 0}/${routePayload[0].stopCount}개 정류장`
+        `첫 노선 스냅 보정: ${routePayload[0].snappedStopCount || 0}/${routePayload[0].stopCount}개 정류장`
       );
     }
     if (routePayload[0]?.segments?.[0]?.length >= 2) {
@@ -7857,7 +7889,7 @@
     const routeNameSet = new Set(routeNames);
     const rawPoints = [];
 
-    getAllPoints().forEach((point) => {
+    getOperationalPoints().forEach((point) => {
       if (routeNameSet.has(point.routeName)) {
         rawPoints.push({ lat: point.lat, lng: point.lng });
       }
@@ -7904,7 +7936,7 @@
     const routeNameSet = new Set(routeNames);
     const routeSummaries = routeNames.map((routeName) => {
       const routePaths = getAllPaths().filter((pathItem) => pathItem.routeName === routeName);
-      const routePoints = getAllPoints().filter((point) => point.routeName === routeName);
+      const routePoints = getOperationalPointsInRoute(routeName);
       const totalDistanceMeters = routePaths.reduce(
         (sum, pathItem) =>
           sum + (Number(pathItem.totalDistanceMeters || pathItem.estimatedDistanceMeters) || calculatePathDistanceMeters(pathItem)),
@@ -7941,7 +7973,7 @@
     return {
       routeNames,
       routeCount: routeNames.length,
-      pointCount: getAllPoints().filter((point) => routeNameSet.has(point.routeName)).length,
+      pointCount: getOperationalPoints().filter((point) => routeNameSet.has(point.routeName)).length,
       pathCount: getAllPaths().filter((pathItem) => routeNameSet.has(pathItem.routeName)).length,
       totalDistanceMeters,
       totalDurationSeconds,
@@ -8231,7 +8263,7 @@
   }
 
   function estimatePointPopulation(point, radiusMeters = 100) {
-    const nearbyPoints = getAllPoints().filter(
+    const nearbyPoints = getOperationalPoints().filter(
       (candidate) => candidate.id !== point.id && distanceInMeters(point, candidate) <= radiusMeters
     );
     const addressScore = estimatePopulationFromAddressText(`${point.address} ${point.name}`);
@@ -11594,7 +11626,7 @@
   }
 
   async function handleAnalyzeRoutes() {
-    const pointCount = getAllPoints().length;
+    const pointCount = getOperationalPoints().length;
     const pathCount = getAllPaths().length;
 
     if (!pointCount && !pathCount) {
@@ -11642,7 +11674,7 @@
       return;
     }
 
-    const pointCount = getAllPoints().length;
+    const pointCount = getOperationalPoints().length;
     const pathCount = getAllPaths().length;
 
     if (!pointCount && !pathCount) {
@@ -11692,7 +11724,7 @@
     const routeNames = getRouteNamesByGroup(groupKey).filter((routeName) => (
       getRouteSetting(routeName).visible
     ));
-    const pointCount = getAllPoints().filter((point) => routeNames.includes(point.routeName)).length;
+    const pointCount = getOperationalPoints().filter((point) => routeNames.includes(point.routeName)).length;
     const pathCount = getAllPaths().filter((pathItem) => routeNames.includes(pathItem.routeName)).length;
     const groupLabel = groupKey === "merged" ? "신규 노선" : "기존 노선";
 
@@ -12323,11 +12355,15 @@
 
   function renderFileList(filesSummary) {
     fileListEl.innerHTML = "";
+    const points = getAllPoints().filter((point) => point.source === "uploaded");
     filesSummary.forEach((item) => {
+      const filePoints = points.filter((point) => point.fileName === item.name);
+      const guidancePointCount = filePoints.filter(isVirtualRoutingPoint).length;
+      const stopCount = filePoints.length - guidancePointCount;
       const li = document.createElement("li");
       const nameBlock = document.createElement("div");
       nameBlock.className = "file-list-item-main";
-      nameBlock.innerHTML = `<strong>${escapeHtml(item.name)}</strong><small>${item.pointCount}개 정류장 / ${item.pathCount}개 경로 / ${Number(item.areaCount) || 0}개 구역</small>`;
+      nameBlock.innerHTML = `<strong>${escapeHtml(item.name)}</strong><small>${stopCount}개 정류장${guidancePointCount ? ` / 경로유도점 ${guidancePointCount}개` : ""} / ${item.pathCount}개 경로 / ${Number(item.areaCount) || 0}개 구역</small>`;
 
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
@@ -15754,6 +15790,7 @@
     ensureSelectedPath();
     updatePointModeButtons();
     updateCounts();
+    renderFileList(uploadedFileSummaries);
     renderRouteList();
     renderRouteMergePanel();
     renderVillageBusDesignPanel();
@@ -16487,7 +16524,8 @@
       const parsed = parseKml(text, importFileName);
       fileSummaries.push({
         name: importFileName,
-        pointCount: parsed.points.length,
+        pointCount: parsed.points.filter((point) => !isVirtualRoutingPoint(point)).length,
+        guidancePointCount: parsed.points.filter(isVirtualRoutingPoint).length,
         pathCount: parsed.paths.length,
         areaCount: parsed.areas.length,
       });

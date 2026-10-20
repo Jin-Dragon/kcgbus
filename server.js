@@ -16,6 +16,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || LOCAL_SERVER_ENV.OPENAI_API
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
 const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY || "";
 const SERVER_BUILD_TAG = "2026-04-09-stop-timeline-1";
+const DEFAULT_STOP_DWELL_SECONDS = 26;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -275,6 +276,17 @@ function extractRouteCoordinatesFromSections(sections) {
   return coordinates;
 }
 
+function normalizeStopDwellSeconds(value) {
+  if (value == null || (typeof value === "string" && value.trim() === "")) {
+    return DEFAULT_STOP_DWELL_SECONDS;
+  }
+  const seconds = Number(value);
+  if (!["number", "string"].includes(typeof value) || !Number.isFinite(seconds) || seconds < 0) {
+    throw new Error("정류장별 기본 대기시간은 0 이상의 숫자(초)로 입력하세요.");
+  }
+  return seconds;
+}
+
 function normalizeRouteTimeSimulationPayload(payload) {
   const options = payload?.options && typeof payload.options === "object" ? payload.options : {};
   const routes = Array.isArray(payload?.routes)
@@ -299,9 +311,7 @@ function normalizeRouteTimeSimulationPayload(payload) {
 
   return {
     options: {
-      stopDwellSeconds: Number.isFinite(Number(options.stopDwellSeconds))
-        ? Math.max(0, Math.round(Number(options.stopDwellSeconds)))
-        : 0,
+      stopDwellSeconds: normalizeStopDwellSeconds(options.stopDwellSeconds),
     },
     routes,
     departureSlots,
