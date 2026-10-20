@@ -4869,8 +4869,9 @@
   function buildRouteTimeSimulationSegments(routeName, options = {}) {
     const points = getPointsInRoute(routeName);
     const pathCoordinates = buildRouteSimulationAnchorCoordinates(routeName);
+    const orderedPoints = orderGuidancePointsAlongDrawnPath(points, pathCoordinates);
     const normalizedPoints = [];
-    points.forEach((point) => {
+    orderedPoints.forEach((point) => {
       const lat = Number(point.lat);
       const lng = Number(point.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -5081,13 +5082,87 @@
         const direct = distanceInMeters(stops[index - 1], stops[index]);
         if (length > 1000 && length > Math.max(100, direct) * 5) warnings.push(`${stops[index - 1].name} → ${stops[index].name}: 그린 경로가 크게 돌아갑니다. 의도한 순환 구간인지 확인하세요.`);
       });
-      if (!best || last.cost < best.cost) best = { matches, groups, warnings, cost: last.cost };
+      if (!best || last.cost < best.cost) best = { matches, groups, warnings, cost: last.cost, coordinates };
     }
     if (!best) {
       const index = Math.max(...failures, 0);
       throw new Error(`정류장 "${stops[index]?.name || index + 1}"까지 그린 경로를 순서대로 연결할 수 없습니다. 정류장 순서·위치와 경로 진행 방향을 확인하세요(경로 허용 거리 ${toleranceMeters}m).`);
     }
     return best;
+  }
+
+  function projectPointToDrawnPath(coordinates, point, minMeasure = -Infinity, maxMeasure = Infinity) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2 || !point) return null;
+    let offsetMeters = 0;
+    let best = null;
+    for (let index = 0; index < coordinates.length - 1; index += 1) {
+      const start = coordinates[index];
+      const end = coordinates[index + 1];
+      const projection = projectSimulationStopToSegment(point, start, end, index, offsetMeters);
+      const edgeMeters = distanceInMeters(start, end);
+      offsetMeters += edgeMeters;
+      if (projection.measure < minMeasure - 0.001 || projection.measure > maxMeasure + 0.001) continue;
+      if (projection.distanceMeters > 150) continue;
+      if (!best || projection.distanceMeters < best.distanceMeters
+        || (projection.distanceMeters === best.distanceMeters && projection.measure < best.measure)) {
+        best = projection;
+      }
+    }
+    return best;
+  }
+
+  function orderGuidancePointsAlongDrawnPath(points, routeCoordinates) {
+    if (!Array.isArray(points) || !Array.isArray(routeCoordinates) || routeCoordinates.length < 2) return points;
+    const guidanceEntries = points
+      .map((point, index) => ({ point, index }))
+      .filter(({ point }) => isVirtualRoutingPoint(point));
+    if (!guidanceEntries.length) return points;
+
+    // Operational stops retain their existing order. Only virtual guidance points are repositioned.
+    const operationalPoints = points.filter((point) => !isVirtualRoutingPoint(point));
+    if (operationalPoints.length < 2) return points;
+
+    let operationalMatch;
+    try {
+      operationalMatch = matchDrawnRoutePath(routeCoordinates, operationalPoints);
+    } catch (error) {
+      // The normal route validation below should report the original geometry problem.
+      return points;
+    }
+    const matches = operationalMatch?.matches;
+    const coordinates = operationalMatch?.coordinates;
+    if (!Array.isArray(matches) || matches.length !== operationalPoints.length
+      || !Array.isArray(coordinates) || coordinates.length < 2) return points;
+
+    const buckets = Array.from({ length: operationalPoints.length - 1 }, () => []);
+    let unresolved = false;
+    guidanceEntries.forEach(({ point, index }) => {
+      let best = null;
+      for (let interval = 0; interval < matches.length - 1; interval += 1) {
+        const fromMeasure = matches[interval].measure;
+        const toMeasure = matches[interval + 1].measure;
+        if (toMeasure < fromMeasure) continue;
+        const projection = projectPointToDrawnPath(coordinates, point, fromMeasure, toMeasure);
+        if (!projection) continue;
+        const candidate = { point, index, interval, projection };
+        if (!best || projection.distanceMeters < best.projection.distanceMeters
+          || (projection.distanceMeters === best.projection.distanceMeters
+            && projection.measure < best.projection.measure)) best = candidate;
+      }
+      if (best) buckets[best.interval].push(best);
+      else unresolved = true;
+    });
+    if (unresolved) return points;
+
+    const ordered = [];
+    operationalPoints.forEach((point, index) => {
+      ordered.push(point);
+      if (index >= buckets.length) return;
+      buckets[index]
+        .sort((a, b) => a.projection.measure - b.projection.measure || a.index - b.index)
+        .forEach(({ point: guidancePoint }) => ordered.push(guidancePoint));
+    });
+    return ordered;
   }
 
   function buildDrawnRouteSimulationChunk(segment, segmentIndex, routeCoordinates, averageSpeedKmh, drawnPathMatch) {
@@ -5300,12 +5375,12 @@
     }));
   }
 
-  function buildChunkVisibleSegments(chunk, adjustedDriveSeconds) {
+  function buildChunkVisibleSegments(chunk, adjustedDriveSeconds, previousVisibleStop = null, pendingDriveSeconds = 0, pendingHiddenStopCount = 0) {
     const edges = buildChunkDriveEdges(chunk, adjustedDriveSeconds);
     const visibleSegments = [];
-    let currentVisibleStop = null;
-    let accumulatedDriveSeconds = 0;
-    let hiddenStopCount = 0;
+    let currentVisibleStop = isDisplayableSimulationStop(previousVisibleStop) ? previousVisibleStop : null;
+    let accumulatedDriveSeconds = Math.max(0, Number(pendingDriveSeconds) || 0);
+    let hiddenStopCount = Math.max(0, Number(pendingHiddenStopCount) || 0);
     edges.forEach((edge) => {
       if (!currentVisibleStop && isDisplayableSimulationStop(edge.fromStop)) {
         currentVisibleStop = edge.fromStop;
@@ -5316,6 +5391,9 @@
         return;
       }
       const fromStop = currentVisibleStop || edge.fromStop;
+      if (!isDisplayableSimulationStop(fromStop)) {
+        return;
+      }
       visibleSegments.push({
         chunkIndex: Number(chunk?.chunkIndex || 0),
         fromStop,
@@ -5327,7 +5405,12 @@
       accumulatedDriveSeconds = 0;
       hiddenStopCount = 0;
     });
-    return visibleSegments;
+    return {
+      segments: visibleSegments,
+      lastVisibleStop: currentVisibleStop,
+      pendingDriveSeconds: accumulatedDriveSeconds,
+      pendingHiddenStopCount: hiddenStopCount,
+    };
   }
 
   function normalizeDisplaySimulationStop(stop) {
@@ -5430,10 +5513,23 @@
       rawChunkDriveWeights.some((weight) => weight > 0) ? rawChunkDriveWeights : fallbackChunkWeights
     );
     const routeSegments = [];
+    let previousVisibleStop = null;
+    let pendingDriveSeconds = 0;
+    let pendingHiddenStopCount = 0;
     chunks.forEach((chunk, chunkIndex) => {
-      buildChunkVisibleSegments(chunk, chunkDriveAllocations[chunkIndex] || 0).forEach((segment) => {
+      const visibleResult = buildChunkVisibleSegments(
+        chunk,
+        chunkDriveAllocations[chunkIndex] || 0,
+        previousVisibleStop,
+        pendingDriveSeconds,
+        pendingHiddenStopCount
+      );
+      visibleResult.segments.forEach((segment) => {
         routeSegments.push(segment);
       });
+      if (visibleResult.lastVisibleStop) previousVisibleStop = visibleResult.lastVisibleStop;
+      pendingDriveSeconds = visibleResult.pendingDriveSeconds;
+      pendingHiddenStopCount = visibleResult.pendingHiddenStopCount;
     });
     if (!routeSegments.length) {
       return {
@@ -6491,6 +6587,7 @@
     .section-stop-item { padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#fff; }
     .section-stop-route { font-weight:700; font-size:13px; }
     .section-stop-meta { display:flex; gap:8px; flex-wrap:wrap; margin-top:4px; color:var(--muted); font-size:12px; }
+    .guidance-summary { margin-top:6px; color:#6d28d9; font-size:12px; }
     .mini-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
     .mini { padding:10px; border:1px solid var(--line); border-radius:12px; background:#fff; cursor:pointer; transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
     .mini b { display:block; margin-bottom:4px; font-size:12px; color:var(--muted); }
@@ -6519,6 +6616,7 @@
     .debug-line { white-space:pre-wrap; word-break:break-word; opacity:.95; }
     .dir-arrow { width:18px; height:18px; display:grid; place-items:center; border-radius:999px; background:rgba(17,24,39,.78); color:#fff; font:700 11px/1 Segoe UI,Malgun Gothic,sans-serif; box-shadow:0 4px 10px rgba(15,23,42,.18); }
     .stop-pin { min-width:22px; height:22px; padding:0 6px; display:grid; place-items:center; border-radius:999px; background:#ffffff; border:2px solid #111827; color:#111827; font:700 11px/1 Segoe UI,Malgun Gothic,sans-serif; box-shadow:0 4px 10px rgba(15,23,42,.16); }
+    .guidance-pin { min-width:24px; height:24px; padding:0 5px; display:grid; place-items:center; border-radius:999px; background:#fff; border:2px dashed #6d28d9; color:#6d28d9; font:700 10px/1 Segoe UI,Malgun Gothic,sans-serif; box-shadow:0 3px 8px rgba(15,23,42,.14); }
     @media (max-width: 980px) { .layout { grid-template-columns:1fr; grid-template-rows:auto 1fr; } .side { height:auto; max-height:35vh; border-right:0; border-bottom:1px solid var(--line); } .map-wrap { height:65vh; } #route-time-map { height:65vh; } }
   </style>
 </head>
@@ -6557,6 +6655,7 @@
             </div>
             <div>${escapeHtml(section.stops[0]?.name || `${index + 1} 시작`)} → ${escapeHtml(section.stops[section.stops.length - 1]?.name || `${index + 1} 종료`)}</div>
             <div style="margin-top:6px;color:var(--muted);">정류장 ${escapeHtml(String(section.stops.length))}개</div>
+            ${section.guidancePoints?.length ? `<div class="guidance-summary">경로유도점 포함: ${escapeHtml(section.guidancePoints.map((point) => point.name || "경로유도점").join(", "))}</div>` : ""}
             <div class="mini-grid">
               <div class="mini original" data-section-view="original" data-section-view-index="${index}">
                 <b>원본구간</b>
@@ -6657,6 +6756,7 @@
     let sectionLabels = [];
     let analysisDirectionOverlays = [];
     let stopMarkers = [];
+    let guidanceMarkers = [];
     let forcedPointMarker = null;
     const sectionVisible = payload.sections.map(() => true);
     const pendingForcedPoints = {};
@@ -6709,6 +6809,7 @@
       sectionLabels.forEach((label) => label && label.setMap(null));
       analysisDirectionOverlays.forEach((items) => (items || []).forEach((overlay) => overlay.setMap(null)));
       stopMarkers.forEach((items) => (items || []).forEach((overlay) => overlay.setMap(null)));
+      guidanceMarkers.forEach((items) => (items || []).forEach((overlay) => overlay.setMap(null)));
       originalPolyline = null;
       analysisPolyline = null;
       originalSectionPolylines = [];
@@ -6716,6 +6817,7 @@
       sectionLabels = [];
       analysisDirectionOverlays = [];
       stopMarkers = [];
+      guidanceMarkers = [];
       if (forcedPointMarker) {
         forcedPointMarker.setMap(null);
         forcedPointMarker = null;
@@ -6769,6 +6871,23 @@
         if (overlay) {
           overlays.push(overlay);
         }
+      });
+      return overlays;
+    }
+
+    function buildGuidanceMarkerOverlays(section) {
+      const overlays = [];
+      const points = Array.isArray(section?.guidancePoints) ? section.guidancePoints : [];
+      points.forEach((point, pointIndex) => {
+        const lat = Number(point?.snappedLat ?? point?.originalLat ?? point?.lat);
+        const lng = Number(point?.snappedLng ?? point?.originalLng ?? point?.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        overlays.push(new window.kakao.maps.CustomOverlay({
+          position: createKakaoLatLng(lat, lng),
+          yAnchor: 0.5,
+          xAnchor: 0.5,
+          content: '<div class="guidance-pin" title="' + escapePopupHtml(point?.name || '경로유도점') + '">유' + String(pointIndex + 1) + '</div>',
+        }));
       });
       return overlays;
     }
@@ -6974,6 +7093,8 @@
         }
         stopMarkers[index] = buildOrderedStopMarkerOverlays(section, colors[index % colors.length]);
         stopMarkers[index].forEach((overlay) => overlay.setMap(map));
+        guidanceMarkers[index] = buildGuidanceMarkerOverlays(section);
+        guidanceMarkers[index].forEach((overlay) => overlay.setMap(map));
         const labelPoint = section.stops[0] || section.stops[section.stops.length - 1];
         if (labelPoint) {
           const position = createKakaoLatLng(labelPoint.lat, labelPoint.lng);
@@ -7070,6 +7191,7 @@
         const label = sectionLabels[index];
         const directionOverlays = analysisDirectionOverlays[index] || [];
         const markers = stopMarkers[index] || [];
+        const guidanceOverlays = guidanceMarkers[index] || [];
         const card = document.querySelector('[data-section-card="' + index + '"]');
         const toggle = document.querySelector('[data-section-toggle="' + index + '"]');
         const originalViewEl = document.querySelector('[data-section-view="original"][data-section-view-index="' + index + '"]');
@@ -7098,6 +7220,7 @@
         });
         directionOverlays.forEach((overlay) => overlay.setMap(showAnalysis ? map : null));
         markers.forEach((overlay) => overlay.setMap(showOriginal || showAnalysis ? map : null));
+        guidanceOverlays.forEach((overlay) => overlay.setMap(showOriginal || showAnalysis ? map : null));
         if (label) {
           label.setMap(showOriginal || showAnalysis ? map : null);
         }
@@ -7133,6 +7256,7 @@
         if ((originalSectionPolylines[index] || []).some(line => line.getMap())) include(section.originalCoordinates);
         if ((analysisSectionPolylines[index] || []).some(line => line.getMap())) include(section.analysisCoordinates);
         if ((stopMarkers[index] || []).some(marker => marker.getMap())) include(section.stops);
+        if ((guidanceMarkers[index] || []).some(marker => marker.getMap())) include(section.guidancePoints);
       });
       if (!visibleBounds.isEmpty()) map.setBounds(visibleBounds, 40, 40, 40, 40);
     }
@@ -7394,6 +7518,18 @@
     const sections = chunks.map((chunk, index) => {
       const rawBaseStops = getSimulationSectionBaseStops(chunk?.stops);
       const forcedStops = getSimulationSectionForcedStops(chunk?.stops);
+      const chunkStops = Array.isArray(chunk?.stops) ? chunk.stops : [];
+      const firstRouteStopIndex = Number(chunkStops[0]?.routeStopIndex);
+      const lastRouteStopIndex = Number(chunkStops[chunkStops.length - 1]?.routeStopIndex);
+      const guidancePoints = rawBaseStops.filter((stop) => {
+        if (stop?.isVirtual !== true) return false;
+        const routeStopIndex = Number(stop.routeStopIndex);
+        if (Number.isFinite(firstRouteStopIndex) && Number.isFinite(lastRouteStopIndex) && Number.isFinite(routeStopIndex)) {
+          // A guidance point on an overlap boundary belongs to the preceding section.
+          return routeStopIndex > firstRouteStopIndex && routeStopIndex <= lastRouteStopIndex;
+        }
+        return rawBaseStops.indexOf(stop) > 0;
+      });
       const chunkTimeProfile = (simulation.chunkTimeProfiles || []).find((item) => Number(item.sectionIndex || 0) === Number(chunk?.chunkIndex || index + 1)) || null;
       const timelineStops = buildDisplayStopsFromTimelineSegments(chunkTimeProfile?.segments);
       const displayBaseStops = timelineStops.length
@@ -7417,6 +7553,7 @@
         originalCoordinates,
         analysisCoordinates,
         stops: visibleStops,
+        guidancePoints,
         baseStops: displayBaseStops,
         rawBaseStops,
         forcedStops,
@@ -11777,6 +11914,7 @@
     clearPathEditorOverlay();
     startPathDrawButtonEl.classList.remove("is-active");
     startPathEditButtonEl.classList.remove("is-active");
+    startPathEditButtonEl.textContent = "경로 수정";
     finishPathButtonEl.disabled = true;
     cancelPathButtonEl.disabled = true;
   }
@@ -14537,10 +14675,10 @@
       window.kakao.maps.event.addListener(marker, "click", () => {
         if (isLast) {
           if (pathExtendMode) {
-            persistWorkingPath({
-              closeModes: true,
-              successMessage: () => "경로 수정 내용을 저장하고 편집을 종료했습니다.",
-            });
+            pathExtendMode = false;
+            syncPathPreview();
+            updatePathEditorUi();
+            setStatus("경로 연장을 마쳤습니다. 상단의 경로 저장을 눌러 수정 내용을 저장하세요.", false);
             return;
           }
           pathExtendMode = !pathExtendMode;
@@ -14654,6 +14792,7 @@
 
     startPathDrawButtonEl.classList.toggle("is-active", drawing);
     startPathEditButtonEl.classList.toggle("is-active", editing);
+    startPathEditButtonEl.textContent = editing ? "경로 저장" : "경로 수정";
     finishPathButtonEl.disabled = !(
       canSaveDesignedPath || ((drawing || editing) && workingPathCoordinates.length >= 2)
     );
@@ -14694,8 +14833,8 @@
       pathEditorHelpEl.textContent = "지도를 클릭해 경로 점을 추가합니다. 마지막 점을 다시 클릭하면 현재 경로가 저장되고 추가 모드가 종료됩니다.";
     } else if (editing) {
       pathEditorHelpEl.textContent = pathExtendMode
-        ? "경로 연장 중입니다. 지도 클릭으로 점을 계속 추가하고, 빨간 끝점을 다시 클릭하면 연장 모드를 종료합니다."
-        : "중간 점은 드래그로 이동합니다. 시작점은 초록, 끝점은 빨강입니다. 빨간 끝점을 클릭하면 연장 모드로 전환됩니다.";
+        ? "경로 연장 중입니다. 지도 클릭으로 점을 추가하고, 상단의 경로 저장을 누르면 저장 후 편집이 종료됩니다. Esc는 편집 취소입니다."
+        : "점을 드래그하거나 선택한 뒤 지도에서 새 위치를 클릭해 이동합니다. 상단의 경로 저장을 누르면 저장 후 편집이 종료됩니다. Esc는 편집 취소입니다.";
     } else if (canSaveDesignedPath) {
       pathEditorHelpEl.textContent = "설계 노선이 선택되어 있습니다. 경로 저장을 누르면 현재 설계 라인을 그대로 일반 경로로 저장합니다.";
     } else {
@@ -14773,6 +14912,13 @@
     setStatus(`새 경로 그리기 모드입니다. 현재 노선은 ${selectedRouteName}입니다. 지도에서 점을 클릭하세요.`, false);
   }
 
+  function handlePathEditButtonClick() {
+    if (editPathMode) {
+      return handlePathFormSubmit();
+    }
+    startPathEditMode();
+  }
+
   function startPathEditMode() {
     const selectedPath = getPathById(selectedPathId)
       || (selectedRouteName
@@ -14797,7 +14943,7 @@
     renderPoints();
     updatePathEditorUi();
     syncPathPreview();
-    setStatus("경로 편집 모드입니다. 점을 드래그해 수정하세요.", false);
+    setStatus("경로 편집 모드입니다. 점을 이동하거나 삭제한 뒤 상단의 경로 저장을 누르세요. 취소는 Esc입니다.", false);
   }
 
   function renderPointDetails(point) {
@@ -15276,10 +15422,10 @@
           lng,
         };
         workingPathCoordinates = expandMovedVertexWithMidpoints(workingPathCoordinates, movedIndex);
-        persistWorkingPath({
-          closeModes: true,
-          successMessage: () => "선택한 지점을 이동하고 경로 수정 모드를 종료했습니다.",
-        });
+        selectedPathVertexIndex = null;
+        syncPathPreview();
+        updatePathEditorUi();
+        setStatus("선택한 지점을 이동했습니다. 상단의 경로 저장을 눌러 수정 내용을 저장하세요.", false);
         return;
       }
 
@@ -16580,7 +16726,7 @@
     });
 
     startPathDrawButtonEl.addEventListener("click", startPathDrawMode);
-    startPathEditButtonEl.addEventListener("click", startPathEditMode);
+    startPathEditButtonEl.addEventListener("click", handlePathEditButtonClick);
     designRouteButtonEl.addEventListener("click", handleDesignRoute);
     villagePrioritySelectEl.addEventListener("change", () => {
       updateVillageBusRouteSetting({ priority: villagePrioritySelectEl.value });

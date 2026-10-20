@@ -101,6 +101,37 @@ test('virtual waypoint preserves geometry without adding a dwell stop', () => {
   verifyRoute({ name: '가상', points, paths: [{ coordinates: [point(0, 0), point(1000, 0)] }] });
 });
 
+test('guidance waypoints are reordered by drawn path position before matching', () => {
+  const points = [
+    { ...point(0, 0, 'A'), createdOrder: 1 },
+    { ...point(1500, 0, '경로유도점 2'), isVirtual: true, createdOrder: 2 },
+    { ...point(1000, 0, 'B'), createdOrder: 3 },
+    { ...point(500, 0, '경로유도점 1'), isVirtual: true, createdOrder: 4 },
+    { ...point(2000, 0, 'C'), createdOrder: 5 },
+  ];
+  const route = { name: '유도점 순서', points, paths: [{ coordinates: [point(0, 0), point(2000, 0)] }] };
+  const prepared = contextFor(route).buildRouteTimeSimulationSegments(route.name, { pathMode: 'drawn' });
+  const orderedNames = prepared.segments.flatMap((segment, index) => (
+    segment.slice(index ? 1 : 0).map((item) => item.name)
+  ));
+  assert.equal(orderedNames.join('|'), 'A|경로유도점 1|B|경로유도점 2|C');
+  const matchMeasures = prepared.drawnPathMatch.matches.map((item) => item.measure);
+  assert.ok(matchMeasures.every((measure, index) => index === 0 || measure >= matchMeasures[index - 1]));
+
+  const verified = verifyRoute(route);
+  assert.equal(verified.payload.sections[0].guidancePoints.map((item) => item.name).join('|'), '경로유도점 1|경로유도점 2');
+  assert.equal(verified.payload.sections[1].guidancePoints.length, 0);
+  assert.equal(verified.payload.sections[1].timelineSegments[0].fromStopName, 'B');
+
+  const kakaoContext = contextFor(route);
+  kakaoContext.applyRouteSimulationCorrection = (_name, segment) => segment;
+  const kakaoPrepared = kakaoContext.buildRouteTimeSimulationSegments(route.name, { pathMode: 'kakao' });
+  const kakaoNames = kakaoPrepared.segments.flatMap((segment, index) => (
+    segment.slice(index ? 1 : 0).map((item) => item.name)
+  ));
+  assert.equal(kakaoNames.join('|'), 'A|경로유도점 1|B|경로유도점 2|C');
+});
+
 test('far stops, incompatible order, and empty geometry fail explicitly', () => {
   assert.throws(() => app.matchDrawnRoutePath([point(0, 0), point(2000, 0)], [point(0, 0), point(1000, 500)]), /정류장/);
   assert.throws(() => app.matchDrawnRoutePath([point(0, 0), point(2000, 0)], [point(0, 0), point(1800, 0), point(300, 0), point(2000, 0)]), /순서/);
