@@ -15,8 +15,10 @@ const LOCAL_SERVER_ENV = readLocalServerEnv(LOCAL_SERVER_ENV_PATH);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || LOCAL_SERVER_ENV.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4";
 const KAKAO_MOBILITY_REST_API_KEY = process.env.KAKAO_MOBILITY_REST_API_KEY || LOCAL_SERVER_ENV.KAKAO_MOBILITY_REST_API_KEY || "";
-const SERVER_BUILD_TAG = "2026-04-09-stop-timeline-1";
+const SERVER_BUILD_TAG = "2026-11-25-route-validation";
 const DEFAULT_STOP_DWELL_SECONDS = 26;
+const MAX_SIMULATION_ROUTE_ATTEMPTS = 6;
+const SIMULATION_ROUTE_CORRIDOR_METERS = 120;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -292,16 +294,20 @@ function normalizeRouteTimeSimulationPayload(payload) {
   const routes = Array.isArray(payload?.routes)
     ? payload.routes.map((route) => {
       const routeName = String(route?.routeName || "").trim();
-      const segments = Array.isArray(route?.segments)
+      const requests = Array.isArray(route?.segments)
         ? route.segments
-          .map((segment) => Array.isArray(segment) ? segment.map(normalizeSimulationPointWithCandidates).filter(Boolean) : [])
-          .filter((segment) => segment.length >= 2)
+          .map((segment, index) => ({
+            segment: Array.isArray(segment) ? segment.map(normalizeSimulationPointWithCandidates).filter(Boolean) : [],
+            reference: normalizeSimulationRouteReference(route.segmentReferences?.[index]),
+          }))
+          .filter(({ segment }) => segment.length >= 2)
         : [];
       return {
         routeName,
         stopCount: Number(route?.stopCount) || 0,
-        segmentCount: Number(route?.segmentCount) || segments.length,
-        segments,
+        segmentCount: Number(route?.segmentCount) || requests.length,
+        segments: requests.map(({ segment }) => segment),
+        segmentReferences: requests.map(({ reference }) => reference),
       };
     }).filter((route) => route.routeName && route.segments.length)
     : [];
@@ -316,6 +322,117 @@ function normalizeRouteTimeSimulationPayload(payload) {
     routes,
     departureSlots,
   };
+}
+
+function normalizeSimulationRouteReference(value) {
+  if (value == null) return null;
+  const coordinates = Array.isArray(value.coordinates) ? value.coordinates.filter(point => (
+    Number.isFinite(point?.lat) && Math.abs(point.lat) <= 90 && Number.isFinite(point?.lng) && Math.abs(point.lng) <= 180
+  )).map(({ lat, lng }) => ({ lat, lng })) : [];
+  return {
+    coordinates,
+    originLegMeters: Math.max(0, Number(value.originLegMeters) || 0),
+    destinationLegMeters: Math.max(0, Number(value.destinationLegMeters) || 0),
+  };
+}
+
+function toSimulationRouteMeters(coordinates, origin) {
+  const longitudeScale = Math.cos(origin.lat * Math.PI / 180) * 111195;
+  return coordinates.map(({ lat, lng }) => ({ x: (lng - origin.lng) * longitudeScale, y: (lat - origin.lat) * 111195 }));
+}
+
+function measureSimulationRoutePath(path) {
+  return path.slice(1).reduce((sum, point, index) => sum + Math.hypot(point.x - path[index].x, point.y - path[index].y), 0);
+}
+
+function measureRouteOutsideCorridor(reference, actual) {
+  const referenceEdges = reference.slice(1).map((end, index) => {
+    const start = reference[index];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    return { ...start, dx, dy, squaredLength: dx * dx + dy * dy };
+  });
+  let outsideMeters = 0;
+  for (let index = 1; index < actual.length; index += 1) {
+    const start = actual[index - 1];
+    const dx = actual[index].x - start.x;
+    const dy = actual[index].y - start.y;
+    const length = Math.hypot(dx, dy);
+    const steps = Math.ceil(length / 60);
+    for (let step = 0; step < steps; step += 1) {
+      const x = start.x + dx * (step + 0.5) / steps;
+      const y = start.y + dy * (step + 0.5) / steps;
+      const withinCorridor = referenceEdges.some(edge => {
+        const localX = x - edge.x;
+        const localY = y - edge.y;
+        const t = edge.squaredLength ? Math.max(0, Math.min(1, (localX * edge.dx + localY * edge.dy) / edge.squaredLength)) : 0;
+        return (localX - t * edge.dx) ** 2 + (localY - t * edge.dy) ** 2 <= SIMULATION_ROUTE_CORRIDOR_METERS ** 2;
+      });
+      if (!withinCorridor) outsideMeters += length / steps;
+    }
+  }
+  return outsideMeters;
+}
+
+function validateSimulationRoute(reference, result) {
+  const source = reference.coordinates[0];
+  const referencePath = toSimulationRouteMeters(reference.coordinates, source);
+  const referenceMeters = measureSimulationRoutePath(referencePath);
+  const distanceMeters = result.distanceMeters;
+  const distanceLabel = `원본 ${(referenceMeters / 1000).toFixed(2)}km / 카카오 ${(distanceMeters / 1000).toFixed(2)}km`;
+  if (referenceMeters > 30 && distanceMeters === 0) return `카카오 주행 거리가 0m로 반환됐습니다 (${distanceLabel}).`;
+  if (referenceMeters <= 30 && distanceMeters > 120) return `짧은 정류장 구간에 우회가 생겼습니다 (${distanceLabel}).`;
+  if ((distanceMeters > referenceMeters * 1.8 && distanceMeters - referenceMeters > 350)
+    || (distanceMeters < referenceMeters * 0.65 && referenceMeters - distanceMeters > 350)) {
+    return `경로 거리 차이가 큽니다 (${distanceLabel}).`;
+  }
+  const actualPath = toSimulationRouteMeters(result.routeCoordinates, source);
+  const outsideMeters = measureRouteOutsideCorridor(referencePath, actualPath);
+  if (outsideMeters > Math.max(350, measureSimulationRoutePath(actualPath) * 0.3)) {
+    return `그린 경로에서 약 ${Math.round(outsideMeters)}m 벗어납니다 (${distanceLabel}).`;
+  }
+  return "";
+}
+
+function getSimulationReferenceOffsetPoint(coordinates, offsetMeters) {
+  const path = toSimulationRouteMeters(coordinates, coordinates[0]);
+  let remaining = offsetMeters;
+  for (let index = 1; index < path.length; index += 1) {
+    const length = Math.hypot(path[index].x - path[index - 1].x, path[index].y - path[index - 1].y);
+    if (length > 0 && remaining <= length) {
+      const start = coordinates[index - 1];
+      const end = coordinates[index];
+      return { lat: start.lat + (end.lat - start.lat) * remaining / length, lng: start.lng + (end.lng - start.lng) * remaining / length };
+    }
+    remaining -= length;
+  }
+  return null;
+}
+
+function buildSimulationEndpointAttempts(origin, destination, reference) {
+  const origins = origin.candidateCoordinates;
+  const destinations = destination.candidateCoordinates;
+  const attempts = [{ origin: origins[0], destination: destinations[0] }];
+  if (!reference) {
+    destinations.slice(1, 4).forEach(point => attempts.push({ origin: origins[0], destination: point }));
+    origins.slice(1, 3).forEach(point => attempts.push({ origin: point, destination: destinations[0] }));
+    return attempts;
+  }
+  const reverse = reference.coordinates.slice().reverse();
+  for (const meters of [25, 50]) {
+    if (meters >= reference.destinationLegMeters / 2) continue;
+    const point = getSimulationReferenceOffsetPoint(reverse, meters);
+    if (point) attempts.push({ origin: origins[0], destination: point, destinationOffsetMeters: meters });
+  }
+  for (const meters of [25, 50]) {
+    if (meters >= reference.originLegMeters / 2) continue;
+    const point = getSimulationReferenceOffsetPoint(reference.coordinates, meters);
+    if (point) attempts.push({ origin: point, destination: destinations[0], originOffsetMeters: meters });
+  }
+  const originOffset = attempts.find(item => item.originOffsetMeters);
+  const destinationOffset = attempts.find(item => item.destinationOffsetMeters);
+  if (originOffset && destinationOffset) attempts.push({ ...destinationOffset, origin: originOffset.origin, originOffsetMeters: originOffset.originOffsetMeters });
+  return attempts;
 }
 
 async function requestKakaoFutureDirections(segment, departureTime) {
@@ -397,82 +514,89 @@ async function requestKakaoFutureDirections(segment, departureTime) {
   throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText || "유효한 출발지/목적지 좌표를 찾지 못했습니다."} / origin=${lastOriginParam} / destination=${lastDestinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime} / attempts=${attempts}`);
 }
 
-async function requestKakaoFutureDirectionsSafe(segment, departureTime) {
+async function requestKakaoFutureDirectionsSafe(segment, departureTime, reference = null) {
   const origin = segment[0];
   const destination = segment[segment.length - 1];
   const waypoints = segment.slice(1, -1);
-  const formatLocationParam = (point) => `${point.lng},${point.lat}`;
-  const originCandidates = Array.isArray(origin.candidateCoordinates) && origin.candidateCoordinates.length
-    ? origin.candidateCoordinates
-    : [{ lat: origin.lat, lng: origin.lng }];
-  const destinationCandidates = Array.isArray(destination.candidateCoordinates) && destination.candidateCoordinates.length
-    ? destination.candidateCoordinates
-    : [{ lat: destination.lat, lng: destination.lng }];
-  const waypointsParam = waypoints.length ? waypoints.map(formatLocationParam).join("|") : "";
+  const formatLocationParam = (point) => `${Number(point.lng.toFixed(7))},${Number(point.lat.toFixed(7))}`;
+  const waypointsParam = waypoints.map(formatLocationParam).join("|");
+  let originParam = "";
+  let destinationParam = "";
+  let firstRejectedReason = "";
   let lastErrorText = "";
-  let lastOriginParam = "";
-  let lastDestinationParam = "";
   let attempts = 0;
-
-  for (const originCandidate of originCandidates.slice(0, 10)) {
-    const originParam = formatLocationParam(originCandidate);
-    lastOriginParam = originParam;
-    for (const destinationCandidate of destinationCandidates.slice(0, 10)) {
-      const destinationParam = formatLocationParam(destinationCandidate);
-      lastDestinationParam = destinationParam;
-      attempts += 1;
-
-      const query = new URLSearchParams({
-        origin: originParam,
-        destination: destinationParam,
-        departure_time: departureTime,
-        priority: "RECOMMEND",
-        car_type: "3",
-        car_fuel: "DIESEL",
-        summary: "false",
-      });
-
-      if (waypointsParam) {
-        query.set("waypoints", waypointsParam);
-      }
-
-      const kakaoResponse = await fetch(`https://apis-navi.kakaomobility.com/v1/future/directions?${query.toString()}`, {
-        method: "GET",
-        headers: {
-          Authorization: `KakaoAK ${KAKAO_MOBILITY_REST_API_KEY}`,
-        },
-      });
-
-      if (!kakaoResponse.ok) {
-        lastErrorText = await kakaoResponse.text();
-        continue;
-      }
-
-      const result = await kakaoResponse.json();
-      const route = Array.isArray(result?.routes) ? result.routes[0] : null;
-      if (!route) {
-        throw new Error("카카오 미래 길찾기 결과가 비어 있습니다.");
-      }
-
-      const sections = Array.isArray(route.sections) ? route.sections : [];
-      const driveSeconds = sections.reduce((sum, section) => sum + (Number(section?.duration) || 0), 0);
-      const distanceMeters = sections.reduce((sum, section) => sum + (Number(section?.distance) || 0), 0);
-      const routeCoordinates = extractRouteCoordinatesFromSections(sections);
-
-      return {
-        driveSeconds,
-        distanceMeters,
-        routeCoordinates,
-        attempts,
-        originParam,
-        destinationParam,
-        waypointsParam,
-        sectionCount: sections.length,
-      };
-    }
+  if (reference && !reference.coordinates.length) {
+    return { validation: { status: "review", reason: "그린 경로에서 요청 구간의 기준 선형을 확인할 수 없습니다." } };
   }
 
-  throw new Error(`카카오 미래 길찾기 요청 실패: ${lastErrorText || "유효한 출발지/목적지 좌표를 찾지 못했습니다."} / origin=${lastOriginParam} / destination=${lastDestinationParam} / waypoints=${waypointsParam || "-"} / departure_time=${departureTime} / attempts=${attempts}`);
+  const endpointAttempts = buildSimulationEndpointAttempts(origin, destination, reference);
+  const tried = new Set();
+  for (const candidate of endpointAttempts.slice(0, MAX_SIMULATION_ROUTE_ATTEMPTS)) {
+    originParam = formatLocationParam(candidate.origin);
+    destinationParam = formatLocationParam(candidate.destination);
+    const pair = `${originParam}|${destinationParam}`;
+    if (tried.has(pair)) continue;
+    tried.add(pair);
+    attempts += 1;
+    const query = new URLSearchParams({
+      origin: originParam,
+      destination: destinationParam,
+      departure_time: departureTime,
+      priority: "RECOMMEND",
+      car_type: "3",
+      car_fuel: "DIESEL",
+      summary: "false",
+    });
+    if (waypointsParam) query.set("waypoints", waypointsParam);
+
+    const response = await fetch(`https://apis-navi.kakaomobility.com/v1/future/directions?${query.toString()}`, {
+      headers: { Authorization: `KakaoAK ${KAKAO_MOBILITY_REST_API_KEY}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) {
+      lastErrorText = await response.text();
+      if (response.status !== 400 || /departure_time/.test(lastErrorText)) {
+        throw new Error(`카카오 미래 길찾기 요청 실패 (${response.status}): ${lastErrorText}`);
+      }
+      continue;
+    }
+    const route = (await response.json())?.routes?.[0];
+    const sections = Array.isArray(route?.sections) ? route.sections : [];
+    if (route?.result_code !== 0 || sections.length !== segment.length - 1 || sections.some(section => (
+      !Number.isFinite(section?.duration) || section.duration < 0 || !Number.isFinite(section?.distance) || section.distance < 0
+    ))) {
+      lastErrorText = route?.result_msg || "경유지 사이의 경로를 모두 받지 못했습니다.";
+      continue;
+    }
+    const result = {
+      driveSeconds: sections.reduce((sum, section) => sum + section.duration, 0),
+      distanceMeters: sections.reduce((sum, section) => sum + section.distance, 0),
+      routeCoordinates: extractRouteCoordinatesFromSections(sections),
+      attempts, originParam, destinationParam, waypointsParam,
+      sectionCount: sections.length,
+    };
+    if (reference) {
+      const reason = result.routeCoordinates.length < 2 && result.distanceMeters > 0
+        ? "카카오 응답에 경로 좌표가 없습니다."
+        : validateSimulationRoute(reference, result);
+      if (reason) {
+        firstRejectedReason ||= reason;
+        continue;
+      }
+      result.validation = {
+        status: "accepted",
+        originOffsetMeters: candidate.originOffsetMeters || 0,
+        destinationOffsetMeters: candidate.destinationOffsetMeters || 0,
+        rejectedReason: firstRejectedReason,
+      };
+    }
+    return result;
+  }
+
+  return {
+    attempts, originParam, destinationParam, waypointsParam,
+    validation: { status: "review", reason: firstRejectedReason || lastErrorText || "그린 경로와 일치하는 결과를 찾을 수 없습니다." },
+  };
 }
 
 function buildSimulationChunkPayload(segment, segmentIndex, segmentResult) {
@@ -486,10 +610,12 @@ function buildSimulationChunkPayload(segment, segmentIndex, segmentResult) {
     driveSeconds: Number(segmentResult.driveSeconds || 0),
     sectionCount: Number(segmentResult.sectionCount || 0),
     coordinates: Array.isArray(segmentResult.routeCoordinates) ? segmentResult.routeCoordinates : [],
+    validation: segmentResult.validation,
     stops: (Array.isArray(segment) ? segment : []).map((point) => ({
       name: point.name,
       lat: point.lat,
       lng: point.lng,
+      candidateCoordinates: point.candidateCoordinates,
       originalLat: Number.isFinite(point.originalLat) ? point.originalLat : point.lat,
       originalLng: Number.isFinite(point.originalLng) ? point.originalLng : point.lng,
       snappedLat: point.lat,
@@ -898,7 +1024,7 @@ http
               const chunks = [];
               let chunkIndex = 0;
               for (const segment of route.segments) {
-                const segmentResult = await requestKakaoFutureDirectionsSafe(segment, slot.departureTime);
+                const segmentResult = await requestKakaoFutureDirectionsSafe(segment, slot.departureTime, route.segmentReferences[chunkIndex]);
                 driveSeconds += Number(segmentResult.driveSeconds || 0);
                 distanceMeters += Number(segmentResult.distanceMeters || 0);
                 chunkIndex += 1;
@@ -906,13 +1032,15 @@ http
               }
 
               const dwellSecondsTotal = Math.max(0, route.stopCount - 1) * payload.options.stopDwellSeconds;
+              const needsReview = chunks.some(chunk => chunk.validation?.status === "review");
               simulations.push({
                 label: slot.label,
                 departureTime: slot.departureTime,
-                driveSeconds: Math.round(driveSeconds),
+                needsReview,
+                driveSeconds: needsReview ? null : Math.round(driveSeconds),
                 dwellSecondsTotal: Math.round(dwellSecondsTotal),
-                totalSeconds: Math.round(driveSeconds + dwellSecondsTotal),
-                distanceMeters: Number(distanceMeters.toFixed(1)),
+                totalSeconds: needsReview ? null : Math.round(driveSeconds + dwellSecondsTotal),
+                distanceMeters: needsReview ? null : Number(distanceMeters.toFixed(1)),
                 chunks,
               });
             }
@@ -921,6 +1049,7 @@ http
               routeName: route.routeName,
               stopCount: route.stopCount,
               segmentCount: route.segmentCount,
+              segmentReferences: route.segmentReferences,
               simulations,
             });
           }
@@ -956,7 +1085,7 @@ http
             sendJson(res, 400, { error: "구간 재계산 요청 정보가 올바르지 않습니다." });
             return;
           }
-          const segmentResult = await requestKakaoFutureDirectionsSafe(segment, departureTime);
+          const segmentResult = await requestKakaoFutureDirectionsSafe(segment, departureTime, normalizeSimulationRouteReference(payload.reference));
           sendJson(res, 200, {
             ok: true,
             routeName,

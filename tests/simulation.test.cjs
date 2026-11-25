@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
+const fs = require('node:fs');
+const path = require('node:path');
 const { loadApp, readRoutes } = require('./simulation-harness.cjs');
 const app = loadApp();
 const point = (x, y, name = '') => ({ lat: 37 + y / 111195, lng: 127 + x / (111195 * Math.cos(37 * Math.PI / 180)), name });
@@ -168,6 +170,116 @@ test('a saved return-leg guidance point keeps its position in both simulation mo
     assert.equal(ordered.map(item => item.name).join('|'), 'start|turn|return guide|terminal');
     assert.equal(prepared.stopCount, 3);
   }
+});
+
+test('Kakao map cards keep both routes on the full request, including guide-only chunks', () => {
+  const positions = [0, 300, 450, 500, 600, 1000];
+  const names = ['A', 'guide 1', 'guide 2', 'guide 3', 'B', 'C'];
+  const points = positions.map((x, index) => ({
+    ...point(x, 0, names[index]),
+    isVirtual: index >= 1 && index <= 3,
+    routeStopIndex: index,
+  }));
+  const route = { name: 'guide boundaries', points, paths: [{ coordinates: [points[0], points.at(-1)] }] };
+  const context = contextFor(route);
+  const chunks = [points.slice(0, 2), points.slice(1, 4), points.slice(3)].map((stops, index) => ({
+    chunkIndex: index + 1,
+    stops,
+    coordinates: stops.slice(),
+    driveSeconds: 100,
+    distanceMeters: positions[stops.at(-1).routeStopIndex] - positions[stops[0].routeStopIndex],
+  }));
+  const departureTime = '202609080700';
+  const report = context.buildRouteTimeSimulationReport({ routes: [{
+    routeName: route.name, stopCount: 3, segmentCount: 3,
+    simulations: [{ label: '07:00', departureTime, driveSeconds: 300, distanceMeters: 1000, chunks }],
+  }] }, { pathMode: 'kakao', busDelayPercent: 0 });
+  context.latestRouteTimeSimulationReport = report;
+
+  const { sections } = context.getRouteTimeSimulationMapWindowPayload(report.id, route.name, departureTime);
+  assert.equal(sections[1].stops.length, 0);
+  assert.equal(sections[1].baseStops.map(stop => stop.name).join('|'), 'guide 1|guide 2|guide 3');
+  close(sections[1].originalDistanceMeters, 200);
+  close(context.measureCoordinatePathDistance(sections[1].analysisCoordinates), 200);
+  assert.deepEqual(sections[2].analysisCoordinates, chunks[2].coordinates);
+  assert.equal(sections[2].timelineSegments[0].fromStopName, 'A');
+  close(sections[2].originalDistanceMeters, 500);
+
+  const corrected = context.mergeSegmentPointsWithCorrections(chunks[1].stops, [{ name: 'forced', requestedOrder: 999 }]);
+  assert.equal(corrected.map(stop => stop.name).join('|'), 'guide 1|guide 2|forced|guide 3');
+});
+
+function loadRouteValidationServer(fetch) {
+  const serverFile = require.resolve('../server.js');
+  const source = fs.readFileSync(serverFile, 'utf8').split(/^http\s*\.createServer/m)[0];
+  const context = vm.createContext({
+    __dirname: path.dirname(serverFile),
+    require: name => name === 'fs' ? { existsSync: () => false } : require(name),
+    process: { env: {} }, fetch, URLSearchParams, AbortSignal,
+  }, { name: 'simulation-server' });
+  vm.runInContext(source, context);
+  return context;
+}
+
+function simulateServerResponse(distance, coordinates, resultCode = 0) {
+  const vertexes = coordinates.flatMap(({ lng, lat }) => [lng, lat]);
+  return { ok: true, json: async () => ({ routes: [{
+    result_code: resultCode, result_msg: '길찾기 결과', sections: [{ duration: 120, distance, roads: [{ vertexes }] }],
+  }] }) };
+}
+
+async function runRouteValidationServer(fetch) {
+  const context = loadRouteValidationServer(fetch);
+  const start = point(0, 0);
+  const end = point(1000, 0);
+  const segment = [start, end].map(value => ({ ...value, candidateCoordinates: [value] }));
+  return context.requestKakaoFutureDirectionsSafe(segment, '202609080700', {
+    coordinates: [start, end], originLegMeters: 1000, destinationLegMeters: 1000,
+  });
+}
+
+test('an excessive Kakao detour is replaced by a valid route using a nearby arrival point', async () => {
+  const requests = [];
+  const result = await runRouteValidationServer(async url => {
+    requests.push(new URL(url).searchParams);
+    return requests.length === 1
+      ? simulateServerResponse(21000, [point(0, 0), point(500, 10000), point(1000, 0)])
+      : simulateServerResponse(975, [point(0, 0), point(975, 0)]);
+  });
+  assert.equal(result.distanceMeters, 975);
+  assert.equal(result.validation.destinationOffsetMeters, 25);
+  assert.match(result.validation.rejectedReason, /21\.00km/);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].get('origin'), requests[0].get('origin'));
+  assert.notEqual(requests[1].get('destination'), requests[0].get('destination'));
+  assert.equal(requests[1].get('departure_time'), requests[0].get('departure_time'));
+});
+
+test('an invalid API result and implausible geometries are never used as a route total', async () => {
+  let attempts = 0;
+  const rejected = await runRouteValidationServer(async () => {
+    attempts += 1;
+    return attempts === 1 ? simulateServerResponse(0, [], 1)
+      : simulateServerResponse(1100, [point(0, 0), point(0, 500), point(1000, 500), point(1000, 0)]);
+  });
+  assert.equal(attempts, 6);
+  assert.equal(rejected.validation.status, 'review');
+  assert.match(rejected.validation.reason, /그린 경로에서/);
+  assert.equal(rejected.driveSeconds, undefined);
+
+  const route = { name: '확인 노선', points: [point(0, 0, 'A'), point(1000, 0, 'B')], paths: [] };
+  const app = contextFor(route);
+  const departureTime = '202609080700';
+  const report = app.buildRouteTimeSimulationReport({ routes: [{
+    routeName: route.name, stopCount: 2, segmentCount: 1,
+    simulations: [{ label: '07:00', departureTime, driveSeconds: 120, distanceMeters: 1000,
+      chunks: [{ chunkIndex: 1, stops: route.points, validation: rejected.validation }] }],
+  }] }, { pathMode: 'kakao' });
+  assert.equal(report.rows[0].totalSeconds, null);
+  assert.equal(report.rows[0].distanceMeters, null);
+  assert.equal(report.rows[0].stopTimeline.length, 0);
+  assert.match(app.buildRouteTimeSimulationRowsHtml(report.routes[0]), /<strong>확인 필요<\/strong>/);
+  assert.match(app.buildRouteTimeSimulationExcelWorkbook(report), /확인 필요/);
 });
 
 test('far stops, incompatible order, and empty geometry fail explicitly', () => {

@@ -84,7 +84,7 @@ test('all 32 source/master/section checkbox combinations match actual map object
     v.toggle('toggle-sections', master);
     v.toggle('toggle-original-path', original); v.toggle('toggle-analysis-path', analysis);
     assert.equal(v.run('!!originalPolyline.getMap()'), original && !master);
-    assert.equal(v.run('!!analysisPolyline.getMap()'), analysis && !master);
+    assert.equal(v.run('fullAnalysisPolylines.some(line => line.getMap())'), analysis && !master);
     for (let i = 0; i < 2; i++) {
       const selected = [first, second][i];
       assert.equal(v.run(`!!originalSectionPolylines[${i}][0].getMap()`), original && master && selected);
@@ -122,7 +122,7 @@ test('refresh and late rendering preserve disabled source layers', async () => {
   v.toggle('toggle-original-path', false);
   v.toggle('toggle-analysis-path', false);
   v.run('refreshPayload(payload)');
-  assert.equal(v.run('!!originalPolyline.getMap() || !!analysisPolyline.getMap()'), false);
+  assert.equal(v.run('!!originalPolyline.getMap() || fullAnalysisPolylines.some(line => line.getMap())'), false);
   assert.equal(v.run('stopMarkers.flat().some(item => item.getMap())'), false);
   v.toggle('toggle-analysis-path', true);
   assert.equal(v.run('!!analysisSectionPolylines[0][0].getMap()'), true);
