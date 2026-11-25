@@ -46,7 +46,7 @@ function editor(source = 'uploaded-path') {
     addPointButtonEl:button(), addGuidancePointButtonEl:null, resetPointButtonEl:button(),
     movePointButtonEl:button(), deletePointButtonEl:button(), pointFormEl:{elements:[]},
     pathEditorHelpEl:{textContent:''}, pathFormEls:{name:{value:''},description:{value:''}},
-    analysisModalEl:{classList:{contains:()=>true}},
+    analysisModalEl:{classList:{contains:()=>true}}, routeGroupDialogEl:null,
     window:{
       localStorage:{setItem:(key,value)=>saved.set(key,value)},
       kakao:{maps:{LatLng, Marker:MapObject, Polyline:MapObject,

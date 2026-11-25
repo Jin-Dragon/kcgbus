@@ -548,93 +548,91 @@ h1::before {
   gap: 14px;
 }
 
-.route-subsection {
-  display: grid;
+.route-groups-section {
+  margin-top: 0;
+}
+
+.route-groups-heading,
+.route-bundle-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
+.route-groups-heading {
+  margin-bottom: 8px;
+}
+
+#route-groups {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
 .route-bundle {
-  margin-top: 0;
-  padding: 12px;
+  min-width: 0;
+  padding: 10px;
   border: 1px solid #d9e2ee;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-  box-shadow: 0 12px 24px rgba(27, 55, 96, 0.05);
+  border-radius: 8px;
+  background: #fff;
 }
 
 .route-bundle-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid #e2e9f2;
-}
-
-.route-bundle-heading {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
 }
 
 .route-bundle .section-title {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
-.route-bundle-kicker {
-  display: inline-flex;
-  align-items: center;
-  width: fit-content;
+.route-bundle-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.route-bundle-actions button {
+  min-height: 28px;
   padding: 4px 8px;
-  border-radius: 999px;
-  background: #edf4ff;
-  color: #266fd2;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.route-bundle-original {
-  border-color: #cfe0f6;
-}
-
-.route-bundle-merged {
-  border-color: #cfe7dd;
-  background: linear-gradient(180deg, #ffffff 0%, #f6fbf8 100%);
-}
-
-.route-bundle-merged .route-bundle-kicker {
-  background: #e7f6ef;
-  color: #1f8a5b;
-}
-
-.route-subsection-title {
-  margin: 0;
-  font-size: 14px;
-}
-
-.route-bundle-toggle-button {
-  flex: none;
   white-space: nowrap;
 }
 
-.route-bundle-head .route-list-title-edit {
-  align-self: center;
-  min-width: 42px;
-  height: 30px;
-  padding: 0 8px;
-  margin-left: auto;
+#route-group-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
 }
 
-@media (max-width: 640px) {
-  .route-bundle-head {
-    flex-direction: column;
-    align-items: stretch;
-  }
+#route-group-dialog::backdrop {
+  background: rgba(20, 34, 51, 0.42);
+}
 
-  .route-bundle-toggle-button {
-    width: 100%;
-  }
+#route-group-dialog form {
+  display: grid;
+  gap: 12px;
+}
+
+#route-group-dialog [hidden] {
+  display: none;
+}
+
+.route-group-dialog-message,
+.route-group-dialog-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.route-group-dialog-error {
+  color: #a43d19;
 }
 
 .tool-panel select:disabled,
@@ -763,25 +761,14 @@ h1::before {
 }
 
 .route-list-title-row {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 8px;
-  justify-content: end;
-  align-items: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
 }
 
-.route-list-title-edit {
-  align-self: stretch;
-  min-width: 48px;
-  padding: 0 10px;
-  border: 1px solid #d9e2ee;
-  border-radius: 6px;
-  background: #fff;
-  color: var(--muted);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
+.route-bundle-delete:not(:disabled) {
+  color: #a43d19;
 }
 
 .list-search-input {
@@ -826,20 +813,6 @@ h1::before {
   font-weight: 700;
 }
 
-.route-list-title-row + .route-list {
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid #d9e2ee;
-  border-radius: 6px;
-  background: #fff;
-}
-
-.route-list-title-row + .list-search-input {
-  margin-top: 8px;
-  border-radius: 6px;
-  background: #fff;
-}
-
 .list-search-input + .route-list {
   margin-top: 0;
   padding: 8px;
@@ -871,10 +844,6 @@ h1::before {
   gap: 8px;
 }
 
-#merged-route-list {
-  margin-top: 8px;
-}
-
 .route-button.is-merged-route {
   border-color: #bfd7ee;
   background: #eef6ff;
@@ -885,7 +854,7 @@ h1::before {
   background: #dcecff;
 }
 
-.route-row.is-merged-route .route-button span,
+.route-row.is-merged-route .route-meta,
 .route-row.is-merged-route .route-toggle {
   color: #4f6f8f;
 }
@@ -903,24 +872,15 @@ h1::before {
 }
 
 .route-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.route-controls {
-  display: grid;
-  grid-template-columns: auto auto auto auto;
-  gap: 8px;
-  align-items: stretch;
+  min-width: 0;
 }
 
 .route-drag-handle {
-  min-width: 24px;
-  padding: 0 6px;
+  flex: 0 0 26px;
+  height: 26px;
+  padding: 0;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 6px;
   background: #fff;
   color: var(--muted);
   font: inherit;
@@ -974,6 +934,17 @@ h1::before {
   background: #edf5ff;
 }
 
+.point-item.is-guidance-point {
+  border-color: #cbbbe4;
+  border-left: 6px solid #7452a7;
+  background: #f5f0fb;
+}
+
+.is-guidance-point.is-selected {
+  border-color: #7452a7;
+  background: #eae0f7;
+}
+
 .point-item.is-dragging {
   opacity: 0.55;
 }
@@ -983,7 +954,7 @@ h1::before {
   background: #fff0e2;
 }
 
-.route-button strong,
+.route-title-row,
 .point-item strong {
   display: flex;
   align-items: center;
@@ -991,15 +962,18 @@ h1::before {
   font-size: 13px;
 }
 
-.route-title-row {
-  justify-content: space-between;
-}
-
 .route-title-text {
   min-width: 0;
   white-space: normal;
   word-break: break-word;
   line-height: 1.3;
+}
+
+.route-title-row > .route-title-text {
+  flex: 1;
+  font-weight: 700;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .route-title-input {
@@ -1014,7 +988,6 @@ h1::before {
   font-size: 12px;
 }
 
-.route-button span,
 .point-item span {
   display: block;
   margin-top: 4px;
@@ -1022,16 +995,34 @@ h1::before {
   font-size: 12px;
 }
 
+.route-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 2px;
+  color: #4d6480;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .point-meta {
   color: #4d6480;
   font-size: 11px;
 }
 
+.is-guidance-point .route-title-text {
+  color: #382b4d;
+}
+
+.is-guidance-point .point-meta {
+  color: #573781;
+  font-weight: 700;
+}
+
 .route-badge {
-  display: inline-flex;
-  align-items: center;
+  flex: none;
   padding: 2px 5px;
-  border-radius: 999px;
+  border-radius: 4px;
   background: #eef5ff;
   color: #246fd1;
   font-size: 10px;
@@ -1041,55 +1032,44 @@ h1::before {
 
 .route-controls {
   display: flex;
-  align-items: stretch;
-  gap: 8px;
-  padding: 0 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-top: 6px;
 }
 
 .route-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 2px;
-  color: var(--muted);
+  gap: 4px;
   font-size: 12px;
-}
-
-.route-toggle-inline {
-  padding: 0;
-  margin-left: 0;
-}
-
-.route-toggle-inline span {
-  margin-top: 0;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .route-visibility-controls {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
-  margin-left: auto;
   flex-wrap: wrap;
 }
 
-.route-guidance-toggle {
-  color: #7a5b1a;
-  white-space: nowrap;
+.route-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
 }
 
-.route-icon-actions {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0;
-  margin-left: 2px;
-}
-
-.route-title-row .route-color-input,
-.route-title-row .route-delete-button {
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+.route-color-input,
+.route-delete-button {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
 }
 
 .route-toggle input {
@@ -1097,13 +1077,7 @@ h1::before {
 }
 
 .route-color-input {
-  width: 30px;
-  height: 30px;
   padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  cursor: pointer;
 }
 
 .route-color-input::before {
@@ -1111,23 +1085,16 @@ h1::before {
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 7px;
+  border-radius: 3px;
   background: var(--route-color, #0f6cbd);
 }
 
 .route-delete-button {
-  width: 30px;
-  height: 30px;
-  margin-top: 2px;
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
   color: #a43d19;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
 }
 
 .route-delete-button svg {
@@ -1135,20 +1102,17 @@ h1::before {
   height: 15px;
 }
 
-.route-drag-handle {
-  align-self: stretch;
-  min-height: 49px;
-}
-
 .route-inline-action {
-  padding: 2px 6px;
+  min-height: 26px;
+  padding: 0 6px;
   border: 1px solid #cfe0f6;
-  border-radius: 999px;
+  border-radius: 6px;
   background: #edf4ff;
   color: #2d74d6;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
 }
 

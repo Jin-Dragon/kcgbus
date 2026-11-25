@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WONDER Linx</title>
-  <link rel="stylesheet" href="./styles.css?v=20260617i">
+  <link rel="stylesheet" href="./styles.css?v=route-bundles">
 </head>
 <body>
   <div class="app-shell">
@@ -105,27 +105,56 @@
             </div>
           </div>
 
-          <div class="section route-subsection route-bundle route-bundle-original">
-            <div class="route-bundle-head">
-              <div class="route-bundle-heading">
-                <span class="route-bundle-kicker">기존노선</span>
-                <h2 class="section-title">기존노선과 노선리스트</h2>
-              </div>
-              <button id="toggle-original-routes-button" class="secondary-button route-bundle-toggle-button" type="button">노선 숨김</button>
+          <div class="section route-groups-section">
+            <div class="route-groups-heading">
+              <h2 class="section-title">노선 묶음</h2>
+              <button id="add-route-group-button" class="secondary-button" type="button">묶음 추가</button>
             </div>
-            <div id="route-list" class="route-list"></div>
+            <div id="route-groups"></div>
           </div>
-
-          <div class="section route-subsection route-bundle route-bundle-merged">
-            <div class="route-bundle-head">
-              <div class="route-bundle-heading">
-                <span class="route-bundle-kicker">개선노선</span>
-                <h2 class="section-title">개선노선과 노선리스트</h2>
+          <template id="route-group-template">
+            <section class="route-bundle">
+              <div class="route-bundle-head">
+                <h3 class="section-title"></h3>
+                <div class="route-bundle-actions">
+                  <button class="secondary-button route-list-title-edit" type="button">이름</button>
+                  <button class="secondary-button route-bundle-delete" type="button">삭제</button>
+                  <button class="secondary-button route-bundle-toggle-button" type="button">노선 숨김</button>
+                </div>
               </div>
-              <button id="toggle-merged-routes-button" class="secondary-button route-bundle-toggle-button" type="button">노선 숨김</button>
-            </div>
-            <div id="merged-route-list" class="route-list"></div>
-          </div>
+              <div class="route-list-title-row">
+                <button class="secondary-button list-analyze-button" type="button">정류장 분석</button>
+                <button class="secondary-button list-ridership-button" type="button">탑승객 분석</button>
+                <button class="secondary-button list-time-simulation-button" type="button">운행시간 시뮬레이션</button>
+              </div>
+              <button class="secondary-button route-add-button" type="button">노선 추가</button>
+              <input class="list-search-input" type="search" placeholder="노선 이름 검색" aria-label="노선 이름 검색">
+              <div class="route-list"></div>
+            </section>
+          </template>
+          <dialog id="route-group-dialog" aria-labelledby="route-group-dialog-title">
+            <form>
+              <h2 id="route-group-dialog-title" class="section-title"></h2>
+              <p class="route-group-dialog-message" hidden></p>
+              <label class="field" hidden>
+                <span>묶음 이름</span>
+                <input id="route-group-name" type="text" maxlength="80">
+              </label>
+              <label class="field" hidden>
+                <span id="route-group-first-label">이동할 묶음</span>
+                <select id="route-group-first"></select>
+              </label>
+              <label class="field" hidden>
+                <span>비교 묶음</span>
+                <select id="route-group-second"></select>
+              </label>
+              <p class="route-group-dialog-error" role="alert" hidden></p>
+              <div class="form-actions">
+                <button class="secondary-button route-group-dialog-cancel" type="button">취소</button>
+                <button class="primary-button" type="submit">저장</button>
+              </div>
+            </form>
+          </dialog>
 
           <div class="section">
             <h2 class="section-title">선택한 노선의 정류장</h2>
@@ -361,6 +390,6 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=20260907-route-guidance"></script>
+  <script src="./app.js?v=route-bundles"></script>
 </body>
 </html>

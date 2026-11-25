@@ -5,6 +5,7 @@
   const PATH_OVERRIDES_KEY = "kml-kakao-map.path-overrides";
   const ROUTE_SETTINGS_KEY = "kml-kakao-map.route-settings";
   const ROUTE_LIST_TITLES_KEY = "kml-kakao-map.route-list-titles";
+  const ROUTE_GROUPS_KEY = "kml-kakao-map.route-groups";
   const UPLOADED_POINTS_KEY = "kml-kakao-map.uploaded-points";
   const UPLOADED_PATHS_KEY = "kml-kakao-map.uploaded-paths";
   const UPLOADED_FILE_SUMMARIES_KEY = "kml-kakao-map.uploaded-file-summaries";
@@ -82,10 +83,9 @@
   const optimizeRoutesButtonEl = document.getElementById("optimize-routes-button");
   const showAllRoutesButtonEl = document.getElementById("show-all-routes-button");
   const hideAllRoutesButtonEl = document.getElementById("hide-all-routes-button");
-  const toggleOriginalRoutesButtonEl = document.getElementById("toggle-original-routes-button");
-  const toggleMergedRoutesButtonEl = document.getElementById("toggle-merged-routes-button");
-  const routeListEl = document.getElementById("route-list");
-  const mergedRouteListEl = document.getElementById("merged-route-list");
+  const routeGroupsEl = document.getElementById("route-groups");
+  const routeGroupTemplateEl = document.getElementById("route-group-template");
+  const routeGroupDialogEl = document.getElementById("route-group-dialog");
   const routePointListEl = document.getElementById("route-point-list");
   const routeMergePanelEl = document.getElementById("route-merge-panel");
   const routeMergeSummaryEl = document.getElementById("route-merge-summary");
@@ -197,13 +197,6 @@
   let editingRouteName = null;
   let editingPointId = null;
   let copiedPointSnapshot = null;
-  let routeListSearchQueries = {
-    original: "",
-    merged: "",
-  };
-  const routeListAnalyzeButtons = {};
-  const routeListRidershipButtons = {};
-  const routeListTimeSimulationButtons = {};
   let routeCreationDialogEl = null;
   let routeCreationGroup = "default";
   let routeColorDialogEl = null;
@@ -278,11 +271,7 @@
   let pointOverrides = loadJsonObject(OVERRIDES_KEY);
   let pathOverrides = loadJsonObject(PATH_OVERRIDES_KEY);
   let routeSettings = loadJsonObject(ROUTE_SETTINGS_KEY);
-  let routeListTitles = {
-    original: "불러온 노선",
-    merged: "병합된 노선",
-    ...loadJsonObject(ROUTE_LIST_TITLES_KEY),
-  };
+  let routeGroups = loadRouteGroups();
   const savedUiState = loadJsonObject(UI_STATE_KEY);
   let workingPathCoordinates = [];
   let autoSaveTimer = null;
@@ -1004,6 +993,7 @@
       pointOverrides: cloneJson(pointOverrides),
       pathOverrides: cloneJson(pathOverrides),
       routeSettings: cloneJson(routeSettings),
+      routeGroups: cloneJson(routeGroups),
       observationAreas: cloneJson(observationAreas),
       selectedRouteName,
       mergeRouteAName,
@@ -1032,7 +1022,7 @@
     window.localStorage.setItem(OVERRIDES_KEY, JSON.stringify(pointOverrides));
     window.localStorage.setItem(PATH_OVERRIDES_KEY, JSON.stringify(pathOverrides));
     window.localStorage.setItem(ROUTE_SETTINGS_KEY, JSON.stringify(routeSettings));
-    window.localStorage.setItem(ROUTE_LIST_TITLES_KEY, JSON.stringify(routeListTitles));
+    saveRouteGroups();
     window.localStorage.setItem(UPLOADED_POINTS_KEY, JSON.stringify(uploadedPoints));
     window.localStorage.setItem(UPLOADED_PATHS_KEY, JSON.stringify(uploadedPaths));
     window.localStorage.setItem(UPLOADED_FILE_SUMMARIES_KEY, JSON.stringify(uploadedFileSummaries));
@@ -1075,6 +1065,7 @@
     pointOverrides = cloneJson(snapshot.pointOverrides || {});
     pathOverrides = cloneJson(snapshot.pathOverrides || {});
     routeSettings = cloneJson(snapshot.routeSettings || {});
+    routeGroups = snapshot.routeGroups || defaultRouteGroups();
     observationAreas = cloneJson(snapshot.observationAreas || []).map(normalizeObservationArea);
     selectedRouteName = typeof snapshot.selectedRouteName === "string" ? snapshot.selectedRouteName : null;
     mergeRouteAName = typeof snapshot.mergeRouteAName === "string" ? snapshot.mergeRouteAName : null;
@@ -1175,144 +1166,175 @@
     saveDesignedPathButtonEl = button;
   }
 
-  function saveRouteListTitles() {
-    window.localStorage.setItem(ROUTE_LIST_TITLES_KEY, JSON.stringify(routeListTitles));
+  function defaultRouteGroups() {
+    return [
+      { id: "default", name: "기존 노선" },
+      { id: "merged", name: "개선 노선" },
+    ];
   }
 
-  function getRouteListGroupElements(groupKey) {
-    const bundleSelector = groupKey === "merged" ? ".route-bundle-merged" : ".route-bundle-original";
-    const bundleEl = document.querySelector(bundleSelector);
-    return {
-      bundleEl,
-      headingEl: bundleEl?.querySelector(".section-title") || null,
-      toggleButtonEl: bundleEl?.querySelector(".route-bundle-toggle-button") || null,
-      headEl: bundleEl?.querySelector(".route-bundle-head") || null,
+  function normalizeRouteGroups(values) {
+    const groups = new Map();
+    for (const { id, name } of Array.isArray(values) ? values.filter(Boolean) : []) {
+      if (
+        typeof id === "string"
+        && /^(?:default|merged|group-[a-z\d-]+)$/.test(id)
+        && typeof name === "string"
+        && name.trim()
+        && !groups.has(id)
+      ) {
+        groups.set(id, { id, name: name.trim() });
+      }
+    }
+    return [...groups.values()];
+  }
+
+  function loadRouteGroups() {
+    const groups = normalizeRouteGroups(loadJsonArray(ROUTE_GROUPS_KEY));
+    if (groups.length) {
+      return groups;
+    }
+    const titles = loadJsonObject(ROUTE_LIST_TITLES_KEY);
+    return defaultRouteGroups().map((group) => {
+      const original = group.id === "default";
+      const title = String(titles[original ? "original" : "merged"] || "").trim();
+      return title && title !== (original ? "불러온 노선" : "병합된 노선") ? { ...group, name: title } : group;
+    });
+  }
+
+  function saveRouteGroups() {
+    window.localStorage.setItem(ROUTE_GROUPS_KEY, JSON.stringify(routeGroups));
+  }
+
+  function getRouteGroupLabel(groupKey) {
+    const groupId = groupKey === "original" ? "default" : groupKey;
+    return routeGroups.find((group) => group.id === groupId)?.name || "노선 묶음";
+  }
+
+  function setRouteGroupOptions(select, groups, selectedId) {
+    select.replaceChildren(...groups.map((group) => new Option(group.name, group.id)));
+    if (groups.some((group) => group.id === selectedId)) {
+      select.value = selectedId;
+    }
+  }
+
+  function openRouteGroupDialog({ title, message = "", name, choices = [], compare = false, submitLabel, onSubmit }) {
+    const form = routeGroupDialogEl.querySelector("form");
+    const nameInput = form.querySelector("#route-group-name");
+    const firstSelect = form.querySelector("#route-group-first");
+    const secondSelect = form.querySelector("#route-group-second");
+    const error = form.querySelector(".route-group-dialog-error");
+    form.querySelector("#route-group-dialog-title").textContent = title;
+    const messageEl = form.querySelector(".route-group-dialog-message");
+    messageEl.textContent = message;
+    messageEl.hidden = !message;
+    nameInput.value = name ?? "";
+    nameInput.disabled = name === undefined;
+    nameInput.required = !nameInput.disabled;
+    nameInput.parentElement.hidden = nameInput.disabled;
+    firstSelect.parentElement.hidden = !choices.length;
+    secondSelect.parentElement.hidden = !compare;
+    form.querySelector("#route-group-first-label").textContent = compare ? "기준 묶음" : "이동할 묶음";
+    setRouteGroupOptions(firstSelect, choices, compare ? "default" : null);
+    setRouteGroupOptions(secondSelect, compare ? choices : [], "merged");
+    if (compare && firstSelect.value === secondSelect.value) {
+      secondSelect.value = choices.find((group) => group.id !== firstSelect.value).id;
+    }
+    const submit = form.querySelector('button[type="submit"]');
+    submit.textContent = submitLabel;
+    error.hidden = true;
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const message = onSubmit({
+        name: nameInput.value.trim(),
+        firstId: firstSelect.value,
+        secondId: secondSelect.value,
+      });
+      if (message) {
+        error.textContent = message;
+        error.hidden = false;
+        return;
+      }
+      routeGroupDialogEl.close();
     };
+    routeGroupDialogEl.showModal();
+    if (!nameInput.disabled) {
+      nameInput.focus();
+      nameInput.select();
+    } else if (choices.length) {
+      firstSelect.focus();
+    } else {
+      form.querySelector(".route-group-dialog-cancel").focus();
+    }
   }
 
-  function ensureRouteListTitleEditButton(groupKey, fallbackTitle) {
-    const { headingEl, toggleButtonEl, headEl } = getRouteListGroupElements(groupKey);
-    if (headingEl) {
-      headingEl.textContent = routeListTitles[groupKey] || fallbackTitle;
-    }
-    if (!toggleButtonEl || !headEl) {
-      return;
-    }
-
-    let editButtonEl = headEl.querySelector(`.route-list-title-edit[data-group="${groupKey}"]`);
-    if (!editButtonEl) {
-      editButtonEl = document.createElement("button");
-      editButtonEl.type = "button";
-      editButtonEl.className = "route-list-title-edit";
-      editButtonEl.dataset.group = groupKey;
-      editButtonEl.title = "목록 제목 변경";
-      editButtonEl.setAttribute("aria-label", "목록 제목 변경");
-      editButtonEl.textContent = "이름";
-      editButtonEl.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const currentTitle = routeListTitles[groupKey] || fallbackTitle;
-        const nextTitle = window.prompt("목록 제목을 입력하세요.", currentTitle);
-        if (nextTitle == null) {
+  function editRouteGroup(group) {
+    openRouteGroupDialog({
+      title: group ? "묶음 이름 변경" : "노선 묶음 추가",
+      name: group?.name || "",
+      submitLabel: group ? "저장" : "추가",
+      onSubmit: ({ name }) => {
+        const current = group ? routeGroups.find((item) => item.id === group.id) : null;
+        if (group && !current) {
+          return "변경할 묶음을 찾을 수 없습니다.";
+        }
+        if (!name) {
+          return "묶음 이름을 입력하세요.";
+        }
+        if (routeGroups.some((item) => item.id !== group?.id && normalizeSearchText(item.name) === normalizeSearchText(name))) {
+          return "같은 이름의 묶음이 이미 있습니다.";
+        }
+        if (name === current?.name) {
           return;
         }
-        const normalizedTitle = String(nextTitle || "").trim() || fallbackTitle;
-        if (normalizedTitle === currentTitle) {
-          return;
+        pushUndoSnapshot();
+        if (current) {
+          current.name = name;
+        } else {
+          const id = `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+          routeGroups.push({ id, name });
         }
-        routeListTitles[groupKey] = normalizedTitle;
-        saveRouteListTitles();
-        if (headingEl) {
-          headingEl.textContent = normalizedTitle;
-        }
-        setStatus(`목록 제목을 "${normalizedTitle}" 로 변경했습니다.`, false);
-      });
-      headEl.insertBefore(editButtonEl, toggleButtonEl);
-    }
-  }
-
-  function ensureRouteListTitleInput(listEl, groupKey, fallbackTitle) {
-    if (!listEl?.parentElement) {
-      return;
-    }
-
-    const sectionEl = listEl.parentElement;
-    let titleRowEl = sectionEl.querySelector(`.route-list-title-row[data-group="${groupKey}"]`);
-    if (!titleRowEl) {
-      titleRowEl = document.createElement("div");
-      titleRowEl.className = "route-list-title-row";
-      titleRowEl.dataset.group = groupKey;
-      sectionEl.insertBefore(titleRowEl, listEl);
-    }
-    ensureRouteListTitleEditButton(groupKey, fallbackTitle);
-
-    let analyzeButtonEl = titleRowEl.querySelector(`.list-analyze-button[data-group="${groupKey}"]`);
-    if (!analyzeButtonEl) {
-      analyzeButtonEl = document.createElement("button");
-      analyzeButtonEl.type = "button";
-      analyzeButtonEl.className = "secondary-button list-analyze-button";
-      analyzeButtonEl.dataset.group = groupKey;
-      analyzeButtonEl.textContent = "정류장 분석";
-      analyzeButtonEl.addEventListener("click", () => {
-        handleAnalyzeRouteGroup(groupKey, analyzeButtonEl);
-      });
-      titleRowEl.appendChild(analyzeButtonEl);
-    }
-
-    routeListAnalyzeButtons[groupKey] = analyzeButtonEl;
-
-    let ridershipButtonEl = titleRowEl.querySelector(`.list-ridership-button[data-group="${groupKey}"]`);
-    if (!ridershipButtonEl) {
-      ridershipButtonEl = document.createElement("button");
-      ridershipButtonEl.type = "button";
-      ridershipButtonEl.className = "secondary-button list-ridership-button";
-      ridershipButtonEl.dataset.group = groupKey;
-      ridershipButtonEl.textContent = "탑승객 분석";
-      ridershipButtonEl.addEventListener("click", () => {
-        openRidershipAnalysisSettingsWindow(groupKey);
-      });
-      titleRowEl.appendChild(ridershipButtonEl);
-    }
-
-    routeListRidershipButtons[groupKey] = ridershipButtonEl;
-
-    let timeSimulationButtonEl = titleRowEl.querySelector(`.list-time-simulation-button[data-group="${groupKey}"]`);
-    if (!timeSimulationButtonEl) {
-      timeSimulationButtonEl = document.createElement("button");
-      timeSimulationButtonEl.type = "button";
-      timeSimulationButtonEl.className = "secondary-button list-time-simulation-button";
-      timeSimulationButtonEl.dataset.group = groupKey;
-      timeSimulationButtonEl.textContent = "운행시간 시뮬레이션";
-      timeSimulationButtonEl.addEventListener("click", () => {
-        openRouteTimeSimulationSettingsWindow(groupKey);
-      });
-      titleRowEl.appendChild(timeSimulationButtonEl);
-    }
-
-    routeListTimeSimulationButtons[groupKey] = timeSimulationButtonEl;
-    updateAnalyzeButtonState();
-  }
-
-  function ensureRouteListSearchInput(listEl, groupKey) {
-    if (!listEl?.parentElement) {
-      return;
-    }
-
-    const sectionEl = listEl.parentElement;
-    let inputEl = sectionEl.querySelector(`.list-search-input[data-search-group="${groupKey}"]`);
-    if (!inputEl) {
-      inputEl = document.createElement("input");
-      inputEl.type = "search";
-      inputEl.className = "list-search-input";
-      inputEl.dataset.searchGroup = groupKey;
-      inputEl.placeholder = "노선 이름 검색";
-      inputEl.addEventListener("input", () => {
-        routeListSearchQueries[groupKey] = inputEl.value;
+        saveRouteGroups();
         renderRouteList();
-      });
-      sectionEl.insertBefore(inputEl, listEl);
-    }
+        setStatus(group ? `묶음 이름을 "${name}"으로 변경했습니다.` : `"${name}" 묶음을 추가했습니다.`, false);
+      },
+    });
+  }
 
-    inputEl.value = routeListSearchQueries[groupKey] || "";
+  function deleteRouteGroup(group) {
+    const targets = routeGroups.filter((item) => item.id !== group.id);
+    const routeNames = getRouteNamesByGroup(group.id);
+    openRouteGroupDialog({
+      title: `"${group.name}" 묶음 삭제`,
+      message: routeNames.length
+        ? `소속 노선 ${routeNames.length}개를 옮길 묶음을 선택하세요.`
+        : "이 묶음을 삭제할까요?",
+      choices: routeNames.length ? targets : [],
+      submitLabel: "삭제",
+      onSubmit: ({ firstId }) => {
+        const remainingGroups = routeGroups.filter((item) => item.id !== group.id);
+        if (!remainingGroups.length) {
+          return "노선 묶음은 최소 하나가 필요합니다.";
+        }
+        const currentRouteNames = getRouteNamesByGroup(group.id);
+        if (currentRouteNames.length && !remainingGroups.some((item) => item.id === firstId)) {
+          return "다른 묶음을 선택해야 소속 노선을 옮길 수 있습니다. 창을 닫고 다시 시도하세요.";
+        }
+        pushUndoSnapshot();
+        if (currentRouteNames.length) {
+          assignRoutesToGroup(currentRouteNames, firstId);
+          saveRouteSettings();
+        }
+        routeGroups = remainingGroups;
+        saveRouteGroups();
+        if (analysisActive && (activeAnalysisGroup === group.id || activeAnalysisGroup === firstId)) {
+          stopAnalysisView();
+        } else {
+          refreshUI();
+        }
+        setStatus(`"${group.name}" 묶음을 삭제했습니다.`, false);
+      },
+    });
   }
 
   function ensurePointListSearchInput() {
@@ -1339,11 +1361,8 @@
   }
 
   function getRouteNamesByGroup(groupKey) {
-    return getRoutes().filter((routeName) => (
-      groupKey === "merged"
-        ? getRouteSetting(routeName).routeGroup === "merged"
-        : getRouteSetting(routeName).routeGroup !== "merged"
-    ));
+    const groupId = groupKey === "original" ? "default" : groupKey;
+    return getRoutes().filter((routeName) => getRouteSetting(routeName).routeGroup === groupId);
   }
 
   function syncStatLabels() {
@@ -1388,11 +1407,8 @@
     analyzeRoutesButtonEl.textContent = analysisActive ? "정류장 분석 종료" : "정류장 분석";
     analyzeRoutesButtonEl.hidden = true;
     analyzeRoutesButtonEl.setAttribute("aria-hidden", "true");
-    Object.entries(routeListAnalyzeButtons).forEach(([groupKey, buttonEl]) => {
-      if (!buttonEl) {
-        return;
-      }
-      const isActiveGroup = analysisActive && activeAnalysisGroup === groupKey;
+    routeGroupsEl?.querySelectorAll(".list-analyze-button").forEach((buttonEl) => {
+      const isActiveGroup = analysisActive && activeAnalysisGroup === buttonEl.closest(".route-bundle").dataset.group;
       buttonEl.textContent = isActiveGroup ? "정류장 분석 종료" : "정류장 분석";
       buttonEl.classList.toggle("is-active", isActiveGroup);
     });
@@ -2119,9 +2135,9 @@
     const normalizedRouteName = normalizeRouteName(routeName);
     const current = routeSettings[normalizedRouteName] || {};
     const defaultGroup = isMergedRouteName(normalizedRouteName) ? "merged" : "default";
-    const routeGroup = current.routeGroup === "merged" || current.routeGroup === "default"
-      ? current.routeGroup
-      : defaultGroup;
+    const routeGroup = [current.routeGroup, defaultGroup, "default"].find(
+      (groupId) => routeGroups.some((group) => group.id === groupId)
+    ) || routeGroups[0].id;
     return {
       color: current.color || colorFromRouteName(normalizedRouteName),
       visible: current.visible !== false,
@@ -2588,6 +2604,14 @@
   function updateCounts() {
     const routes = getRoutes();
     const points = getOperationalPoints();
+    const hasDefaultGroups = routeGroups.length === 2 && defaultRouteGroups().every(({ id, name }) => (
+      routeGroups.some((group) => group.id === id && group.name === name)
+    ));
+    if (!hasDefaultGroups) {
+      fileCountEl.innerHTML = `${routes.length}<small>노선 묶음 ${routeGroups.length}개</small>`;
+      pointCountEl.textContent = String(points.length);
+      return;
+    }
     const existingRouteCount = routes.filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged").length;
     const newRouteCount = routes.length - existingRouteCount;
     const existingPointCount = points.filter((point) => getRouteSetting(point.routeName).routeGroup !== "merged").length;
@@ -4185,7 +4209,7 @@
 
   function openRidershipAnalysisSettingsWindow(groupKey) {
     const defaults = normalizeRidershipAnalysisOptions();
-    const groupLabel = groupKey === "merged" ? "개선 노선 리스트" : "기존 노선 리스트";
+    const groupLabel = getRouteGroupLabel(groupKey);
     const settingsWindow = window.open("", `ridership-analysis-settings-${groupKey}`, "width=920,height=760,resizable=yes,scrollbars=yes");
     if (!settingsWindow) {
       setStatus("팝업이 차단되었습니다. 탑승객 분석 설정 창을 허용해 주세요.", true);
@@ -6522,7 +6546,7 @@
 
   function openRouteTimeSimulationSettingsWindow(groupKey) {
     const routeItems = getRouteSimulationCandidates(groupKey);
-    const groupLabel = groupKey === "merged" ? "개선 노선 리스트" : "기존 노선 리스트";
+    const groupLabel = getRouteGroupLabel(groupKey);
     const settingsHtml = buildRouteTimeSimulationSettingsWindowHtml(
       groupKey,
       groupLabel,
@@ -8056,9 +8080,9 @@
     };
   }
 
-  function buildRouteGroupComparisonReport() {
-    const existingRouteNames = getRouteNamesByGroup("default");
-    const improvedRouteNames = getRouteNamesByGroup("merged");
+  function buildRouteGroupComparisonReport(baseId, comparisonId) {
+    const existingRouteNames = getRouteNamesByGroup(baseId);
+    const improvedRouteNames = getRouteNamesByGroup(comparisonId);
     const existing = buildRouteGroupComparisonMetrics(existingRouteNames, existingRouteNames.length, 1);
     const improved = buildRouteGroupComparisonMetrics(improvedRouteNames, 12, 2);
 
@@ -8070,6 +8094,8 @@
     return {
       generatedAt: new Date().toISOString(),
       type: "route-group-comparison-dashboard",
+      baseGroupName: getRouteGroupLabel(baseId),
+      comparisonGroupName: getRouteGroupLabel(comparisonId),
       existing,
       improved,
       assumptions: {
@@ -8156,7 +8182,7 @@
     <div class="hero">
       <div>
         <div class="tag">전체노선 비교분석</div>
-        <h1>기존노선 vs 개선노선</h1>
+        <h1>${escapeHtml(report.baseGroupName)} vs ${escapeHtml(report.comparisonGroupName)}</h1>
         <p>${escapeHtml(report.message)}</p>
       </div>
       <p>${escapeHtml(new Date(report.generatedAt).toLocaleString("ko-KR"))}</p>
@@ -8182,8 +8208,8 @@
       <thead>
         <tr>
           <th>비교 항목</th>
-          <th>개선 전</th>
-          <th>개선 후</th>
+          <th>${escapeHtml(report.baseGroupName)}</th>
+          <th>${escapeHtml(report.comparisonGroupName)}</th>
           <th>개선 내용</th>
         </tr>
       </thead>
@@ -10049,9 +10075,7 @@
   function buildRouteMetadataEntries(routeName) {
     const setting = getRouteSetting(routeName);
     const entries = [];
-    if (setting.routeGroup === "merged" || setting.routeGroup === "default") {
-      entries.push(`<Data name="routeGroup"><value>${escapeXml(setting.routeGroup)}</value></Data>`);
-    }
+    entries.push(`<Data name="routeGroup"><value>${escapeXml(setting.routeGroup)}</value></Data>`);
     if (Number.isFinite(Number(setting.routeOrder))) {
       entries.push(`<Data name="routeOrder"><value>${escapeXml(String(setting.routeOrder))}</value></Data>`);
     }
@@ -10105,7 +10129,7 @@
     ])
       .concat(
         withRidershipExtendedData(point.extendedData, null)
-          .filter((item) => item.name !== "createdOrder")
+          .filter((item) => item.name !== "createdOrder" && item.name !== "routeGroup")
           .map((item) => `<Data name="${escapeXml(item.name)}"><value>${escapeXml(item.value)}</value></Data>`)
       )
       .filter(Boolean)
@@ -10243,6 +10267,9 @@
   <Document>
     <name>${escapeXml(AUTO_SAVE_FILENAME)}</name>
     ${styles}
+    <ExtendedData>
+      <Data name="routeGroups"><value>${escapeXml(JSON.stringify(routeGroups))}</value></Data>
+    </ExtendedData>
     ${folders}
     ${observationAreaFolder}
   </Document>
@@ -10342,6 +10369,7 @@
     window.localStorage.removeItem(PATH_OVERRIDES_KEY);
     window.localStorage.removeItem(ROUTE_SETTINGS_KEY);
     window.localStorage.removeItem(ROUTE_LIST_TITLES_KEY);
+    window.localStorage.removeItem(ROUTE_GROUPS_KEY);
     window.localStorage.removeItem(UPLOADED_POINTS_KEY);
     window.localStorage.removeItem(UPLOADED_PATHS_KEY);
     window.localStorage.removeItem(UPLOADED_FILE_SUMMARIES_KEY);
@@ -10369,6 +10397,7 @@
     pointOverrides = {};
     pathOverrides = {};
     routeSettings = {};
+    routeGroups = defaultRouteGroups();
     observationAreas = [];
     workingPathCoordinates = [];
     workingObservationAreaPoints = [];
@@ -10454,11 +10483,8 @@
   function getAnalysisScopeLabel(report) {
     const routeNames = Array.isArray(report?.local?.routeNames) ? report.local.routeNames : [];
     const groupKeys = new Set(routeNames.map((routeName) => getRouteSetting(routeName).routeGroup));
-    if (groupKeys.size === 1 && groupKeys.has("default")) {
-      return "기존 노선";
-    }
-    if (groupKeys.size === 1 && groupKeys.has("merged")) {
-      return "개선 노선";
+    if (groupKeys.size === 1) {
+      return getRouteGroupLabel(groupKeys.values().next().value);
     }
     return "선택 노선";
   }
@@ -11078,7 +11104,7 @@
           <li><strong>KML 저장:</strong> 현재 작업 중인 노선, 정류장, 경로를 KML로 저장합니다.</li>
           <li><strong>저장후 초기화:</strong> 저장을 마친 뒤 현재 작업 공간을 비웁니다.</li>
           <li><strong>정류장 CSV 다운로드/업로드:</strong> 현재 표시 중인 정류장 목록을 엑셀용 CSV로 내보내고 boarding_count 열을 채워 다시 올리면 서버에 탑승객 수가 저장됩니다.</li>
-          <li><strong>전체노선 비교분석:</strong> 기존노선과 개선노선의 전후 비교표를 새 창 대시보드로 엽니다.</li>
+          <li><strong>전체노선 비교분석:</strong> 기준 묶음과 비교 묶음의 분석표를 새 창에서 엽니다.</li>
           <li><strong>불러온 파일 목록의 x:</strong> 해당 파일에서 온 데이터와 연결된 목록을 작업 화면에서 제거합니다.</li>
         </ul>
       </article>
@@ -11791,7 +11817,7 @@
     ));
     const pointCount = getOperationalPoints().filter((point) => routeNames.includes(point.routeName)).length;
     const pathCount = getAllPaths().filter((pathItem) => routeNames.includes(pathItem.routeName)).length;
-    const groupLabel = groupKey === "merged" ? "신규 노선" : "기존 노선";
+    const groupLabel = getRouteGroupLabel(groupKey);
 
     if (!routeNames.length || (!pointCount && !pathCount)) {
       setStatus(`${groupLabel} 목록에 분석할 노선 데이터가 없습니다.`, true);
@@ -11839,20 +11865,37 @@
     }
   }
 
-  async function handleCompareRouteGroups() {
-    const existingRouteNames = getRouteNamesByGroup("default");
-    const improvedRouteNames = getRouteNamesByGroup("merged");
-
-    if (!existingRouteNames.length || !improvedRouteNames.length) {
-      setStatus("전체노선 비교분석을 하려면 기존노선과 개선노선이 모두 있어야 합니다.", true);
+  function handleCompareRouteGroups() {
+    const choices = routeGroups.filter((group) => getRouteNamesByGroup(group.id).length > 0);
+    if (choices.length < 2) {
+      setStatus("비교하려면 노선이 있는 묶음이 두 개 이상 필요합니다.", true);
       return;
     }
+    if (routeGroups.length === 2 && choices.some((group) => group.id === "default") && choices.some((group) => group.id === "merged")) {
+      runRouteGroupComparison("default", "merged");
+      return;
+    }
+    openRouteGroupDialog({
+      title: "비교할 노선 묶음 선택",
+      message: "기준 묶음은 노선당 1대, 비교 묶음은 노선당 최소 2대와 총 12대를 기준으로 계산합니다.",
+      choices,
+      compare: true,
+      submitLabel: "비교분석",
+      onSubmit: ({ firstId, secondId }) => {
+        if (firstId === secondId) {
+          return "서로 다른 두 묶음을 선택하세요.";
+        }
+        runRouteGroupComparison(firstId, secondId);
+      },
+    });
+  }
 
+  async function runRouteGroupComparison(baseId, comparisonId) {
     compareRouteGroupsButtonEl.disabled = true;
     setStatus("전체노선 비교분석 표를 생성합니다.", false);
 
     try {
-      const report = buildRouteGroupComparisonReport();
+      const report = buildRouteGroupComparisonReport(baseId, comparisonId);
       latestAnalysisReport = report;
       const opened = openRouteComparisonWindow(report);
       if (!opened) {
@@ -12083,7 +12126,7 @@
       lng,
       altitude: Number.isFinite(altitude) ? altitude : null,
       createdOrder: Number.isFinite(createdOrderValue) ? createdOrderValue : null,
-      routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
+      routeGroup: routeGroupValue || null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
       guidanceVisible: guidanceVisibleValue === "true" || guidanceVisibleValue === "false"
         ? guidanceVisibleValue === "true"
@@ -12137,7 +12180,7 @@
       name: directChildText(placemark, "name") || normalizeRouteName(routeName || fileName),
       description: directChildText(placemark, "description"),
       styleUrl: directChildText(placemark, "styleUrl"),
-      routeGroup: routeGroupValue === "merged" || routeGroupValue === "default" ? routeGroupValue : null,
+      routeGroup: routeGroupValue || null,
       routeOrder: Number.isFinite(routeOrderValue) ? routeOrderValue : null,
       guidanceVisible: guidanceVisibleValue === "true" || guidanceVisibleValue === "false"
         ? guidanceVisibleValue === "true"
@@ -12209,7 +12252,7 @@
 
       const current = routeMetaByName.get(routeName) || {};
       const next = { ...current };
-      if ((item?.routeGroup === "merged" || item?.routeGroup === "default") && !next.routeGroup) {
+      if (!next.routeGroup && routeGroups.some((group) => group.id === item?.routeGroup)) {
         next.routeGroup = item.routeGroup;
       }
       if (Number.isFinite(Number(item?.routeOrder)) && !Number.isFinite(Number(next.routeOrder))) {
@@ -12249,12 +12292,24 @@
     const points = [];
     const paths = [];
     const areas = [];
+    let importedGroups = [];
 
     function walk(node, currentRouteName, depth) {
       const nodeName = node.localName;
       const directName = directChildText(node, "name");
       let nextRouteName = currentRouteName;
 
+      if (nodeName === "Document" && !importedGroups.length) {
+        const extendedData = directChildrenByTag(node, "ExtendedData")[0];
+        if (extendedData) {
+          const serializedGroups = getExtendedDataValue(getExtendedData(extendedData), "routeGroups");
+          try {
+            importedGroups = normalizeRouteGroups(JSON.parse(serializedGroups || "[]"));
+          } catch {
+            // Other KML features can still be imported if bundle metadata is malformed.
+          }
+        }
+      }
       if (nodeName === "Folder") {
         nextRouteName = directName || currentRouteName || filename;
       } else if (!currentRouteName && nodeName === "Document" && depth > 0 && directName) {
@@ -12314,7 +12369,7 @@
     }
 
     walk(xml.documentElement, "", 0);
-    return { points, paths, areas };
+    return { points, paths, areas, routeGroups: importedGroups };
   }
 
   function stripKmlExtension(fileName) {
@@ -12580,14 +12635,44 @@
     setStatus(`"${targetFileName}" 파일을 불러온 목록에서 제거했습니다.`, false);
   }
 
-  function setRouteGroup(routeName, routeGroup) {
-    pushUndoSnapshot();
-    routeSettings[routeName] = {
-      ...getRouteSetting(routeName),
-      routeGroup,
+  function assignRoutesToGroup(routeNames, routeGroup) {
+    let routeOrder = getNextRouteOrderForGroup(routeGroup);
+    routeNames.forEach((routeName) => {
+      routeSettings[routeName] = {
+        ...getRouteSetting(routeName),
+        routeGroup,
+        routeOrder: routeOrder++,
+      };
+    });
+  }
+
+  function moveRouteToGroup(routeName) {
+    const sourceId = getRouteSetting(routeName).routeGroup;
+    const targets = routeGroups.filter((group) => group.id !== sourceId);
+    if (!targets.length) {
+      return;
+    }
+    const move = (targetId) => {
+      pushUndoSnapshot();
+      assignRoutesToGroup([routeName], targetId);
+      saveRouteSettings();
+      if (analysisActive && (activeAnalysisGroup === sourceId || activeAnalysisGroup === targetId)) {
+        stopAnalysisView();
+      } else {
+        refreshUI();
+      }
+      setStatus(`"${routeName}" 노선을 "${getRouteGroupLabel(targetId)}" 묶음으로 옮겼습니다.`, false);
     };
-    saveRouteSettings();
-    refreshUI();
+    if (targets.length === 1) {
+      move(targets[0].id);
+      return;
+    }
+    openRouteGroupDialog({
+      title: `"${routeName}" 노선 이동`,
+      choices: targets,
+      submitLabel: "이동",
+      onSubmit: ({ firstId }) => move(firstId),
+    });
   }
 
   function reorderRoutes(routeNames, sourceRouteName, targetRouteName) {
@@ -12626,16 +12711,8 @@
     refreshUI();
   }
 
-  function getRouteGroupLabel(groupKey) {
-    return groupKey === "merged" ? "개선 노선" : "기존 노선";
-  }
-
   function getNextRouteOrderForGroup(groupKey) {
-    const groupRouteOrders = getRoutes()
-      .filter((routeName) => {
-        const routeGroup = getRouteSetting(routeName).routeGroup;
-        return groupKey === "merged" ? routeGroup === "merged" : routeGroup !== "merged";
-      })
+    const groupRouteOrders = getRouteNamesByGroup(groupKey)
       .map((routeName) => Number(getRouteSetting(routeName).routeOrder))
       .filter((order) => Number.isFinite(order));
     const maxOrder = groupRouteOrders.length ? Math.max(...groupRouteOrders) : Date.now();
@@ -12702,13 +12779,13 @@
   }
 
   function openRouteCreationDialog(groupKey) {
-    routeCreationGroup = groupKey === "merged" ? "merged" : "default";
+    routeCreationGroup = groupKey;
     const dialogEl = ensureRouteCreationDialog();
     const titleEl = dialogEl.querySelector("#route-creation-title");
     const nameEl = dialogEl.querySelector("#route-creation-name");
     const colorEl = dialogEl.querySelector("#route-creation-color");
     if (titleEl) {
-      titleEl.textContent = `${getRouteGroupLabel(routeCreationGroup)} 추가`;
+      titleEl.textContent = `${getRouteGroupLabel(routeCreationGroup)} · 노선 추가`;
     }
     if (nameEl) {
       nameEl.value = "";
@@ -12746,7 +12823,7 @@
       visible: true,
       deleted: false,
       createdRoute: true,
-      routeGroup: groupKey === "merged" ? "merged" : "default",
+      routeGroup: groupKey,
       routeOrder: getNextRouteOrderForGroup(groupKey),
     };
     saveRouteSettings();
@@ -12870,30 +12947,8 @@
     setStatus(`"${changedRouteName}" 노선 색상을 적용했습니다.`, false);
   }
 
-  function ensureRouteListCreateButton(containerEl, groupKey) {
-    if (!containerEl?.parentElement) {
-      return;
-    }
-    const parentEl = containerEl.parentElement;
-    const buttonId = groupKey === "merged" ? "add-merged-route-button" : "add-original-route-button";
-    let buttonEl = parentEl.querySelector(`#${buttonId}`);
-    if (!buttonEl) {
-      buttonEl = document.createElement("button");
-      buttonEl.id = buttonId;
-      buttonEl.type = "button";
-      buttonEl.className = "secondary-button route-add-button";
-      buttonEl.addEventListener("click", () => {
-        openRouteCreationDialog(groupKey);
-      });
-    }
-    buttonEl.textContent = "노선 추가";
-    const searchInputEl = containerEl.previousElementSibling?.classList?.contains("list-search-input")
-      ? containerEl.previousElementSibling
-      : null;
-    parentEl.insertBefore(buttonEl, searchInputEl || containerEl);
-  }
 
-  function renderRouteEntries(containerEl, routes, emptyMessage, moveTargetGroup) {
+  function renderRouteEntries(containerEl, routes, emptyMessage) {
     containerEl.innerHTML = "";
 
     if (!routes.length) {
@@ -12912,8 +12967,6 @@
 
       const button = document.createElement("div");
       button.className = "route-button";
-      button.tabIndex = 0;
-      button.setAttribute("role", "button");
       if (isMergedRoute) {
         button.classList.add("is-merged-route");
       }
@@ -12935,8 +12988,9 @@
       const hasDesignedRoute = getAllPaths().some(
         (pathItem) => pathItem.routeName === routeName && pathItem.designedRoute === true
       );
-      const titleRow = document.createElement("strong");
+      const titleRow = document.createElement("div");
       titleRow.className = "route-title-row";
+      const handleRouteSelect = () => selectRouteFromList(routeName);
       const titleText = document.createElement("span");
       titleText.className = "route-title-text";
       if (editingRouteName === routeName) {
@@ -12980,6 +13034,14 @@
       } else {
         titleText.textContent = routeName;
         titleText.title = "더블클릭해서 노선명 수정";
+        titleText.tabIndex = 0;
+        titleText.setAttribute("role", "button");
+        titleText.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            handleRouteSelect();
+          }
+        });
         titleText.addEventListener("dblclick", (event) => {
           event.stopPropagation();
           editingRouteName = routeName;
@@ -13000,15 +13062,15 @@
         inlineMoveButton.classList.add("is-merged-route");
       }
       inlineMoveButton.textContent = "이동";
-      inlineMoveButton.title = moveTargetGroup === "merged" ? "병합 목록으로 이동" : "기존 목록으로 이동";
+      inlineMoveButton.title = "다른 묶음으로 이동";
+      inlineMoveButton.disabled = routeGroups.length < 2;
       inlineMoveButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        setRouteGroup(routeName, moveTargetGroup);
+        moveRouteToGroup(routeName);
       });
-      titleRow.appendChild(inlineMoveButton);
 
       const visibleLabel = document.createElement("label");
-      visibleLabel.className = "route-toggle route-toggle-inline";
+      visibleLabel.className = "route-toggle";
       visibleLabel.addEventListener("click", (event) => {
         event.stopPropagation();
       });
@@ -13043,7 +13105,7 @@
       visibleLabel.appendChild(visibleText);
 
       const guidanceLabel = document.createElement("label");
-      guidanceLabel.className = "route-toggle route-toggle-inline route-guidance-toggle";
+      guidanceLabel.className = "route-toggle route-guidance-toggle";
       guidanceLabel.title = "경로유도점 표시 여부";
       guidanceLabel.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -13069,14 +13131,14 @@
       guidanceLabel.appendChild(guidanceInput);
       guidanceLabel.appendChild(guidanceText);
 
-      const routeVisibilityControls = document.createElement("span");
+      const routeVisibilityControls = document.createElement("div");
       routeVisibilityControls.className = "route-visibility-controls";
       routeVisibilityControls.appendChild(visibleLabel);
       routeVisibilityControls.appendChild(guidanceLabel);
-      titleRow.appendChild(routeVisibilityControls);
 
-      const routeIconActions = document.createElement("span");
-      routeIconActions.className = "route-icon-actions";
+      const routeActions = document.createElement("div");
+      routeActions.className = "route-actions";
+      routeActions.appendChild(inlineMoveButton);
 
       const colorInput = document.createElement("button");
       colorInput.type = "button";
@@ -13094,7 +13156,7 @@
         event.stopPropagation();
         openRouteColorDialog(routeName);
       });
-      routeIconActions.appendChild(colorInput);
+      routeActions.appendChild(colorInput);
 
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
@@ -13109,23 +13171,24 @@
         event.stopPropagation();
         handleDeleteRoute(routeName);
       });
-      routeIconActions.appendChild(deleteButton);
-      titleRow.appendChild(routeIconActions);
+      routeActions.appendChild(deleteButton);
 
-      const metaText = document.createElement("span");
-      metaText.textContent = `${pointCount}개 정류장${guidancePointCount ? ` / 경로유도점 ${guidancePointCount}개` : ""} / ${pathCount}개 경로 / 총 ${formatDistanceKm(totalRouteDistanceMeters)}km`;
+      const controls = document.createElement("div");
+      controls.className = "route-controls";
+      controls.append(routeVisibilityControls, routeActions);
+
+      const meta = document.createElement("div");
+      meta.className = "route-meta";
+      const stopSummary = document.createElement("span");
+      stopSummary.textContent = `정류장 ${pointCount}개${guidancePointCount ? ` · 경로유도점 ${guidancePointCount}개` : ""}`;
+      const pathSummary = document.createElement("span");
+      pathSummary.textContent = `경로 ${pathCount}개 · 총 ${formatDistanceKm(totalRouteDistanceMeters)}km`;
+      meta.append(stopSummary, pathSummary);
+
       button.appendChild(titleRow);
-      button.appendChild(metaText);
-      const handleRouteSelect = () => {
-        selectRouteFromList(routeName);
-      };
+      button.appendChild(meta);
+      button.appendChild(controls);
       button.addEventListener("click", handleRouteSelect);
-      button.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          handleRouteSelect();
-        }
-      });
       const handleRouteRowDragOver = (event) => {
         event.preventDefault();
         if (draggedRouteName && draggedRouteName !== routeName) {
@@ -13153,10 +13216,6 @@
       row.addEventListener("dragover", handleRouteRowDragOver);
       row.addEventListener("dragleave", handleRouteRowDragLeave);
       row.addEventListener("drop", handleRouteRowDrop);
-      button.addEventListener("dragover", handleRouteRowDragOver);
-      button.addEventListener("dragleave", handleRouteRowDragLeave);
-      button.addEventListener("drop", handleRouteRowDrop);
-      button.addEventListener("dragend", clearRouteDragState);
 
       const dragHandle = document.createElement("button");
       dragHandle.type = "button";
@@ -13178,67 +13237,71 @@
       });
       dragHandle.addEventListener("dragend", clearRouteDragState);
 
-      const controls = document.createElement("div");
-      controls.className = "route-controls";
-      controls.appendChild(dragHandle);
-      row.addEventListener("click", (event) => {
-        if (event.target.closest(".route-inline-action, .route-toggle, .route-color-input, .route-delete-button, .route-drag-handle, .route-title-input")) {
-          return;
-        }
-        handleRouteSelect();
-      });
+      titleRow.appendChild(dragHandle);
       row.appendChild(button);
-      row.appendChild(controls);
       containerEl.appendChild(row);
     });
   }
 
-  function renderRouteList() {
-    const routes = getRoutes();
-    const originalQuery = normalizeSearchText(routeListSearchQueries.original);
-    const mergedQuery = normalizeSearchText(routeListSearchQueries.merged);
-    const originalGroupRoutes = routes.filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged");
-    const mergedGroupRoutes = routes.filter((routeName) => getRouteSetting(routeName).routeGroup === "merged");
-    const originalRoutes = originalGroupRoutes
-      .filter((routeName) => !originalQuery || normalizeSearchText(routeName).includes(originalQuery));
-    const mergedRoutes = mergedGroupRoutes
-      .filter((routeName) => !mergedQuery || normalizeSearchText(routeName).includes(mergedQuery));
+  function createRouteGroupSection(groupId) {
+    const section = routeGroupTemplateEl.content.firstElementChild.cloneNode(true);
+    section.dataset.group = groupId;
+    const list = section.querySelector(".route-list");
+    list.id = groupId === "default" ? "route-list" : groupId === "merged" ? "merged-route-list" : `${groupId}-route-list`;
 
-    if (editingRouteName) {
-      logRenameRouteDebug("render-route-list", {
-        editingRouteName,
-        originalRoutes,
-        mergedRoutes,
-        selectedRouteName,
-      });
-    }
-
-    updateRouteGroupToggleButton(toggleOriginalRoutesButtonEl, originalGroupRoutes, "기존");
-    updateRouteGroupToggleButton(toggleMergedRoutesButtonEl, mergedGroupRoutes, "개선");
-
-    ensureRouteListTitleInput(routeListEl, "original", "불러온 노선");
-    ensureRouteListSearchInput(routeListEl, "original");
-    ensureRouteListCreateButton(routeListEl, "default");
-    renderRouteEntries(routeListEl, originalRoutes, "노선이 없습니다.", "merged");
-
-    if (mergedRouteListEl) {
-      ensureRouteListTitleInput(mergedRouteListEl, "merged", "병합된 노선");
-      ensureRouteListSearchInput(mergedRouteListEl, "merged");
-      ensureRouteListCreateButton(mergedRouteListEl, "merged");
-      renderRouteEntries(mergedRouteListEl, mergedRoutes, "병합된 노선이 없습니다.", "default");
-    }
+    const toggle = section.querySelector(".route-bundle-toggle-button");
+    toggle.addEventListener("click", () => {
+      setRouteGroupVisible(getRouteNamesByGroup(groupId), toggle.dataset.nextVisible === "true", getRouteGroupLabel(groupId));
+    });
+    section.querySelector(".route-list-title-edit").addEventListener("click", () => {
+      editRouteGroup(routeGroups.find((group) => group.id === groupId));
+    });
+    section.querySelector(".route-bundle-delete").addEventListener("click", () => {
+      deleteRouteGroup(routeGroups.find((group) => group.id === groupId));
+    });
+    const analyzeButton = section.querySelector(".list-analyze-button");
+    analyzeButton.addEventListener("click", () => handleAnalyzeRouteGroup(groupId, analyzeButton));
+    section.querySelector(".list-ridership-button").addEventListener("click", () => openRidershipAnalysisSettingsWindow(groupId));
+    section.querySelector(".list-time-simulation-button").addEventListener("click", () => openRouteTimeSimulationSettingsWindow(groupId));
+    section.querySelector(".route-add-button").addEventListener("click", () => openRouteCreationDialog(groupId));
+    section.querySelector(".list-search-input").addEventListener("input", renderRouteList);
+    return section;
   }
 
-  function updateRouteGroupToggleButton(buttonEl, routeNames, groupLabel) {
-    if (!buttonEl) {
-      return;
-    }
-    const hasRoutes = routeNames.length > 0;
-    const allVisible = hasRoutes && routeNames.every((routeName) => getRouteSetting(routeName).visible);
-    buttonEl.disabled = !hasRoutes;
-    buttonEl.textContent = allVisible ? "노선 숨김" : "노선 표시";
-    buttonEl.dataset.nextVisible = allVisible ? "false" : "true";
-    buttonEl.dataset.groupLabel = groupLabel;
+  function renderRouteList() {
+    const routes = getRoutes();
+    const groupRoutes = new Map(routeGroups.map(({ id }) => [id, []]));
+    routes.forEach((routeName) => groupRoutes.get(getRouteSetting(routeName).routeGroup).push(routeName));
+
+    const oldSections = new Map(Array.from(routeGroupsEl.children, (section) => [section.dataset.group, section]));
+    oldSections.forEach((section, groupId) => {
+      if (!groupRoutes.has(groupId)) {
+        section.remove();
+      }
+    });
+    routeGroups.forEach(({ id, name }, index) => {
+      const section = oldSections.get(id) || createRouteGroupSection(id);
+      if (routeGroupsEl.children[index] !== section) {
+        routeGroupsEl.insertBefore(section, routeGroupsEl.children[index] || null);
+      }
+      section.querySelector(".section-title").textContent = name;
+      const rename = section.querySelector(".route-list-title-edit");
+      rename.setAttribute("aria-label", `${name} 묶음 이름 변경`);
+      const remove = section.querySelector(".route-bundle-delete");
+      remove.setAttribute("aria-label", `${name} 묶음 삭제`);
+      remove.disabled = routeGroups.length < 2;
+      remove.title = remove.disabled ? "노선 묶음은 최소 하나가 필요합니다." : "묶음 삭제";
+      const names = groupRoutes.get(id);
+      const query = normalizeSearchText(section.querySelector(".list-search-input").value);
+      const visibleNames = query ? names.filter((routeName) => normalizeSearchText(routeName).includes(query)) : names;
+      const toggle = section.querySelector(".route-bundle-toggle-button");
+      const allVisible = names.length > 0 && names.every((routeName) => getRouteSetting(routeName).visible);
+      toggle.disabled = !names.length;
+      toggle.textContent = allVisible ? "노선 숨김" : "노선 표시";
+      toggle.dataset.nextVisible = String(!allVisible);
+      renderRouteEntries(section.querySelector(".route-list"), visibleNames, query ? "검색 결과가 없습니다." : "노선이 없습니다.");
+    });
+    updateAnalyzeButtonState();
   }
 
   function setAllRoutesVisible(visible) {
@@ -13830,7 +13893,7 @@
       ...getRouteSetting(mergedRouteName),
       deleted: false,
       visible: true,
-      routeGroup: "merged",
+      routeGroup: routeGroups.find((group) => group.id === "merged")?.id || getRouteSetting(routeNameA).routeGroup,
     };
     saveCustomPoints();
     saveCustomPaths();
@@ -14054,7 +14117,7 @@
     }
 
     points.forEach((point, index) => {
-      const setting = getRouteSetting(point.routeName);
+      const isGuidancePoint = isVirtualRoutingPoint(point);
       const row = document.createElement("div");
       row.className = "point-row";
       const button = document.createElement("button");
@@ -14062,7 +14125,11 @@
       button.className = "point-item";
       button.draggable = true;
       button.dataset.pointId = point.id;
-      button.style.borderLeft = `6px solid ${setting.color}`;
+      if (isGuidancePoint) {
+        button.classList.add("is-guidance-point");
+      } else {
+        button.style.borderLeft = `6px solid ${getRouteSetting(point.routeName).color}`;
+      }
       if (point.id === selectedPointId) {
         button.classList.add("is-selected");
       }
@@ -14109,7 +14176,7 @@
         }, 0);
       } else {
         titleText.textContent = `${index + 1}. ${point.name}`;
-        titleText.title = "클릭해서 정류장명 수정";
+        titleText.title = isGuidancePoint ? "클릭해서 경로유도점 이름 수정" : "클릭해서 정류장명 수정";
         titleText.addEventListener("click", (event) => {
           event.stopPropagation();
           editingPointId = point.id;
@@ -14118,15 +14185,15 @@
       }
       titleRow.appendChild(titleText);
       button.appendChild(titleRow);
-      const ridershipMeta = document.createElement("span");
-      ridershipMeta.className = "point-meta";
-      ridershipMeta.textContent =
-        point.isVirtual
+      const pointMeta = document.createElement("span");
+      pointMeta.className = "point-meta";
+      pointMeta.textContent =
+        isGuidancePoint
           ? "경로유도점"
           : (normalizeRidershipValue(point.ridership) == null
             ? "탑승객 미입력"
             : `탑승객 ${formatRidershipValue(point.ridership)}명`);
-      button.appendChild(ridershipMeta);
+      button.appendChild(pointMeta);
       button.addEventListener("click", () => selectPointById(point.id));
       button.addEventListener("contextmenu", (event) => {
         showRoutePointListContextMenu(event, point);
@@ -15057,58 +15124,43 @@
     }
 
     const populationEstimate = estimatePointPopulation(point, 100);
+    const detailKey = (label) => label.trim().toLowerCase().replace(/[\s_-]+/g, "");
+    const extraDetails = new Map();
+    for (const { name, value } of normalizeExtendedData(point.extendedData)) {
+      const label = name.trim();
+      const key = detailKey(label);
+      if (key && value.trim() && !extraDetails.has(key)) {
+        extraDetails.set(key, { label, value: value.trim() });
+      }
+    }
+    const detailValue = (...keys) => keys.map(key => extraDetails.get(key)?.value).find(Boolean) || "";
     const hiddenExtendedDataNames = new Set([
-      "routegroup",
-      "routeorder",
-      "filename",
-      "createdorder",
-      "virtual",
-      "ridership",
-      "boardingcount",
-      "passengercount",
-      "탑승객 수",
-      "탑승객수",
+      "routegroup", "routeorder", "filename", "createdorder", "virtual", "guidancevisible",
+      "guidanceorderlocked", "simulationcorrections", "stopsequence", "sourcepdfpage",
+      "route", "routename", "노선", "노선명", "name", "이름", "정류장명",
+      "lat", "latitude", "lng", "lon", "longitude", "위도", "경도",
+      "description", "설명", "address", "주소", "phonenumber", "phone", "전화번호", "arsid", "ars번호",
+      "경로유도점", "ridership", "boardingcount", "passengercount", "탑승객수",
+      "100m예상가구수", "100m예상인구수", "추정근거",
     ]);
     openPointDetailsSection();
     pointDetailsEl.classList.remove("empty");
     const rows = [
-      { label: "노선", value: point.routeName },
-      { label: "이름", value: point.name },
       { label: "위도", value: String(point.lat) },
       { label: "경도", value: String(point.lng) },
-      { label: "설명", value: point.description },
+      { label: "설명", value: point.description || detailValue("description", "설명") },
       { label: "경로유도점", value: point.isVirtual ? "예" : "" },
-      { label: "주소", value: point.address },
-      { label: "전화번호", value: point.phoneNumber },
+      { label: "주소", value: point.address || detailValue("address", "주소") },
+      { label: "전화번호", value: point.phoneNumber || detailValue("phonenumber", "phone", "전화번호") },
+      { label: "ARS 번호", value: detailValue("arsid", "ars번호") },
       { label: "탑승객 수", value: normalizeRidershipValue(point.ridership) == null ? "" : `${formatRidershipValue(point.ridership)}명` },
       { label: "100m 예상 가구수", value: `${populationEstimate.estimatedHouseholds}가구` },
       { label: "100m 예상 인구수", value: `${populationEstimate.estimatedPopulation}명` },
       { label: "추정 근거", value: populationEstimate.basisText },
     ].filter((row) => row.value);
-
-    const originalUploadedPoint = point.source === "uploaded" ? getUploadedPointSource(point.id) : null;
-    const originalPointName = String(originalUploadedPoint?.name || "").trim();
-    const isRenamedUploadedPoint = Boolean(originalPointName) && originalPointName !== String(point.name || "").trim();
-    const extendedRows = (point.extendedData || [])
-      .filter((item) => {
-        if (!isRenamedUploadedPoint) {
-          const itemName = String(item?.name || "").trim().toLowerCase();
-          return !hiddenExtendedDataNames.has(itemName);
-        }
-        const itemName = String(item?.name || "").trim().toLowerCase();
-        const itemValue = String(item?.value || "").trim();
-        const looksLikeNameField = itemName === "name" || itemName === "이름";
-        return !hiddenExtendedDataNames.has(itemName) && !(looksLikeNameField && itemValue === originalPointName);
-      })
-      .map(
-        (item) => `
-          <div class="detail-row">
-            <dt>${escapeHtml(item.name)}</dt>
-            <dd>${escapeHtml(item.value || "-")}</dd>
-          </div>
-        `
-      )
-      .join("");
+    for (const [key, detail] of extraDetails) {
+      if (!hiddenExtendedDataNames.has(key)) rows.push(detail);
+    }
 
     pointDetailsEl.innerHTML = `
       <div class="details-header">
@@ -15126,7 +15178,6 @@
             `
           )
           .join("")}
-        ${extendedRows}
       </dl>
     `;
   }
@@ -16532,6 +16583,7 @@
     try {
       const selectedPoint = getPointById(selectedPointId);
       let saveMessage = "정류장을 저장했습니다.";
+      let addedGuidancePoint = false;
 
       if (addPointMode) {
         if (!selectedRouteName) {
@@ -16568,6 +16620,7 @@
         }
         selectedPointId = point.id;
         selectedRouteName = point.routeName;
+        addedGuidancePoint = point.isVirtual;
       } else if (selectedPoint && selectedPoint.source === "custom") {
         const index = customPoints.findIndex((point) => point.id === selectedPoint.id);
         const updatedPoint = buildPointFromForm(customPoints[index]);
@@ -16602,6 +16655,10 @@
       stopRelocateMode();
       setAddPointMode(false);
       refreshUI();
+      if (addedGuidancePoint) {
+        setCollapsibleSectionExpanded(pointFormSectionEl, pointFormToggleEl, false);
+        pointFormToggleEl?.focus({ preventScroll: true });
+      }
       setStatus(saveMessage, false);
     } catch (error) {
       setStatus(error.message, true);
@@ -16619,6 +16676,7 @@
     const points = [];
     const paths = [];
     const areas = [];
+    const importedGroups = [];
     const reservedFileNames = new Set();
 
     for (const file of files) {
@@ -16635,10 +16693,16 @@
       points.push(...parsed.points);
       paths.push(...parsed.paths);
       areas.push(...parsed.areas);
+      importedGroups.push(...parsed.routeGroups);
     }
     const routeRenameMap = uniquifyImportedRouteNames(points, paths);
 
     pushUndoSnapshot();
+    if (importedGroups.length) {
+      const preserveLocalGroups = getRoutes().length || JSON.stringify(routeGroups) !== JSON.stringify(defaultRouteGroups());
+      routeGroups = normalizeRouteGroups(preserveLocalGroups ? [...routeGroups, ...importedGroups] : importedGroups);
+      saveRouteGroups();
+    }
     uploadedPoints = [...uploadedPoints, ...points];
     uploadedPaths = [...uploadedPaths, ...paths];
     uploadedFileSummaries = [...uploadedFileSummaries, ...fileSummaries];
@@ -16668,6 +16732,9 @@
   }
 
   function handleKeydown(event) {
+    if (routeGroupDialogEl?.open) {
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z") {
       if (isEditableTarget(event.target)) {
         return;
@@ -16896,20 +16963,8 @@
     resetDesignedRouteButtonEl.addEventListener("click", handleResetDesignedRoute);
     showAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(true));
     hideAllRoutesButtonEl.addEventListener("click", () => setAllRoutesVisible(false));
-    toggleOriginalRoutesButtonEl?.addEventListener("click", () => {
-      setRouteGroupVisible(
-        getRoutes().filter((routeName) => getRouteSetting(routeName).routeGroup !== "merged"),
-        toggleOriginalRoutesButtonEl.dataset.nextVisible === "true",
-        "기존"
-      );
-    });
-    toggleMergedRoutesButtonEl?.addEventListener("click", () => {
-      setRouteGroupVisible(
-        getRoutes().filter((routeName) => getRouteSetting(routeName).routeGroup === "merged"),
-        toggleMergedRoutesButtonEl.dataset.nextVisible === "true",
-        "개선"
-      );
-    });
+    document.getElementById("add-route-group-button").addEventListener("click", () => editRouteGroup());
+    routeGroupDialogEl.querySelector(".route-group-dialog-cancel").addEventListener("click", () => routeGroupDialogEl.close());
     finishPathButtonEl.addEventListener("click", handlePathFormSubmit);
     if (saveDesignedPathButtonEl) {
       saveDesignedPathButtonEl.addEventListener("click", handlePathFormSubmit);

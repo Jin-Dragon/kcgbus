@@ -16,6 +16,7 @@ function workspace() {
   const app=loadApp({
     DEFAULT_ROUTE_NAME:'기본 노선', OVERLAP_DISTANCE_THRESHOLD_METERS:20, AUTO_SAVE_FILENAME:'test.kml',
     uploadedPoints,customPoints:[],pointOverrides:{},
+    routeGroups:[{id:'default',name:'기존 노선'},{id:'merged',name:'개선 노선'}],
     fileCountEl:{innerHTML:''},pointCountEl:{innerHTML:''},fileListEl,
     document:{createElement:()=>({className:'',innerHTML:'',children:[],
       setAttribute(){},addEventListener(){},appendChild(item){this.children.push(item);}})},
@@ -33,6 +34,15 @@ test('top stop counts and existing/new subtotals exclude guidance points', () =>
   assert.equal(app.pointCountEl.innerHTML,'3<small>기존 2 / 신규 1</small>');
   assert.equal(app.fileCountEl.innerHTML,'2<small>기존 1 / 신규 1</small>');
   assert.equal(app.getAllPoints().length,5,'guidance points remain in the workspace');
+});
+
+test('additional route bundles retain the operational stop count and are exported to KML', () => {
+  const {app}=workspace();
+  app.routeGroups.push({id:'group-a',name:'검토 & 답사'});
+  app.updateCounts();
+  assert.equal(app.fileCountEl.innerHTML,'2<small>노선 묶음 3개</small>');
+  assert.equal(app.pointCountEl.textContent,'3');
+  assert.match(app.buildCurrentKml(), /<Data name="routeGroups"><value>[^<]*검토 &amp; 답사/);
 });
 
 test('adding, deleting and showing guidance points does not change stop totals', () => {
