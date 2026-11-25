@@ -180,6 +180,7 @@
   let mapReady = false;
   let addPointMode = false;
   let addPointModeKind = POINT_CREATION_KIND_STOP;
+  let guidanceInsertionAfterPointId = null;
   let drawPathMode = false;
   let editPathMode = false;
   let pathExtendMode = false;
@@ -4617,10 +4618,10 @@
     selectAllButton?.addEventListener("click", () => setRoutesChecked(true));
     clearAllButton?.addEventListener("click", () => setRoutesChecked(false));
     closeButton?.addEventListener("click", () => {
-      if (window.opener) {
-        window.close();
-      } else if (hostWindow?.__wonderLinxRouteTime?.closeInlineWindow) {
+      if (window.frameElement && hostWindow?.__wonderLinxRouteTime?.closeInlineWindow) {
         hostWindow.__wonderLinxRouteTime.closeInlineWindow();
+      } else {
+        window.close();
       }
     });
     form.addEventListener("submit", (event) => {
@@ -5140,28 +5141,30 @@
 
   function orderGuidancePointsAlongDrawnPath(points, routeCoordinates) {
     if (!Array.isArray(points) || !Array.isArray(routeCoordinates) || routeCoordinates.length < 2) return points;
+    const needsPlacement = (point) => isVirtualRoutingPoint(point)
+      && getExtendedDataValue(point.extendedData, "guidanceOrderLocked") !== "true";
     const guidanceEntries = points
       .map((point, index) => ({ point, index }))
-      .filter(({ point }) => isVirtualRoutingPoint(point));
+      .filter(({ point }) => needsPlacement(point));
     if (!guidanceEntries.length) return points;
 
-    // Operational stops retain their existing order. Only virtual guidance points are repositioned.
-    const operationalPoints = points.filter((point) => !isVirtualRoutingPoint(point));
-    if (operationalPoints.length < 2) return points;
+    // Keep the saved positions of waypoints placed by the editor, including on repeated roads.
+    const anchors = points.filter((point) => !needsPlacement(point));
+    if (anchors.length < 2) return points;
 
-    let operationalMatch;
+    let anchorMatch;
     try {
-      operationalMatch = matchDrawnRoutePath(routeCoordinates, operationalPoints);
+      anchorMatch = matchDrawnRoutePath(routeCoordinates, anchors);
     } catch (error) {
       // The normal route validation below should report the original geometry problem.
       return points;
     }
-    const matches = operationalMatch?.matches;
-    const coordinates = operationalMatch?.coordinates;
-    if (!Array.isArray(matches) || matches.length !== operationalPoints.length
+    const matches = anchorMatch?.matches;
+    const coordinates = anchorMatch?.coordinates;
+    if (!Array.isArray(matches) || matches.length !== anchors.length
       || !Array.isArray(coordinates) || coordinates.length < 2) return points;
 
-    const buckets = Array.from({ length: operationalPoints.length - 1 }, () => []);
+    const buckets = Array.from({ length: anchors.length - 1 }, () => []);
     let unresolved = false;
     guidanceEntries.forEach(({ point, index }) => {
       let best = null;
@@ -5182,7 +5185,7 @@
     if (unresolved) return points;
 
     const ordered = [];
-    operationalPoints.forEach((point, index) => {
+    anchors.forEach((point, index) => {
       ordered.push(point);
       if (index >= buckets.length) return;
       buckets[index]
@@ -5190,6 +5193,66 @@
         .forEach(({ point: guidancePoint }) => ordered.push(guidancePoint));
     });
     return ordered;
+  }
+
+  function findGuidancePointInsertion(points, routeCoordinates, position, previousPointId) {
+    let match;
+    try {
+      match = matchDrawnRoutePath(routeCoordinates, points);
+    } catch (error) {
+      return { warning: "기존 정류장과 유도점을 경로에 순서대로 연결할 수 없어 자동 순서를 정할 수 없습니다." };
+    }
+
+    const candidates = [];
+    match.groups.forEach((coordinates, index) => {
+      const projection = projectPointToDrawnPath(coordinates, position);
+      if (projection) {
+        candidates.push({
+          index: index + 1,
+          measure: match.matches[index].measure + projection.measure,
+          distance: projection.distanceMeters,
+        });
+      }
+    });
+    candidates.sort((a, b) => a.distance - b.distance);
+    const closest = candidates[0];
+    if (!closest) {
+      return { warning: "정류장 사이의 그린 경로에서 150m 이내 위치를 찾을 수 없어 자동 순서를 정할 수 없습니다." };
+    }
+
+    // Treat near ties on separate passes as ambiguous, but not projections beside the same stop.
+    const alternatives = candidates.filter((candidate) => candidate.distance <= closest.distance + 3
+      && Math.abs(candidate.measure - closest.measure) > 10);
+    const choice = alternatives.length
+      ? [closest, ...alternatives].find(({ index }) => points[index - 1].id === previousPointId)
+      : closest;
+    return choice ? { index: choice.index } : { ambiguous: true };
+  }
+
+  function getGuidancePointPlacement(routeName, position) {
+    const points = getPointsInRoute(routeName);
+    const paths = getPathsInRoute(routeName);
+    const connected = paths.every((path, index) => index === 0 || (
+      paths[index - 1].coordinates?.length && path.coordinates?.length
+      && distanceInMeters(paths[index - 1].coordinates.at(-1), path.coordinates[0]) <= 1
+    ));
+    const placement = connected
+      ? findGuidancePointInsertion(points, buildRouteSimulationAnchorCoordinates(routeName), position, guidanceInsertionAfterPointId)
+      : { warning: "노선의 경로 선이 끊겨 있어 자동 순서를 정할 수 없습니다." };
+    if (placement.ambiguous) {
+      return {
+        ...placement,
+        message: "이 위치를 여러 번 지납니다. 추가 모드를 끄고 원하는 구간의 직전 정류장이나 유도점을 선택한 뒤 다시 찍으세요.",
+      };
+    }
+    if (placement.warning) {
+      return { ...placement, message: `${placement.warning} 저장 후 목록에서 순서를 지정할 수 있습니다.` };
+    }
+    return {
+      points,
+      index: placement.index,
+      message: `${points[placement.index - 1].name} → ${points[placement.index].name} 사이`,
+    };
   }
 
   function buildDrawnRouteSimulationChunk(segment, segmentIndex, routeCoordinates, averageSpeedKmh, drawnPathMatch) {
@@ -5846,7 +5909,7 @@
     return simulation;
   }
 
-  function buildRouteTimeSimulationReport(responsePayload, options) {
+  function buildRouteTimeSimulationReport(responsePayload, options, excludedRoutes = []) {
     options = normalizeRouteTimeSimulationOptions(options);
     const routes = Array.isArray(responsePayload?.routes) ? responsePayload.routes : [];
     const rows = [];
@@ -5922,6 +5985,7 @@
       departureSlots: responsePayload?.departureSlots || [],
       routes,
       rows,
+      excludedRoutes,
     };
   }
 
@@ -6070,13 +6134,19 @@
       buildSpreadsheetWorksheetXml("Simulation Summary", summaryRows),
       buildSpreadsheetWorksheetXml("Stop Details", stopRows),
       buildSpreadsheetWorksheetXml("Stop Timeline", timelineRows),
-    ].join("");
+    ];
+    if (report.excludedRoutes?.length) {
+      worksheets.push(buildSpreadsheetWorksheetXml("제외된 노선", [
+        ["노선", "제외 사유"],
+        ...report.excludedRoutes.map(({ routeName, reason }) => [routeName, reason]),
+      ]));
+    }
 
     return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?>` +
       `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:html="http://www.w3.org/TR/REC-html40">` +
       `<DocumentProperties xmlns="urn:schemas-microsoft-com:office:office"><Author>OpenAI Codex</Author><Created>${escapeSpreadsheetXml(new Date().toISOString())}</Created></DocumentProperties>` +
       `<Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Bottom"/><Borders/><Font/><Interior/><NumberFormat/><Protection/></Style></Styles>` +
-      `${worksheets}</Workbook>`;
+      `${worksheets.join("")}</Workbook>`;
   }
 
   function downloadRouteTimeSimulationExcel(report = latestRouteTimeSimulationReport) {
@@ -6232,6 +6302,7 @@
   function buildRouteTimeSimulationResultsWindowHtml(report) {
     const isDrawnPathMode = report.options?.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
     const baseDwellSeconds = normalizeStopDwellSeconds(report.options?.stopDwellSeconds);
+    const excludedRoutes = report.excludedRoutes || [];
     const routeCards = (report.routes || []).map((route) => `
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -6309,6 +6380,11 @@
       </div>
       <p class="note" style="margin-top:12px;">${isDrawnPathMode ? "결과는 사용자가 그린 KML 선형의 정류장 구간별 거리에 권역 평균 버스속도와 버스지체보정률을 적용한 값입니다." : "결과는 카카오 미래 길찾기 주행시간에 버스지체보정률을 적용한 값입니다."} 정류장별 기본 대기시간 ${escapeHtml(String(baseDwellSeconds))}초에 승객 비중 가중치를 적용하며, 마지막 정류장과 경로유도점은 정차보정에서 제외합니다.</p>
     </div>
+    ${excludedRoutes.length ? `
+    <section class="card">
+      <h2>계산에서 제외된 노선 ${excludedRoutes.length}개</h2>
+      <ul>${excludedRoutes.map(({ routeName, reason }) => `<li><strong>${escapeHtml(routeName)}</strong> — ${escapeHtml(reason)}</li>`).join("")}</ul>
+    </section>` : ""}
     <div class="results">${routeCards || "<div class=\"card\">결과가 없습니다.</div>"}</div>
   </div>
   <script>
@@ -6402,6 +6478,13 @@
       popup.document.write(String(html || ""));
       popup.document.close();
       popup.focus();
+      // Embedded browsers can return a window handle without showing its contents.
+      if (popup.closed || popup.innerWidth === 0 || popup.innerHeight === 0) {
+        if (!popup.closed) {
+          popup.close();
+        }
+        return null;
+      }
       return popup;
     } catch (error) {
       try {
@@ -6502,7 +6585,7 @@
       return;
     }
     routeTimeSettingsWindowRef = inlineWindow;
-    setStatus("팝업이 차단되어 Codex 인앱 창에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
+    setStatus("현재 화면에서 운행시간 시뮬레이션 설정을 열었습니다.", false);
   }
 
   function appendRouteTimeSimulationLog(message, isError = false, replace = false) {
@@ -7661,16 +7744,28 @@
   async function runRouteTimeSimulation(groupKey, options = {}) {
     const normalizedOptions = normalizeRouteTimeSimulationOptions(options);
     const isDrawnPathMode = normalizedOptions.pathMode === ROUTE_TIME_SIMULATION_PATH_MODE_DRAWN;
-    const selectedRouteNames = Array.isArray(options.selectedRouteNames)
-      ? options.selectedRouteNames.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
+    const { selectedRouteNames } = normalizedOptions;
     if (!selectedRouteNames.length) {
       throw new Error("운행시간 시뮬레이션할 노선을 하나 이상 선택하세요.");
     }
-    const routePayload = selectedRouteNames.map((routeName) => buildRouteTimeSimulationSegments(routeName, normalizedOptions));
     const departureSlots = buildSimulationDepartureSlots(normalizedOptions);
     if (!departureSlots.length) {
       throw new Error("시뮬레이션 시간대를 만들지 못했습니다. 시작 시각과 종료 시각을 확인하세요.");
+    }
+    appendRouteTimeSimulationLog("시뮬레이션을 시작합니다.", false, true);
+    const routePayload = [];
+    const excludedRoutes = [];
+    for (const routeName of selectedRouteNames) {
+      try {
+        routePayload.push(buildRouteTimeSimulationSegments(routeName, normalizedOptions));
+      } catch (error) {
+        const reason = error.message || "노선 검증 중 오류가 발생했습니다.";
+        excludedRoutes.push({ routeName, reason });
+        appendRouteTimeSimulationLog(`${routeName} 제외: ${reason}`, true);
+      }
+    }
+    if (!routePayload.length) {
+      throw new Error("선택한 노선을 계산할 수 없습니다. 실행 로그에서 노선별 제외 사유를 확인하세요.");
     }
     const estimatedRequests = isDrawnPathMode
       ? 0
@@ -7687,7 +7782,6 @@
       "주행시간 및 거리 메트릭을 집계 중입니다.",
     ];
 
-    appendRouteTimeSimulationLog("시뮬레이션을 시작합니다.", false, true);
     setRouteTimeSimulationConsoleState({
       headline: "운행시간 시뮬레이션 실행 콘솔",
       activeLabel: "Preflight",
@@ -7700,7 +7794,7 @@
       currentChunk: "-",
       progress: 10,
     });
-    appendRouteTimeSimulationLog(`선택 노선 ${routePayload.length}개 / 시간대 ${departureSlots.length}개 / ${isDrawnPathMode ? "카카오 호출 없이 KML 선형으로 계산" : `예상 카카오 호출 ${estimatedRequests}회`}`);
+    appendRouteTimeSimulationLog(`계산 대상 ${routePayload.length}개 / 검증에서 제외 ${excludedRoutes.length}개 / 시간대 ${departureSlots.length}개 / ${isDrawnPathMode ? "카카오 호출 없이 KML 선형으로 계산" : `예상 카카오 호출 ${estimatedRequests}회`}`);
     appendRouteTimeSimulationLog(`세션 ID 준비 완료 / 그룹=${groupKey} / 날짜=${normalizedOptions.selectedDate} / 간격=${normalizedOptions.intervalMinutes}분 / 버스지체보정=${Number(normalizedOptions.busDelayPercent ?? DEFAULT_BUS_DELAY_PERCENT).toFixed(1)}% / 기준대기시간=${normalizedOptions.stopDwellSeconds}초`);
     appendRouteTimeSimulationLog(isDrawnPathMode
       ? `적용식: (KML 그린 경로 거리 / 권역 평균 버스속도) x (1 + 버스지체보정률) + 정류장별 정차보정(기준 ${normalizedOptions.stopDwellSeconds}초 x 승객비중 가중치)`
@@ -7786,12 +7880,15 @@
         statusText: "수신된 청크 결과를 노선별 시간표 리포트로 조합하고 있습니다.",
         progress: 88,
       });
-      const report = buildRouteTimeSimulationReport(responsePayload, normalizedOptions);
+      const report = buildRouteTimeSimulationReport(responsePayload, normalizedOptions, excludedRoutes);
       latestRouteTimeSimulationReport = report;
       appendRouteTimeSimulationLog(`리포트 조합 완료 / 결과 ${report.rows.length}행 / 결과 창 렌더링 준비`);
+      const completionMessage = excludedRoutes.length
+        ? `${routePayload.length}개 노선의 계산을 완료했습니다. 제외된 ${excludedRoutes.length}개 노선과 사유는 결과 보기에서 확인할 수 있습니다.`
+        : "계산이 완료되었습니다. 아래 결과 보기 버튼으로 리포트를 열 수 있습니다.";
       setRouteTimeSimulationConsoleState({
         activeLabel: "Completed",
-        statusText: "계산이 완료되었습니다. 아래 결과 보기 버튼으로 리포트를 열 수 있습니다.",
+        statusText: completionMessage,
         progress: 100,
       });
       if (
@@ -7803,7 +7900,7 @@
       }
       appendRouteTimeSimulationLog(`시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`);
       appendRouteTimeSimulationLog("결과 보기 버튼이 활성화되었습니다.");
-      setStatus(`운행시간 시뮬레이션이 완료되었습니다. 결과 ${report.rows.length}행`, false);
+      setStatus(completionMessage, false);
       return report;
     } catch (error) {
       if (fetchHeartbeat) {
@@ -10039,9 +10136,9 @@
         : "",
     ])
       .concat(
-        withRidershipExtendedData(point.extendedData, null).map(
-          (item) => `<Data name="${escapeXml(item.name)}"><value>${escapeXml(item.value)}</value></Data>`
-        )
+        withRidershipExtendedData(point.extendedData, null)
+          .filter((item) => item.name !== "createdOrder")
+          .map((item) => `<Data name="${escapeXml(item.name)}"><value>${escapeXml(item.value)}</value></Data>`)
       )
       .filter(Boolean)
       .join("");
@@ -14162,9 +14259,16 @@
     const [movedPoint] = reordered.splice(sourceIndex, 1);
     const insertIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
     reordered.splice(insertIndex, 0, movedPoint);
+    saveRoutePointOrder(reordered);
+    selectedPointId = movedPoint.id;
+    draggedRoutePointId = null;
+    refreshUI();
+    setStatus(`"${routeName}" 노선의 정류장 순서를 변경했습니다.`, false);
+  }
 
+  function saveRoutePointOrder(points) {
     const createdOrderBase = Date.now();
-    reordered.forEach((point, index) => {
+    points.forEach((point, index) => {
       const createdOrder = createdOrderBase + index;
       if (point.source === "custom") {
         const customIndex = customPoints.findIndex((item) => item.id === point.id);
@@ -14184,10 +14288,6 @@
 
     saveCustomPoints();
     saveOverrides();
-    selectedPointId = movedPoint.id;
-    draggedRoutePointId = null;
-    refreshUI();
-    setStatus(`"${routeName}" 노선의 정류장 순서를 변경했습니다.`, false);
   }
 
   function movePointToRouteOrder(routeName, pointId, nextOrder) {
@@ -15226,6 +15326,9 @@
       return;
     }
 
+    if (isGuidance) {
+      guidanceInsertionAfterPointId = selectedPointId;
+    }
     stopRelocateMode();
     selectedPointId = null;
     selectedPathId = null;
@@ -15252,6 +15355,9 @@
     addPointModeKind = enabled && kind === POINT_CREATION_KIND_GUIDANCE
       ? POINT_CREATION_KIND_GUIDANCE
       : POINT_CREATION_KIND_STOP;
+    if (addPointModeKind !== POINT_CREATION_KIND_GUIDANCE) {
+      guidanceInsertionAfterPointId = null;
+    }
     if (enabled) {
       stopObservationAreaDrawMode();
       if (!selectedRouteName) {
@@ -15394,12 +15500,12 @@
       formEls.description.value = "정류장이 아닌 경로 유도용 포인트";
     }
     formEls.name.focus();
-    setStatus(
-      creationKind === POINT_CREATION_KIND_GUIDANCE
-        ? `경로유도점 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`
-        : `정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`,
-      false
-    );
+    if (creationKind === POINT_CREATION_KIND_GUIDANCE) {
+      const placement = getGuidancePointPlacement(selectedRouteName, { lat, lng });
+      setStatus(placement.index != null ? `저장하면 ${placement.message}에 추가합니다.` : placement.message, Boolean(placement.ambiguous));
+    } else {
+      setStatus(`정류장 위치를 선택했습니다. 현재 노선은 ${selectedRouteName} 입니다.`, false);
+    }
     return true;
   }
 
@@ -15661,6 +15767,12 @@
         }
         if (window.kakao && window.kakao.maps && window.kakao.maps.event) {
           window.kakao.maps.event.preventMap();
+        }
+        if (addPointMode && addPointModeKind === POINT_CREATION_KIND_GUIDANCE) {
+          const lat = Number(mouseEvent.latLng.getLat().toFixed(7));
+          const lng = Number(mouseEvent.latLng.getLng().toFixed(7));
+          preparePointCreationAtPosition(lat, lng);
+          return;
         }
         selectPath(pathItem);
         showPathInfo(pathItem, mouseEvent.latLng);
@@ -16451,7 +16563,7 @@
 
     try {
       const selectedPoint = getPointById(selectedPointId);
-      pushUndoSnapshot();
+      let saveMessage = "정류장을 저장했습니다.";
 
       if (addPointMode) {
         if (!selectedRouteName) {
@@ -16464,18 +16576,41 @@
           createCustomPoint(lat, lng),
           addPointModeKind === POINT_CREATION_KIND_GUIDANCE
         );
+        if (point.isVirtual && (!formEls.lat.value.trim() || !formEls.lng.value.trim())) {
+          throw new Error("지도에서 경로유도점을 찍거나 위도와 경도를 입력하세요.");
+        }
+        const placement = point.isVirtual ? getGuidancePointPlacement(point.routeName, point) : null;
+        if (placement?.ambiguous) {
+          throw new Error(placement.message);
+        }
+        pushUndoSnapshot();
+        if (placement?.index != null) {
+          point.extendedData.push({ name: "guidanceOrderLocked", value: "true" });
+          placement.points.splice(placement.index, 0, point);
+        }
         customPoints = [...customPoints, point];
-        saveCustomPoints();
+        if (placement?.index != null) {
+          saveRoutePointOrder(placement.points);
+          saveMessage = `경로유도점을 ${placement.message}에 저장했습니다.`;
+        } else {
+          saveCustomPoints();
+          if (placement) {
+            saveMessage = `경로유도점을 목록 끝에 저장했습니다. ${placement.message}`;
+          }
+        }
         selectedPointId = point.id;
         selectedRouteName = point.routeName;
       } else if (selectedPoint && selectedPoint.source === "custom") {
         const index = customPoints.findIndex((point) => point.id === selectedPoint.id);
-        customPoints[index] = buildPointFromForm(customPoints[index]);
+        const updatedPoint = buildPointFromForm(customPoints[index]);
+        pushUndoSnapshot();
+        customPoints[index] = updatedPoint;
         saveCustomPoints();
         selectedPointId = customPoints[index].id;
         selectedRouteName = customPoints[index].routeName;
       } else if (selectedPoint && selectedPoint.source === "uploaded") {
         const updatedPoint = buildPointFromForm(selectedPoint);
+        pushUndoSnapshot();
         pointOverrides[selectedPoint.id] = {
           routeName: updatedPoint.routeName,
           name: updatedPoint.name,
@@ -16499,7 +16634,7 @@
       stopRelocateMode();
       setAddPointMode(false);
       refreshUI();
-      setStatus("정류장을 저장했습니다.", false);
+      setStatus(saveMessage, false);
     } catch (error) {
       setStatus(error.message, true);
     }

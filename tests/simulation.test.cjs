@@ -132,6 +132,44 @@ test('guidance waypoints are reordered by drawn path position before matching', 
   assert.equal(kakaoNames.join('|'), 'A|경로유도점 1|B|경로유도점 2|C');
 });
 
+test('a new guidance point uses the gap between nearby existing guidance points', () => {
+  const points = [
+    point(0, 0, 'A'),
+    { ...point(250, 0, 'guide 1'), isVirtual: true },
+    { ...point(650, 0, 'guide 2'), isVirtual: true },
+    point(1000, 0, 'B'),
+  ];
+  const path = [points[3], points[0]];
+  assert.equal(app.findGuidancePointInsertion(points, path, point(450, 5)).index, 2);
+  assert.match(app.findGuidancePointInsertion(points, path, point(450, 200)).warning, /150m/);
+});
+
+test('a saved return-leg guidance point keeps its position in both simulation modes', () => {
+  const start = { ...point(0, 0, 'start'), id: 'start' };
+  const turn = { ...point(1000, 0, 'turn'), id: 'turn' };
+  const terminal = { ...start, name: 'terminal', id: 'terminal' };
+  const path = [start, turn, terminal];
+  const points = [start, turn, terminal];
+  const clicked = point(500, 0, 'return guide');
+  assert.equal(app.findGuidancePointInsertion(points, path, clicked).ambiguous, true);
+  const { index } = app.findGuidancePointInsertion(points, path, clicked, turn.id);
+  assert.equal(index, 2);
+  points.splice(index, 0, {
+    ...clicked, isVirtual: true,
+    extendedData: [{ name: 'guidanceOrderLocked', value: 'true' }],
+  });
+
+  const route = { name: '왕복', points, paths: [{ coordinates: path }] };
+  const context = contextFor(route);
+  context.applyRouteSimulationCorrection = (_name, segment) => segment;
+  for (const pathMode of ['drawn', 'kakao']) {
+    const prepared = context.buildRouteTimeSimulationSegments(route.name, { pathMode });
+    const ordered = prepared.segments.flatMap((segment, index) => segment.slice(index ? 1 : 0));
+    assert.equal(ordered.map(item => item.name).join('|'), 'start|turn|return guide|terminal');
+    assert.equal(prepared.stopCount, 3);
+  }
+});
+
 test('far stops, incompatible order, and empty geometry fail explicitly', () => {
   assert.throws(() => app.matchDrawnRoutePath([point(0, 0), point(2000, 0)], [point(0, 0), point(1000, 500)]), /정류장/);
   assert.throws(() => app.matchDrawnRoutePath([point(0, 0), point(2000, 0)], [point(0, 0), point(1800, 0), point(300, 0), point(2000, 0)]), /순서/);
