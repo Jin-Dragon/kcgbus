@@ -2,12 +2,14 @@ const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { createSeoulStopRidership, parseNearbyQuery } = require("./seoul-stop-ridership");
 
 const PORT = 8080;
 const HOST = "0.0.0.0";
 const ROOT = __dirname;
 const EXPORTS_DIR = path.join(ROOT, "exports");
 const TEMP_EXPORTS_DIR = path.join(os.tmpdir(), "kml-kakao-map-autosaves");
+const seoulStopRidership = createSeoulStopRidership();
 const DEBUG_RENAME_LOG = path.join(ROOT, "rename-debug.log");
 const LOCAL_SERVER_ENV_PATH = path.join(ROOT, "server.local.env");
 const RIDERSHIP_STORE_PATH = path.join(EXPORTS_DIR, "stop-ridership.json");
@@ -1113,6 +1115,18 @@ http
     }
 
     const requestUrl = new URL(req.url || "/", `http://${host || `localhost:${PORT}`}`);
+    if (req.method === "GET" && requestUrl.pathname === "/api/stop-ridership/nearby") {
+      const query = parseNearbyQuery(requestUrl.searchParams);
+      if (!query) {
+        sendJson(res, 400, { error: "정류장 좌표와 100m·300m·500m 중 하나의 반경을 입력하세요." });
+        return;
+      }
+      seoulStopRidership.nearby(query)
+        .then((summary) => sendJson(res, 200, summary))
+        .catch((error) => sendJson(res, 503, { error: error.message }));
+      return;
+    }
+
     const urlPath = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
     const safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
     const filePath = path.join(ROOT, safePath);

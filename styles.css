@@ -542,6 +542,196 @@ h1::before {
   background: #fcfdff;
 }
 
+.population-grid-body,
+.population-grid-settings,
+.population-grid-analysis {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.population-grid-settings[hidden] {
+  display: none;
+}
+
+.population-grid-body input[type="file"] {
+  width: 100%;
+  min-width: 0;
+}
+
+.population-grid-body input[type="range"] {
+  padding: 0;
+}
+
+.population-grid-status,
+.population-grid-source,
+.population-grid-route,
+.population-grid-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.population-grid-status:empty {
+  display: none;
+}
+
+.population-grid-status.error {
+  color: #a43d19;
+}
+
+.population-grid-source {
+  white-space: pre-line;
+  font-weight: 600;
+}
+
+.population-grid-actions,
+.population-grid-legend,
+.population-grid-visibility,
+.population-grid-legend span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.population-grid-legend i {
+  width: 11px;
+  height: 11px;
+  border: 1px solid #aeb7c1;
+}
+
+.population-grid-analysis {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.population-grid-route {
+  font-weight: 700;
+}
+
+.population-grid-note {
+  color: #55677b;
+}
+
+.population-grid-info {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  padding: 6px 28px 6px 10px;
+  font-size: 12px;
+}
+
+.stop-evidence {
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.stop-evidence-radius {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.stop-evidence-radius select {
+  max-width: 96px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+}
+
+.stop-evidence-ridership > p,
+.stop-evidence-status {
+  margin: 0;
+  color: #54667b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.stop-evidence-ridership > p {
+  font-weight: 700;
+}
+
+.stop-evidence-stations summary {
+  padding: 6px 0;
+  color: #2b4a6c;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.stop-evidence-stations table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.stop-evidence-stations th,
+.stop-evidence-stations td {
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.stop-evidence-stations th:first-child {
+  width: 54%;
+  text-align: left;
+}
+
+.stop-evidence-stations small {
+  display: block;
+  margin-top: 2px;
+  color: #54667b;
+  font-size: 10px;
+  font-weight: normal;
+}
+
+.stop-evidence-station-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #205886;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.stop-evidence-station-button:disabled {
+  color: inherit;
+  text-decoration: none;
+  cursor: default;
+}
+
+.stop-evidence-stations tr:has([aria-pressed="true"]) {
+  background: #edf4fb;
+}
+
+.counted-stop-map-label {
+  display: grid;
+  gap: 3px;
+  max-width: 235px;
+  padding: 6px 26px 6px 8px;
+  font-size: 12px;
+}
+
+.counted-stop-map-label span {
+  color: #54667b;
+  font-size: 11px;
+}
+
 .route-workspace {
   margin-top: 12px;
   display: grid;

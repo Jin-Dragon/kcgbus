@@ -211,10 +211,11 @@ test('Kakao map cards keep both routes on the full request, including guide-only
 
 function loadRouteValidationServer(fetch) {
   const serverFile = require.resolve('../server.js');
+  const requireFromServer = require('node:module').createRequire(serverFile);
   const source = fs.readFileSync(serverFile, 'utf8').split(/^http\s*\.createServer/m)[0];
   const context = vm.createContext({
     __dirname: path.dirname(serverFile),
-    require: name => name === 'fs' ? { existsSync: () => false } : require(name),
+    require: name => name === 'fs' ? { existsSync: () => false } : requireFromServer(name),
     process: { env: {} }, fetch, URLSearchParams, AbortSignal,
   }, { name: 'simulation-server' });
   vm.runInContext(source, context);

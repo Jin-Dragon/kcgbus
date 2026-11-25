@@ -6,7 +6,13 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check app.js",
-    "test": "node --test tests/simulation.test.cjs tests/route-viewer.test.cjs tests/path-editor.test.cjs tests/point-counts.test.cjs tests/dwell-options.test.cjs"
+    "check": "node --check server.js && node --check app.js && node --check population-grid.js && node --check population-grid-data.js && node --check seoul-stop-ridership.js",
+    "test": "node --test tests/simulation.test.cjs tests/route-viewer.test.cjs tests/path-editor.test.cjs tests/point-counts.test.cjs tests/dwell-options.test.cjs tests/population-grid.test.cjs tests/seoul-stop-ridership.test.cjs"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "polygon-clipping": "0.15.7",
+    "proj4": "2.23.0",
+    "shpjs": "6.2.0"
   }
 }

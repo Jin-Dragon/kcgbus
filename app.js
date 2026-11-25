@@ -178,6 +178,9 @@
 
   let map = null;
   let mapReady = false;
+  let populationGridLayer = null;
+  let stopEvidenceRadius = 300;
+  let countedStopOverlay = null;
   let addPointMode = false;
   let addPointModeKind = POINT_CREATION_KIND_STOP;
   let guidanceInsertionAfterPointId = null;
@@ -1847,6 +1850,7 @@
   }
 
   function setEmptyDetails() {
+    clearCountedStopOverlay();
     pointDetailsEl.classList.add("empty");
     pointDetailsEl.innerHTML = '<p class="details-empty">노선과 정류장을 선택하세요.</p>';
   }
@@ -11983,6 +11987,7 @@
     }
     mapSearchInfoWindow = new window.kakao.maps.InfoWindow({ removable: false });
     mapReady = true;
+    populationGridLayer?.attachMap(map, window.kakao.maps);
     window.kakao.maps.event.addListener(map, "click", handleMapClick);
     window.kakao.maps.event.addListener(map, "rightclick", handleMapRightClick);
     window.kakao.maps.event.addListener(map, "mousemove", handleRoadviewPointerMove);
@@ -15117,12 +15122,131 @@
     setStatus("경로 편집 모드입니다. 점을 이동하거나 삭제한 뒤 상단의 경로 저장을 누르세요. 취소는 Esc입니다.", false);
   }
 
-  function renderPointDetails(point) {
+  function clearCountedStopOverlay() {
+    if (!countedStopOverlay) return;
+    countedStopOverlay.infoWindow.close();
+    countedStopOverlay.marker.setMap(null);
+    countedStopOverlay = null;
+  }
+
+  function showCountedStopOnMap(station) {
+    if (!mapReady || !Number.isFinite(station?.lat) || !Number.isFinite(station?.lng)) return false;
+    clearCountedStopOverlay();
+
+    const maps = window.kakao.maps;
+    const position = new maps.LatLng(station.lat, station.lng);
+    const name = station.name || `정류장 ID ${station.id}`;
+    const marker = new maps.Marker({ map, position, title: name, clickable: true, zIndex: 60 });
+    const label = document.createElement("div");
+    label.className = "counted-stop-map-label";
+    const title = document.createElement("strong");
+    title.textContent = name;
+    const detail = document.createElement("span");
+    detail.textContent = ["집계 정류장", station.arsNo ? `ARS ${station.arsNo}` : "", `${Math.round(station.distanceMeters)}m`]
+      .filter(Boolean).join(" · ");
+    label.append(title, detail);
+    const infoWindow = new maps.InfoWindow({
+      content: label, removable: true, disableAutoPan: true, zIndex: 61,
+    });
+    countedStopOverlay = { marker, infoWindow };
+    maps.event.addListener(marker, "click", () => infoWindow.open(map, marker));
+    map.panTo(position);
+    infoWindow.open(map, marker);
+    return true;
+  }
+
+  function renderStopEvidence(container, point) {
+    const radiusSelect = container.querySelector("select");
+    const populationLabel = container.querySelector(".stop-evidence-population-label");
+    const populationValue = container.querySelector(".stop-evidence-population");
+    const traffic = container.querySelector(".stop-evidence-ridership");
+    const boardingValue = container.querySelector(".stop-evidence-boarding");
+    const alightingValue = container.querySelector(".stop-evidence-alighting");
+    const status = container.querySelector(".stop-evidence-status");
+    const stationList = container.querySelector(".stop-evidence-stations");
+    const stationRows = stationList.querySelector("tbody");
+    const dailyFormat = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 1 });
+    let version = 0;
+    let stations = [];
+    let selectedStationButton = null;
+
+    stationRows.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-station-index]");
+      if (!button || !showCountedStopOnMap(stations[Number(button.dataset.stationIndex)])) return;
+      selectedStationButton?.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-pressed", "true");
+      selectedStationButton = button;
+    });
+
+    async function update() {
+      const requestVersion = ++version;
+      const radius = Number(radiusSelect.value);
+      const population = populationGridLayer?.describeStop(point, { radiusMeters: radius, wholeCircle: true });
+      populationLabel.textContent = population?.label || "고령인구 (추정)";
+      populationValue.textContent = population?.value || "고령인구 격자 파일을 불러오세요.";
+      traffic.hidden = true;
+      stationList.hidden = true;
+      status.textContent = "서울시 교통카드 자료를 조회하는 중입니다.";
+      const query = new URLSearchParams({ lat: point.lat, lng: point.lng, radius });
+      try {
+        const response = await window.fetch(`/api/stop-ridership/nearby?${query}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "승하차 자료를 조회하지 못했습니다.");
+        if (!container.isConnected || requestVersion !== version) return;
+        const month = `${result.month.slice(0, 4)}년 ${Number(result.month.slice(4))}월`;
+        if (!result.matchedStops) {
+          status.textContent = result.nearbyStops
+            ? `${month} · 주변 정류장 ${result.nearbyStops}곳의 승하차 공개값이 없습니다.`
+            : "반경 안에 서울시 정류장 자료에 등록된 정류장이 없습니다.";
+          return;
+        }
+        boardingValue.textContent = `${dailyFormat.format(result.boardingPerDay)}건/일`;
+        alightingValue.textContent = `${dailyFormat.format(result.alightingPerDay)}건/일`;
+        traffic.hidden = false;
+        status.textContent = `서울시 ${month} · 집계 정류장 ${result.matchedStops}/${result.nearbyStops}곳 · 월 합계 ÷ ${result.days}일`;
+        stations = result.stations || [];
+        stationRows.innerHTML = stations.map((station, index) => {
+          const name = station.name || `정류장 ID ${station.id}`;
+          const detail = [station.arsNo ? `ARS ${station.arsNo}` : "", `${Math.round(station.distanceMeters)}m`]
+            .filter(Boolean).join(" · ");
+          return `
+            <tr>
+              <th scope="row">
+                <button type="button" class="stop-evidence-station-button" data-station-index="${index}"
+                  aria-pressed="false" aria-describedby="counted-stop-detail-${index}" title="지도에서 보기"${Number.isFinite(station.lat) && Number.isFinite(station.lng) ? "" : " disabled"}>
+                  ${escapeHtml(name)}
+                </button>
+                <small id="counted-stop-detail-${index}">${escapeHtml(detail)}</small>
+              </th>
+              <td>${dailyFormat.format(station.boardingPerDay)}</td>
+              <td>${dailyFormat.format(station.alightingPerDay)}</td>
+            </tr>
+          `;
+        }).join("");
+        stationList.hidden = !stations.length;
+      } catch (error) {
+        if (!container.isConnected || requestVersion !== version) return;
+        status.textContent = error instanceof SyntaxError ? "승하차 자료 서버에 연결할 수 없습니다." : error.message;
+      }
+    }
+
+    radiusSelect.value = String(stopEvidenceRadius);
+    radiusSelect.addEventListener("change", () => {
+      clearCountedStopOverlay();
+      selectedStationButton = null;
+      stopEvidenceRadius = Number(radiusSelect.value);
+      void update();
+    });
+    void update();
+  }
+
+  function renderPointDetails(point, expand = true) {
     if (!point) {
       setEmptyDetails();
       return;
     }
 
+    clearCountedStopOverlay();
     const populationEstimate = estimatePointPopulation(point, 100);
     const detailKey = (label) => label.trim().toLowerCase().replace(/[\s_-]+/g, "");
     const extraDetails = new Map();
@@ -15143,7 +15267,7 @@
       "경로유도점", "ridership", "boardingcount", "passengercount", "탑승객수",
       "100m예상가구수", "100m예상인구수", "추정근거",
     ]);
-    openPointDetailsSection();
+    if (expand) openPointDetailsSection();
     pointDetailsEl.classList.remove("empty");
     const rows = [
       { label: "위도", value: String(point.lat) },
@@ -15158,6 +15282,7 @@
       { label: "100m 예상 인구수", value: `${populationEstimate.estimatedPopulation}명` },
       { label: "추정 근거", value: populationEstimate.basisText },
     ].filter((row) => row.value);
+    const isOperationalStop = !isVirtualRoutingPoint(point);
     for (const [key, detail] of extraDetails) {
       if (!hiddenExtendedDataNames.has(key)) rows.push(detail);
     }
@@ -15167,6 +15292,44 @@
         <strong>${escapeHtml(point.name)}</strong>
         <span>${escapeHtml(point.routeName || DEFAULT_ROUTE_NAME)}</span>
       </div>
+      ${isOperationalStop ? `
+        <section class="stop-evidence" aria-label="정류장 주변 통계">
+          <div class="stop-evidence-radius">
+            <strong>정류장 주변 통계</strong>
+            <select aria-label="정류장 주변 통계 직선 반경">
+              <option value="100">100m</option>
+              <option value="300">300m</option>
+              <option value="500">500m</option>
+            </select>
+          </div>
+          <dl class="detail-list">
+            <div class="detail-row">
+              <dt class="stop-evidence-population-label"></dt>
+              <dd class="stop-evidence-population"></dd>
+            </div>
+          </dl>
+          <div class="stop-evidence-ridership" hidden>
+            <p>주변 기존 정류장 승하차</p>
+            <dl class="detail-list">
+              <div class="detail-row"><dt>일평균 승차</dt><dd class="stop-evidence-boarding"></dd></div>
+              <div class="detail-row"><dt>일평균 하차</dt><dd class="stop-evidence-alighting"></dd></div>
+            </dl>
+          </div>
+          <p class="stop-evidence-status" role="status"></p>
+          <details class="stop-evidence-stations" hidden>
+            <summary>집계 정류장 목록</summary>
+            <table aria-label="정류장별 일평균 승차·하차 건수">
+              <thead>
+                <tr>
+                  <th scope="col">정류장</th>
+                  <th scope="col">승차<br>(건/일)</th>
+                  <th scope="col">하차<br>(건/일)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </details>
+        </section>` : ""}
       <dl class="detail-list">
         ${rows
           .map(
@@ -15180,6 +15343,7 @@
           .join("")}
       </dl>
     `;
+    if (isOperationalStop) renderStopEvidence(pointDetailsEl.querySelector(".stop-evidence"), point);
   }
 
   function setEmptyPathDetails() {
@@ -15556,6 +15720,7 @@
     const lng = Number(mouseEvent.latLng.getLng().toFixed(7));
     hidePathContextMenu();
     hidePointListContextMenu();
+    populationGridLayer?.closeCell();
     infoWindows.forEach((item) => item.close());
     analysisInfoWindows.forEach((item) => item.close());
     designedRouteInfoWindows.forEach((item) => item.close());
@@ -15620,6 +15785,7 @@
     }
 
     if (!addPointMode) {
+      if (populationGridLayer?.showCell(lat, lng)) return;
       if (selectedRouteName || selectedPointId || selectedPathId || selectedObservationAreaId || highlightedRouteNames.length) {
         hasClearedSelection = true;
         selectedRouteName = null;
@@ -15926,6 +16092,7 @@
     renderRouteMergePanel();
     renderVillageBusDesignPanel();
     renderObservationAreaPanel();
+    populationGridLayer?.refresh();
     renderRoutePointList();
     renderMoveRouteOptions();
     renderPoints();
@@ -17163,6 +17330,20 @@
     try {
       bindUploadEvents();
       bindFormEvents();
+      if (window.createWonderLinxPopulationGrid) {
+        populationGridLayer = window.createWonderLinxPopulationGrid({
+          getContext: () => ({
+            routes: getRoutes(),
+            selectedRoute: selectedRouteName,
+            areas: observationAreas,
+            getStops: getOperationalPointsInRoute,
+          }),
+          onChange: () => {
+            if (!addPointMode && selectedPointId) renderPointDetails(getPointById(selectedPointId), false);
+          },
+        });
+        void populationGridLayer.restore();
+      }
       setCollapsibleSectionExpanded(pointDetailsSectionEl, pointDetailsToggleEl, false);
       setCollapsibleSectionExpanded(pointFormSectionEl, pointFormToggleEl, false);
       setEmptyDetails();

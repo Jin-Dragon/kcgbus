@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WONDER Linx</title>
-  <link rel="stylesheet" href="./styles.css?v=route-bundles">
+  <link rel="stylesheet" href="./styles.css?v=counted-stop-map">
 </head>
 <body>
   <div class="app-shell">
@@ -222,6 +222,69 @@
         </div>
       </div>
 
+      <div id="population-grid-panel" class="section tool-panel" data-collapsible="true">
+        <div class="tool-panel-head">
+          <div>
+            <h3 class="tool-panel-title">공공데이터 인구 격자</h3>
+            <p class="tool-panel-subtitle">국토통계지도 ZIP으로 정류장 접근권을 분석합니다.</p>
+          </div>
+          <button class="tool-panel-toggle" type="button" aria-expanded="true">닫기</button>
+        </div>
+        <div class="tool-panel-body population-grid-body">
+          <label class="field">
+            <span>인구 격자 ZIP</span>
+            <input id="population-grid-file" type="file" accept=".zip,application/zip">
+          </label>
+          <label class="field">
+            <span>범례 파일 (.msld, 선택)</span>
+            <input id="population-grid-style" type="file" accept=".msld">
+          </label>
+          <p id="population-grid-status" class="population-grid-status" role="status"></p>
+          <div id="population-grid-settings" class="population-grid-settings" hidden>
+            <p id="population-grid-source" class="population-grid-source"></p>
+            <div class="population-grid-actions">
+              <label class="population-grid-visibility"><input id="population-grid-visible" type="checkbox" checked>격자 표시</label>
+              <button id="population-grid-focus" class="secondary-button" type="button">격자 위치로</button>
+              <button id="population-grid-remove" class="secondary-button" type="button">레이어 제거</button>
+            </div>
+            <label class="field">
+              <span>격자 불투명도</span>
+              <input id="population-grid-opacity" type="range" min="10" max="90" value="47">
+            </label>
+            <label class="field">
+              <span>지도에 표시할 내용</span>
+              <select id="population-grid-display">
+                <option value="population">인구 분포</option>
+                <option value="uncovered">선택 노선 미커버 격자</option>
+                <option value="new">비교 노선 대비 신규 커버 격자</option>
+              </select>
+            </label>
+            <div id="population-grid-legend" class="population-grid-legend" aria-label="격자 범례"></div>
+            <div class="population-grid-analysis">
+              <label class="field">
+                <span>정류장 직선 반경</span>
+                <select id="population-grid-radius">
+                  <option value="100">100m</option>
+                  <option value="300" selected>300m</option>
+                  <option value="500">500m</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>분석 구역</span>
+                <select id="population-grid-area"><option value="">업로드 구역 전체</option></select>
+              </label>
+              <label class="field">
+                <span>비교할 노선</span>
+                <select id="population-grid-comparison"><option value="">비교 노선 선택</option></select>
+              </label>
+              <p id="population-grid-route" class="population-grid-route"></p>
+              <dl id="population-grid-results" class="detail-list"></dl>
+              <p class="population-grid-note">공개값을 격자 면적 비율로 배분한 추정치입니다. 미커버 격자는 접근권 밖 면적이 남은 격자이며, 여러 정류장이 겹치는 면적은 한 번만 집계합니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="point-details-section" class="section collapsible-section is-collapsed">
         <button id="point-details-toggle" class="section-toggle" type="button" aria-expanded="false" aria-controls="point-details-body">
           <h2 class="section-title">선택한 정류장</h2>
@@ -390,6 +453,7 @@
   </div>
 
   <script src="./config.js?v=20260310b"></script>
-  <script src="./app.js?v=route-bundles"></script>
+  <script src="./population-grid.js?v=stop-evidence"></script>
+  <script src="./app.js?v=counted-stop-map"></script>
 </body>
 </html>
